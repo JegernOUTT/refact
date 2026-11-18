@@ -29,7 +29,7 @@ const preloadedState: Partial<RootState> = {
     dev: true,
     engineServed: false,
     apiKey: null,
-    features: { statistics: true, vecdb: true, ast: true, images: true },
+    features: { statistics: true, ast: true, images: true },
     themeProps: { appearance: "dark" },
     shiftEnterToSubmit: false,
   },

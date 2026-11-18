@@ -1667,9 +1667,6 @@ const caps: CapsResponse = {
       ),
   },
   code_chat_default_system_prompt: "",
-  completion_models: {},
-  completion_default_model: "",
-  code_completion_n_ctx: 8192,
   endpoint_chat_passthrough: "",
   endpoint_style: "openai",
   endpoint_template: "",
@@ -2600,7 +2597,7 @@ const preloadedState: Partial<RootState> = {
     dev: true,
     engineServed: false,
     apiKey: null,
-    features: { statistics: true, vecdb: true, ast: true, images: true },
+    features: { statistics: true, ast: true, images: true },
     themeProps: {
       appearance:
         new URLSearchParams(window.location.search).get("theme") === "light"

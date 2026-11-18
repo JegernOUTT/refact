@@ -2,6 +2,7 @@ pub mod action_execution;
 pub mod action_recovery;
 pub mod actor;
 pub mod artifacts;
+pub(crate) mod attribution;
 pub mod autonomous_workflows;
 pub mod briefing;
 pub mod chat_reactions;
@@ -57,6 +58,8 @@ pub(crate) mod workflow_deliverables;
 pub(crate) mod workflow_display;
 pub mod workflows;
 
+#[cfg(test)]
+mod multi_root_tests;
 #[cfg(test)]
 mod operator_integration_tests;
 #[cfg(test)]

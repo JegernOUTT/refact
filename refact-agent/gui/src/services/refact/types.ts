@@ -1995,20 +1995,6 @@ export function areAllFieldsBoolean(
   );
 }
 
-export type VecDbMemoRecord = {
-  memid: string;
-  thevec?: number[];
-  distance?: number;
-  m_type: string;
-  m_goal: string;
-  m_project: string;
-  m_payload: string;
-  m_origin: string;
-  mstat_correct: number;
-  mstat_relevant: number;
-  mstat_times_used: number;
-};
-
 export type KnowledgeMemoRecord = {
   memid: string;
   tags: string[];
@@ -2405,19 +2391,6 @@ export type SecurityFinding = {
   snippet: string;
 };
 
-export type VecDbStatus = {
-  files_unprocessed: number;
-  files_total: number;
-  requests_made_since_start: number;
-  vectors_made_since_start: number;
-  db_size: number;
-  db_cache_size: number;
-  state: "starting" | "parsing" | "done" | "cooldown";
-  queue_additions: boolean;
-  vecdb_max_files_hit: boolean;
-  vecdb_errors: Record<string, number>;
-};
-
 export type CodeGraphState = "turned_off" | "indexing" | "working" | "error";
 
 export type CodeGraphCounts = {
@@ -2437,9 +2410,6 @@ export type CodeGraphStatus = {
 export type RagStatus = {
   ast: Record<string, unknown> | null;
   ast_alive: string;
-  vecdb: VecDbStatus | null;
-  vecdb_alive: string;
-  vec_db_error: string;
   codegraph: CodeGraphStatus | null;
   codegraph_alive: string;
   codegraph_error: string;
@@ -2474,64 +2444,11 @@ export function isCodeGraphStatus(value: unknown): value is CodeGraphStatus {
   );
 }
 
-export function isVecDbStatus(obj: unknown): obj is VecDbStatus {
-  if (!obj) return false;
-  if (typeof obj !== "object") return false;
-  if (
-    !("files_unprocessed" in obj) ||
-    typeof obj.files_unprocessed !== "number"
-  ) {
-    return false;
-  }
-  if (!("files_total" in obj) || typeof obj.files_total !== "number") {
-    return false;
-  }
-  if (
-    !("requests_made_since_start" in obj) ||
-    typeof obj.requests_made_since_start !== "number"
-  ) {
-    return false;
-  }
-  if (
-    !("vectors_made_since_start" in obj) ||
-    typeof obj.vectors_made_since_start !== "number"
-  ) {
-    return false;
-  }
-  if (!("db_size" in obj) || typeof obj.db_size !== "number") {
-    return false;
-  }
-  if (!("db_cache_size" in obj) || typeof obj.db_cache_size !== "number") {
-    return false;
-  }
-
-  if (!("state" in obj) || typeof obj.state !== "string") {
-    return false;
-  }
-  if (!("queue_additions" in obj) || typeof obj.queue_additions !== "boolean") {
-    return false;
-  }
-  if (
-    !("vecdb_max_files_hit" in obj) ||
-    typeof obj.vecdb_max_files_hit !== "boolean"
-  ) {
-    return false;
-  }
-  if (!("vecdb_errors" in obj) || typeof obj.vecdb_errors !== "object") {
-    return false;
-  }
-
-  return true;
-}
-
 export function isRagStatus(value: unknown): value is RagStatus {
   if (!isRecord(value)) return false;
   return (
     (value.ast === null || isRecord(value.ast)) &&
     typeof value.ast_alive === "string" &&
-    (value.vecdb === null || isVecDbStatus(value.vecdb)) &&
-    typeof value.vecdb_alive === "string" &&
-    typeof value.vec_db_error === "string" &&
     (value.codegraph === null || isCodeGraphStatus(value.codegraph)) &&
     typeof value.codegraph_alive === "string" &&
     typeof value.codegraph_error === "string"

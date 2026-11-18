@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::file_filter::KNOWLEDGE_FOLDER_NAME;
-use crate::files_correction::{canonicalize_normalized_path, get_project_dirs};
+use crate::files_correction::get_project_dirs;
 use crate::app_state::AppState;
 use crate::git::operations::{
     GitCoChangePair, GitCommitClassification, GitCommitSummary, GitFileChangeStatus,
@@ -242,10 +242,8 @@ const MAX_GIT_MEMORY_OPS: usize = 80;
 const MAX_GIT_MEMORY_PATHS: usize = 12;
 const MAX_GIT_CREATE_OPS_PER_KIND: usize = 8;
 pub const MEMORY_OP_EXACT_DUPLICATE_REASON: &str = "exact content_hash duplicate";
-pub const MEMORY_OP_NEAR_DUPLICATE_REASON: &str = "vecdb near-duplicate on write";
 pub const MEMORY_OP_AUTO_APPLY_MIN_CONFIDENCE: f32 = 0.94;
 const MEMORY_OP_AUTO_APPLY_MIN_ALPHABETIC_CHARS: usize = 12;
-const NEAR_DUPLICATE_MAX_DISTANCE: f32 = 0.10;
 
 impl MemoryDocSnapshot {
     pub fn from_knowledge_doc(doc: &KnowledgeDoc) -> Self {
@@ -1193,93 +1191,6 @@ pub async fn load_memory_doc_snapshots_from_knowledge_dirs(
     docs
 }
 
-pub async fn propose_supersede_for_near_duplicate(
-    gcx: std::sync::Arc<crate::global_context::GlobalContext>,
-    new_path: &Path,
-) -> Option<MemoryLifecycleOp> {
-    let text = tokio::fs::read_to_string(new_path).await.ok()?;
-    let (frontmatter, body_start) = KnowledgeFrontmatter::parse(&text);
-    if frontmatter.is_archived() || frontmatter.is_deprecated() {
-        return None;
-    }
-    let body = text.get(body_start..).unwrap_or("");
-    let mut knowledge_dirs: Vec<PathBuf> = get_project_dirs(gcx.clone())
-        .await
-        .into_iter()
-        .map(|dir| dir.join(KNOWLEDGE_FOLDER_NAME))
-        .collect();
-    knowledge_dirs.push(get_global_knowledge_dir(gcx.clone()).await);
-    let new_path = canonicalize_normalized_path(new_path.to_path_buf());
-    if !knowledge_dirs.iter().any(|dir| new_path.starts_with(dir)) {
-        return None;
-    }
-    let vecdb_arc = gcx.vec_db.clone();
-    let vecdb = vecdb_arc.lock().await.clone()?;
-    let query: String = body.chars().take(2000).collect();
-    if query.trim().is_empty() {
-        return None;
-    }
-    let embedding = vecdb.embed_query(&query).await.ok()?;
-    let mut hits = Vec::new();
-    for kd in &knowledge_dirs {
-        let prefix = if kd.to_string_lossy().ends_with(std::path::MAIN_SEPARATOR) {
-            kd.to_string_lossy().to_string()
-        } else {
-            format!("{}{}", kd.to_string_lossy(), std::path::MAIN_SEPARATOR)
-        };
-        let filter = format!("(scope LIKE '{}%')", prefix.replace('"', "\\\""));
-        if let Ok(mut res) = vecdb
-            .vecdb_search_with_embedding(&embedding, 8, Some(filter))
-            .await
-        {
-            hits.append(&mut res);
-        }
-    }
-    hits.sort_by(|a, b| a.distance.total_cmp(&b.distance));
-    let mut hit = None;
-    for rec in hits {
-        let rec_file_path = canonicalize_normalized_path(rec.file_path.clone());
-        if rec.distance > NEAR_DUPLICATE_MAX_DISTANCE
-            || !is_memory_doc_path(&rec_file_path)
-            || !knowledge_dirs
-                .iter()
-                .any(|dir| rec_file_path.starts_with(dir))
-            || rec_file_path
-                .components()
-                .any(|c| c.as_os_str() == "trajectories")
-            || rec_file_path == new_path
-        {
-            continue;
-        }
-        hit = Some(rec);
-        break;
-    }
-    let hit = hit?;
-    let existing_text = tokio::fs::read_to_string(&hit.file_path).await.ok()?;
-    let (existing_frontmatter, existing_body_start) = KnowledgeFrontmatter::parse(&existing_text);
-    if existing_frontmatter.is_archived()
-        || existing_frontmatter.is_deprecated()
-        || existing_frontmatter.is_pinned()
-    {
-        return None;
-    }
-    let existing_body = existing_text
-        .get(existing_body_start..)
-        .unwrap_or("")
-        .to_string();
-    let new_doc = MemoryDocSnapshot::from_parts(new_path, frontmatter, body.to_string());
-    let existing_doc =
-        MemoryDocSnapshot::from_parts(hit.file_path, existing_frontmatter, existing_body);
-    let docs = vec![new_doc, existing_doc];
-    build_merge_candidate(
-        &docs,
-        &[0, 1],
-        MEMORY_OP_NEAR_DUPLICATE_REASON,
-        0.85,
-        Utc::now(),
-    )
-}
-
 pub async fn find_memory_by_source(
     gcx: std::sync::Arc<crate::global_context::GlobalContext>,
     source: MemorySource,
@@ -2088,20 +1999,6 @@ async fn apply_create_memory(
         )));
     }
     let path = outcome.path().clone();
-    if let Some(supersede_op) = propose_supersede_for_near_duplicate(gcx.gcx.clone(), &path).await {
-        let roots = get_project_dirs(gcx.gcx.clone()).await;
-        if let Some(project_root) = roots
-            .iter()
-            .find(|root| path.starts_with(root))
-            .or_else(|| roots.first())
-        {
-            if let Err(err) =
-                crate::buddy::storage::enqueue_memory_op(project_root, supersede_op).await
-            {
-                tracing::warn!("failed to enqueue near-duplicate memory op: {}", err);
-            }
-        }
-    }
     Ok(MemoryApplyOutcome::applied(vec![path]))
 }
 

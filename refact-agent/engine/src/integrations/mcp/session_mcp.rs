@@ -23,8 +23,6 @@ use crate::integrations::sessions::IntegrationSession;
 use crate::integrations::process_io_utils::read_file_with_cursor;
 use super::mcp_sampling::mcp_sampling_create_message;
 use super::mcp_metrics::SharedMetrics;
-#[cfg(test)]
-use super::mcp_metrics::new_shared_metrics;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "status", rename_all = "snake_case")]
@@ -604,7 +602,6 @@ impl ClientHandler for McpClientHandler {
         let logs = self.logs.clone();
         let debug_name = self.debug_name.clone();
         let request_timeout = self.request_timeout;
-        let gcx = self.gcx.clone();
         let handle_arc = self.resource_refresh_handle.clone();
         async move {
             if self.restricted {
@@ -674,7 +671,7 @@ impl ClientHandler for McpClientHandler {
                     }
                 };
 
-                let (old_count, config_path) = {
+                let old_count = {
                     if !refresh_is_current(
                         &refresh_session_arc,
                         &refresh_handle_arc,
@@ -694,7 +691,7 @@ impl ClientHandler for McpClientHandler {
                     }
                     let old_count = session_downcasted.mcp_resources.len();
                     session_downcasted.mcp_resources = new_resources.clone();
-                    (old_count, session_downcasted.config_path.clone())
+                    old_count
                 };
 
                 let msg = format!(
@@ -704,51 +701,6 @@ impl ClientHandler for McpClientHandler {
                 );
                 tracing::info!("{} for {}", msg, debug_name);
                 add_log_entry(logs.clone(), msg).await;
-
-                if !refresh_is_current(
-                    &refresh_session_arc,
-                    &refresh_handle_arc,
-                    RefreshKind::Resource,
-                )
-                .await
-                {
-                    return;
-                }
-                if !new_resources.is_empty() {
-                    let mut session_locked = session_arc.lock().await;
-                    if let Some(mcp_session) =
-                        session_locked.as_any_mut().downcast_mut::<SessionMCP>()
-                    {
-                        if mcp_session.connection_status != MCPConnectionStatus::Connected {
-                            return;
-                        }
-                        let index_task = tokio::spawn(super::mcp_resources::index_mcp_resources(
-                            gcx,
-                            config_path,
-                            peer,
-                            new_resources,
-                            logs,
-                        ));
-                        if let Some(previous) = mcp_session
-                            .resource_index_task
-                            .replace(index_task.abort_handle())
-                        {
-                            previous.abort();
-                        }
-                    }
-                } else {
-                    let mut session_locked = session_arc.lock().await;
-                    if let Some(mcp_session) =
-                        session_locked.as_any_mut().downcast_mut::<SessionMCP>()
-                    {
-                        if mcp_session.connection_status != MCPConnectionStatus::Connected {
-                            return;
-                        }
-                        if let Some(previous) = mcp_session.resource_index_task.take() {
-                            previous.abort();
-                        }
-                    }
-                }
             });
             *handle = Some(task.abort_handle());
         }
@@ -886,9 +838,6 @@ pub struct SessionMCP {
     pub auth_manager: Option<Arc<AMutex<AuthorizationManager>>>,
     pub auth_status: MCPAuthStatus,
     pub oauth_refresh_task_handle: Option<AbortHandle>,
-    /// Vectorization of the server's MCP resources runs in this owned task;
-    /// aborted on stop/reconfigure so it never outlives the session.
-    pub resource_index_task: Option<AbortHandle>,
     pub oauth_probe: Option<super::mcp_auth::MCPAuthProbeResult>,
     pub sampling_session_approved: bool,
     pub active_progress: Vec<MCPProgressInfo>,
@@ -917,7 +866,6 @@ impl IntegrationSession for SessionMCP {
                 startup_task_handles,
                 health_task_handle,
                 oauth_refresh_task_handle,
-                resource_index_task,
                 recovery_task,
                 stderr_file,
             ) = {
@@ -937,7 +885,6 @@ impl IntegrationSession for SessionMCP {
                     session_downcasted.startup_task_handles.clone(),
                     session_downcasted.health_task_handle.take(),
                     session_downcasted.oauth_refresh_task_handle.clone(),
-                    session_downcasted.resource_index_task.take(),
                     session_downcasted.recovery_task.take(),
                     session_downcasted.stderr_file_path.clone(),
                 )
@@ -951,10 +898,6 @@ impl IntegrationSession for SessionMCP {
             }
 
             if let Some(abort_handle) = oauth_refresh_task_handle {
-                abort_handle.abort();
-            }
-
-            if let Some(abort_handle) = resource_index_task {
                 abort_handle.abort();
             }
 
@@ -1282,7 +1225,6 @@ impl SessionMCP {
             auth_manager: None,
             auth_status: MCPAuthStatus::NotApplicable,
             oauth_refresh_task_handle: None,
-            resource_index_task: None,
             oauth_probe: None,
             sampling_session_approved: false,
             active_progress: Vec::new(),

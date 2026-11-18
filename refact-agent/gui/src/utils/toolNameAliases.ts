@@ -10,7 +10,6 @@ const CC_TOOL_ALIASES: Partial<Record<string, string>> = {
   apply: "apply_patch",
   add_workspace: "add_workspace_folder",
   symbol_def: "search_symbol_definition",
-  semantic_search: "search_semantic",
   regex_search: "search_pattern",
   glob: "glob",
   delegate: "subagent",

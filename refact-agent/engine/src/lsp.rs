@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::fmt::Display;
 use std::sync::atomic::Ordering;
 use std::path::PathBuf;
@@ -14,14 +13,9 @@ use tower_lsp::lsp_types::*;
 use tower_lsp::{ClientSocket, LanguageServer, LspService};
 use tracing::{error, info};
 
-use crate::call_validation::{
-    CodeCompletionInputs, CodeCompletionPost, CursorPosition, SamplingParameters,
-};
 use crate::files_in_workspace;
 use crate::files_in_workspace::{on_did_change, on_did_delete};
-use crate::app_state::AppState;
 use crate::global_context::{CommandLine, GlobalContext};
-use crate::http::routers::v1::code_completion::handle_v1_code_completion;
 
 const VERSION: &str = crate::version::VERSION;
 
@@ -54,20 +48,6 @@ impl Drop for LspTcpClientGuard {
     fn drop(&mut self) {
         self.gcx.lsp_tcp_client_count.fetch_sub(1, Ordering::SeqCst);
     }
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct RequestParams {
-    pub max_new_tokens: u32,
-    pub temperature: f32,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct CompletionParams1 {
-    #[serde(flatten)]
-    pub text_document_position: TextDocumentPositionParams,
-    pub parameters: RequestParams,
-    pub multiline: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -151,7 +131,7 @@ impl RejectedWorkspaceRoot {
                 holder,
             } => format!(
                 "Refact: another Refact engine ({holder}) already serves the workspace folder {}. \
-                 This window will not index that folder, so completions and chat context for it \
+                 This window will not index that folder, so chat context for it \
                  stay unavailable. Close the other editor window on this project, or start the \
                  engine with --allow-shared-workspace to serve it anyway.",
                 self.root.display()
@@ -160,7 +140,7 @@ impl RejectedWorkspaceRoot {
                 error,
             } => format!(
                 "Refact: could not take the workspace lease for the folder {} ({error}). This \
-                 window will not index that folder, so completions and chat context for it stay \
+                 window will not index that folder, so chat context for it stay \
                  unavailable.",
                 self.root.display()
             ),
@@ -314,92 +294,11 @@ pub(crate) fn apply_workspace_root_changes(
 }
 
 #[derive(Debug, Deserialize, Serialize, Default)]
-pub struct Choice {
-    pub index: u32,
-    pub code_completion: String,
-    pub finish_reason: String,
-}
-
-#[derive(Debug, Deserialize, Serialize, Default)]
-pub struct CompletionRes {
-    pub choices: Vec<Choice>,
-    pub cached: Option<bool>,
-    pub model: String,
-    pub created: Option<f32>,
-}
-
-#[derive(Debug, Deserialize, Serialize, Default)]
 pub struct SuccessRes {
     pub success: bool,
 }
 
 impl LspBackend {
-    async fn flat_params_to_code_completion_post(
-        &self,
-        params: &CompletionParams1,
-    ) -> Result<CodeCompletionPost> {
-        let path = canonical_path_from_file_uri_required(
-            &params.text_document_position.text_document.uri,
-            "text_document.uri",
-        )?;
-        let memory_document_map = { self.gcx.documents_state.memory_document_map.clone() };
-        let doc = memory_document_map
-            .lock()
-            .await
-            .get(&path)
-            .cloned()
-            .ok_or_else(|| internal_error("document not found"))?;
-        let mut doc_snapshot = doc.write().await;
-        let txt = crate::files_in_workspace::get_document_text_or_read_from_disk(
-            &mut doc_snapshot,
-            self.gcx.clone(),
-        )
-        .await
-        .map_err(internal_error)?;
-        let path_string = path.to_string_lossy().to_string();
-        Ok(CodeCompletionPost {
-            inputs: CodeCompletionInputs {
-                sources: HashMap::from([(path_string.clone(), (&txt).to_string())]),
-                cursor: CursorPosition {
-                    file: path_string.clone(),
-                    line: params.text_document_position.position.line as i32,
-                    character: params.text_document_position.position.character as i32,
-                },
-                multiline: params.multiline,
-            },
-            parameters: SamplingParameters {
-                max_new_tokens: params.parameters.max_new_tokens as usize,
-                temperature: Option::from(params.parameters.temperature),
-                ..Default::default()
-            },
-            model: "".to_string(),
-            stream: false,
-            no_cache: false,
-            use_ast: false,
-            use_vecdb: false,
-            rag_tokens_n: 0,
-        })
-    }
-
-    pub async fn get_completions(&self, params: CompletionParams1) -> Result<CompletionRes> {
-        let mut post = self.flat_params_to_code_completion_post(&params).await?;
-
-        let app = AppState::from_gcx(self.gcx.clone()).await;
-        let res = handle_v1_code_completion(app, &mut post)
-            .await
-            .map_err(|e| internal_error(e))?;
-
-        let body_bytes = hyper::body::to_bytes(res.into_body())
-            .await
-            .map_err(|e| internal_error(e))?;
-
-        let s = String::from_utf8(body_bytes.to_vec()).map_err(|e| internal_error(e))?;
-        let value =
-            serde_json::from_str::<CompletionRes>(s.as_str()).map_err(|e| internal_error(e))?;
-
-        Ok(value)
-    }
-
     pub async fn set_active_document(&self, params: ChangeActiveFile) -> Result<SuccessRes> {
         let path = canonical_path_from_file_uri_required(&params.uri, "uri")?;
         info!(
@@ -508,16 +407,6 @@ impl LanguageServer for LspBackend {
             });
         }
 
-        let completion_options: CompletionOptions;
-        completion_options = CompletionOptions {
-            resolve_provider: Some(false),
-            trigger_characters: Some(vec![".(".to_owned()]),
-            all_commit_characters: None,
-            work_done_progress_options: WorkDoneProgressOptions {
-                work_done_progress: Some(false),
-            },
-            completion_item: None,
-        };
         let file_filter = FileOperationRegistrationOptions {
             filters: vec![FileOperationFilter {
                 scheme: None,
@@ -541,7 +430,6 @@ impl LanguageServer for LspBackend {
                 text_document_sync: Some(TextDocumentSyncCapability::Kind(
                     TextDocumentSyncKind::FULL,
                 )),
-                completion_provider: Some(completion_options),
                 workspace: Some(WorkspaceServerCapabilities {
                     workspace_folders: Some(WorkspaceFoldersServerCapabilities {
                         supported: Some(true),
@@ -640,11 +528,6 @@ impl LanguageServer for LspBackend {
             .send("LSP SHUTDOWN".to_string())
             .unwrap();
         Ok(())
-    }
-
-    async fn completion(&self, _: CompletionParams) -> Result<Option<CompletionResponse>> {
-        info!("LSP asked for popup completions");
-        Ok(Some(CompletionResponse::Array(vec![])))
     }
 
     async fn did_change_workspace_folders(&self, params: DidChangeWorkspaceFoldersParams) {
@@ -953,7 +836,25 @@ mod tests {
         let response_b = send_initialize(&mut client_b, 2).await;
         assert_eq!(response_b.get("id").and_then(Value::as_u64), Some(2));
         assert!(response_b.get("result").is_some());
+        assert!(response_b["result"]["capabilities"]
+            .get("completionProvider")
+            .is_none());
         send_initialized(&mut client_b).await;
+        for (id, method) in [
+            (90, "refact/getCompletions"),
+            (91, "textDocument/completion"),
+        ] {
+            write_lsp_message(
+                &mut client_b,
+                json!({
+                    "jsonrpc":"2.0", "id":id, "method":method,
+                    "params":{"textDocument":{"uri":Url::from_file_path(&file_b).unwrap()},"position":{"line":0,"character":0}}
+                }),
+            )
+            .await;
+            let response = read_lsp_response(&mut client_b, id).await;
+            assert_eq!(response["error"]["code"], -32601, "{response}");
+        }
         send_did_open_and_change(&mut client_b, &file_b, "fn from_b() {}\n").await;
         wait_for_document_text(&gcx, &file_b, "fn from_b() {}\n").await;
 
@@ -1155,7 +1056,6 @@ async fn build_lsp_service(
         client,
         transport,
     })
-    .custom_method("refact/getCompletions", LspBackend::get_completions)
     .custom_method("refact/setActiveDocument", LspBackend::set_active_document)
     .finish();
     (lsp_service, socket)

@@ -155,12 +155,6 @@ const NEW_LIMIT_FIELDS: {
     label: "Hist search preview chars",
   },
   {
-    name: "vecdb_trajectory_split_bytes",
-    group: "Search and history",
-    value: 32768,
-    label: "Vecdb trajectory split bytes",
-  },
-  {
     name: "planner_qna_question_limit",
     group: "Search and history",
     value: 24,

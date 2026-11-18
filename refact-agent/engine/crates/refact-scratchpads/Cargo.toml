@@ -5,10 +5,7 @@ edition = "2021"
 
 [dependencies]
 refact-core = { path = "../refact-core" }
-refact-codegraph = { path = "../refact-codegraph" }
 refact-postprocessing = { path = "../refact-postprocessing" }
-async-trait.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
-ropey.workspace = true
 tokenizers.workspace = true

@@ -35,7 +35,6 @@ export async function on_cursor_moved(editor: vscode.TextEditor, pos: vscode.Pos
     let is_empty = selection.anchor.line === selection.active.line && selection.anchor.character === selection.active.character;
     if (!is_empty && !state.diff_changing_doc) {
         state.diff_lens_pos = Number.MAX_SAFE_INTEGER;
-        state.completion_lens_pos = Number.MAX_SAFE_INTEGER;
         codeLens.quick_refresh();
         estate.switch_mode(state, estate.Mode.Normal);  // dislike_and_rollback(editor) inside
     }
@@ -338,7 +337,6 @@ export async function dislike_and_rollback(editor: vscode.TextEditor)
     }
     state.diff_changing_doc = true;
     state.diff_lens_pos = Number.MAX_SAFE_INTEGER;
-    state.completion_lens_pos = Number.MAX_SAFE_INTEGER;
     codeLens.quick_refresh();
     await editor.edit((e) => {
         if (!state) {
@@ -374,7 +372,6 @@ export async function like_and_accept(editor: vscode.TextEditor)
     }
     state.diff_changing_doc = true;
     state.diff_lens_pos = Number.MAX_SAFE_INTEGER;
-    state.completion_lens_pos = Number.MAX_SAFE_INTEGER;
     codeLens.quick_refresh();
     let thenable = editor.edit((e) => {
         if (!state) {
@@ -426,7 +423,6 @@ export function hands_off_dont_remove_anything(editor: vscode.TextEditor)
         return;
     }
     state.diff_lens_pos = Number.MAX_SAFE_INTEGER;
-    state.completion_lens_pos = Number.MAX_SAFE_INTEGER;
     codeLens.quick_refresh();
     _remove_decoration(editor);
 }

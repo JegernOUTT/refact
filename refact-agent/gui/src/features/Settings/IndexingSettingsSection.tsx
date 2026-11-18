@@ -49,9 +49,6 @@ function IndexingStatus() {
   const { data, error, isLoading } = useGetRagStatusQuery(undefined, {
     pollingInterval: visible ? 3000 : 0,
   });
-  const vecErrors = data?.vecdb
-    ? Object.entries(data.vecdb.vecdb_errors).filter(([, count]) => count > 0)
-    : [];
   const codeGraphError = data?.codegraph?.error ?? data?.codegraph_error;
 
   if (isLoading) {
@@ -66,7 +63,6 @@ function IndexingStatus() {
   }
 
   const codeGraphState = data.codegraph?.state ?? data.codegraph_alive;
-  const vecDbState = data.vecdb?.state ?? data.vecdb_alive;
 
   return (
     <div className={styles.statusGrid}>
@@ -90,40 +86,6 @@ function IndexingStatus() {
           <p className={styles.error} role="alert">
             {codeGraphError}
           </p>
-        ) : null}
-      </div>
-      <div className={styles.statusCard}>
-        <div className={styles.statusHeading}>
-          <strong>VecDB</strong>
-          <StatusBadge
-            status={vecDbState || "idle"}
-            label={vecDbState || "Unavailable"}
-            tone={statusTone(vecDbState)}
-          />
-        </div>
-        <p className={styles.muted}>
-          {data.vecdb
-            ? `${data.vecdb.files_unprocessed} of ${data.vecdb.files_total} files remaining`
-            : "No VecDB details reported."}
-        </p>
-        {data.vecdb?.vecdb_max_files_hit ? (
-          <p className={styles.warning}>
-            The runtime maximum file limit was reached.
-          </p>
-        ) : null}
-        {data.vec_db_error ? (
-          <p className={styles.error} role="alert">
-            {data.vec_db_error}
-          </p>
-        ) : null}
-        {vecErrors.length > 0 ? (
-          <ul className={styles.errorList} aria-label="VecDB errors">
-            {vecErrors.map(([message, count]) => (
-              <li key={message}>
-                {message} ({count})
-              </li>
-            ))}
-          </ul>
         ) : null}
       </div>
     </div>
@@ -329,8 +291,8 @@ export const IndexingSettingsSection: React.FC = () => {
           }
         />
         <p className={styles.note}>
-          AST and VecDB limits are managed by the host/runtime and are not
-          configured here.
+          AST limits are managed by the host/runtime and are not configured
+          here.
         </p>
         {saveError ? (
           <p className={styles.error} role="alert">

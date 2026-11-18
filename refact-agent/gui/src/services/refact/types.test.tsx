@@ -4,13 +4,13 @@ import { isAssistantDelta, isRagStatus, isToolCallDelta } from "./types";
 const TOOL_DELTAS = [
   // Refact
   {
-    content: "performed vecdb search for query: frog",
+    content: "performed search for query: frog",
     role: "tool",
     tool_call_id: "call_xv5LsVa25XcPsF4L28kOZKxt",
     tool_calls: null,
   },
   {
-    content: "performed vecdb search for query: frog.Frog",
+    content: "performed search for query: frog.Frog",
     role: "tool",
     tool_call_id: "call_BFtgiaVtfBMCKLw3cNJghhpj",
     tool_calls: null,
@@ -153,9 +153,6 @@ describe("type-guards", () => {
       isRagStatus({
         ast: null,
         ast_alive: "turned_off",
-        vecdb: null,
-        vecdb_alive: "turned_off",
-        vec_db_error: "",
         codegraph: {
           counts: { nodes: 12, edges: 8, files: 3, fts_docs: 3 },
           queued: 1,
@@ -168,7 +165,7 @@ describe("type-guards", () => {
     ).toBe(true);
   });
 
-  test("isRagStatus rejects invalid codegraph state", () => {
+  test("isRagStatus tolerates inert legacy vecdb fields", () => {
     expect(
       isRagStatus({
         ast: null,
@@ -176,6 +173,18 @@ describe("type-guards", () => {
         vecdb: null,
         vecdb_alive: "turned_off",
         vec_db_error: "",
+        codegraph: null,
+        codegraph_alive: "turned_off",
+        codegraph_error: "",
+      }),
+    ).toBe(true);
+  });
+
+  test("isRagStatus rejects invalid codegraph state", () => {
+    expect(
+      isRagStatus({
+        ast: null,
+        ast_alive: "turned_off",
         codegraph: {
           counts: { nodes: 12, edges: 8, files: 3, fts_docs: 3 },
           queued: 1,

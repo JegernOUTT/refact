@@ -1,11 +1,7 @@
 import type { RootState } from "../../app/store";
 import { CAPS_URL } from "./consts";
 import { createApi, fetchBaseQuery } from "@reduxjs/toolkit/query/react";
-import type {
-  CodeChatModel,
-  CodeCompletionModel,
-  EmbeddingModel,
-} from "./models";
+import type { CodeChatModel } from "./models";
 import { buildApiUrlFromState } from "./apiUrl";
 import type { ModelPricing } from "./providers";
 
@@ -78,10 +74,6 @@ export type CapsResponse = {
   chat_default_model: string;
   chat_models: Record<string, CodeChatModel>;
   code_chat_default_system_prompt: string;
-  completion_models: Record<string, CodeCompletionModel>;
-  completion_default_model: string;
-  code_completion_n_ctx: number;
-  embedding_model?: EmbeddingModel;
   chat_model_2: string;
   task_planner_agent_model: string;
   chat_thinking_model: string;

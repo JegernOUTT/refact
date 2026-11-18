@@ -2,7 +2,6 @@
 import * as vscode from 'vscode';
 import * as interactiveDiff from "./interactiveDiff";
 import * as codeLens from "./codeLens";
-import * as completionProvider from "./completionProvider";
 import * as fetchAPI from "./fetchAPI";
 
 export let global_intent: string = "Fix";
@@ -30,8 +29,6 @@ export class ApiFields {
     public cursor_pos1: number = 0;
     public de_facto_model: string = "";
     public results: { [key: string]: string } = {}; // filled for diff
-    public grey_text_explicitly: string = "";       // filled for completion
-    public grey_text_edited: string = "";           // user changed something within completion
     public messages: [string, string][] = [];       // filled for chat
     public ts_req: number = 0;
     public ts_presented: number = 0;
@@ -65,9 +62,6 @@ export class StateOfEditor {
     public diffAddedLines: number[] = [];
 
     public diff_lens_pos: number = Number.MAX_SAFE_INTEGER;
-    public completion_lens_pos: number = Number.MAX_SAFE_INTEGER;
-    public completion_longthink: number = 0;
-    public completion_reset_on_cursor_movement: boolean = false;
 
     public showing_diff_modif_doc: string | undefined;
     public showing_diff_move_cursor: boolean = false;
@@ -259,7 +253,6 @@ export function keyboard_events_on(editor: vscode.TextEditor)
     }
 
     state.cursor_move_event = vscode.window.onDidChangeTextEditorSelection(async (ev: vscode.TextEditorSelectionChangeEvent) => {
-        completionProvider.on_cursor_moved();
         let is_mouse = ev.kind === vscode.TextEditorSelectionChangeKind.Mouse;
         let ev_editor = ev.textEditor;
         let pos1 = ev_editor.selection.active;
@@ -268,14 +261,8 @@ export function keyboard_events_on(editor: vscode.TextEditor)
             return;
         }
         await interactiveDiff.on_cursor_moved(editor, pos1, is_mouse);
-        if (state && state.completion_reset_on_cursor_movement) {
-            state.completion_lens_pos = Number.MAX_SAFE_INTEGER;
-            state.completion_longthink = 0;
-            codeLens.quick_refresh();
-        }
     });
     state.text_edited_event = vscode.workspace.onDidChangeTextDocument((ev: vscode.TextDocumentChangeEvent) => {
-        completionProvider.on_text_edited();
         let doc = ev.document;
         let ev_doc = editor.document;
         if (doc !== ev_doc) {
@@ -315,7 +302,6 @@ export function on_text_edited(editor: vscode.TextEditor)
         interactiveDiff.hands_off_dont_remove_anything(editor);
         state.highlight_json_backup = undefined;
         state.diff_lens_pos = Number.MAX_SAFE_INTEGER;
-        state.completion_lens_pos = Number.MAX_SAFE_INTEGER;
         // state.area2cache.clear();
         switch_mode(state, Mode.Normal);
     } else if (state._mode === Mode.Highlight) {
@@ -336,7 +322,6 @@ function on_change_active_editor(editor: vscode.TextEditor | undefined)
         if (!state_stored) {
             let state = state_of_editor(editor, "change_active");
             if (state) {
-                // this does almost nothing, but the state will be there for inline completion to pick up
                 switch_mode(state, Mode.Normal);
             }
         }

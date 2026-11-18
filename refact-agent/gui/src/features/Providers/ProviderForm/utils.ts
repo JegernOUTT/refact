@@ -5,18 +5,14 @@ export type AggregatedProviderFields = {
   extraFields: Record<string, string | boolean>;
 };
 
-const EXTRA_FIELDS_KEYS = [
-  "embedding_endpoint",
-  "completion_endpoint",
-  "chat_endpoint",
-  "tokenizer_api_key",
-];
+const EXTRA_FIELDS_KEYS = ["chat_endpoint", "tokenizer_api_key"];
 
 const HIDDEN_FIELDS_KEYS = [
   "name",
   "readonly",
   "enabled",
   "supports_completion",
+  "completion_endpoint",
 ];
 
 export function aggregateProviderFields(providerData: ProviderFormValues) {

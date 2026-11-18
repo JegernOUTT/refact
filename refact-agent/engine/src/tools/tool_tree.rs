@@ -325,7 +325,6 @@ impl Tool for ToolTree {
 
         // Append related memories (short form). Since tree() is directory-oriented,
         // we try to surface memories that reference the directory itself via related_files.
-        // This keeps the lookup fast (in-memory index) and doesn't require VecDB.
         let related_section = {
             let idx_arc = { gcx.knowledge_index.clone() };
             let idx_guard = idx_arc.lock().await;

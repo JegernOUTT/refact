@@ -15,7 +15,6 @@ import styles from "./PrivacySettingsSection.module.css";
 const GROUP_ORDER: { kind: PrivacyDestinationKind; label: string }[] = [
   { kind: "provider", label: "Model providers" },
   { kind: "mcp", label: "MCP servers" },
-  { kind: "completion", label: "Completion" },
   { kind: "subagent_model", label: "Subagent models" },
 ];
 

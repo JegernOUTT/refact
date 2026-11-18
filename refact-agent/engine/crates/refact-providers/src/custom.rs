@@ -20,8 +20,7 @@ pub struct CustomProvider {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential: Option<CredentialSpec>,
     pub chat_endpoint: String,
-    pub completion_endpoint: String,
-    pub embedding_endpoint: String,
+
     pub wire_format: Option<WireFormat>,
     pub enabled: bool,
     #[serde(default)]
@@ -93,18 +92,6 @@ fields:
     f_desc: "Chat completions endpoint URL"
     f_placeholder: "https://your-server.com/v1/chat/completions"
     f_label: "Chat Endpoint"
-  completion_endpoint:
-    f_type: string_long
-    f_desc: "Completions endpoint URL (optional)"
-    f_placeholder: "https://your-server.com/v1/completions"
-    f_label: "Completion Endpoint"
-    f_extra: true
-  embedding_endpoint:
-    f_type: string_long
-    f_desc: "Embeddings endpoint URL (optional)"
-    f_placeholder: "https://your-server.com/v1/embeddings"
-    f_label: "Embedding Endpoint"
-    f_extra: true
   wire_format:
     f_type: string
     f_desc: "API format: openai_chat_completions, openai_responses, or anthropic_messages"
@@ -156,13 +143,7 @@ available:
         if let Some(chat_endpoint) = yaml.get("chat_endpoint").and_then(|v| v.as_str()) {
             self.chat_endpoint = chat_endpoint.to_string();
         }
-        if let Some(completion_endpoint) = yaml.get("completion_endpoint").and_then(|v| v.as_str())
-        {
-            self.completion_endpoint = completion_endpoint.to_string();
-        }
-        if let Some(embedding_endpoint) = yaml.get("embedding_endpoint").and_then(|v| v.as_str()) {
-            self.embedding_endpoint = embedding_endpoint.to_string();
-        }
+
         if let Some(wire_format) = yaml.get("wire_format") {
             match serde_yaml::from_value(wire_format.clone()) {
                 Ok(wf) => self.wire_format = Some(wf),
@@ -199,8 +180,6 @@ available:
             "api_key": if self.api_key.is_empty() { "" } else { "***" },
             "credential": self.credential,
             "chat_endpoint": self.chat_endpoint,
-            "completion_endpoint": self.completion_endpoint,
-            "embedding_endpoint": self.embedding_endpoint,
             "wire_format": self.wire_format,
             "enabled": self.enabled,
             "supports_cache_control": self.supports_cache_control,
@@ -228,16 +207,13 @@ available:
             readonly: false,
             wire_format: self.default_wire_format(),
             chat_endpoint: self.chat_endpoint.clone(),
-            completion_endpoint: self.completion_endpoint.clone(),
-            embedding_endpoint: self.embedding_endpoint.clone(),
+
             api_key,
             auth_token: String::new(),
             tokenizer_api_key: String::new(),
             extra_headers: self.extra_headers.clone(),
             supports_cache_control: self.supports_cache_control,
             chat_models: Vec::new(),
-            completion_models: Vec::new(),
-            embedding_model: None,
         })
     }
 

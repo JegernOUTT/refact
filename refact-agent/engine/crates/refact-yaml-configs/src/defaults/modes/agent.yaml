@@ -1,4 +1,4 @@
-schema_version: 41
+schema_version: 42
 id: agent
 title: Agent
 description: Full multi-step workflow with tools and editing capabilities
@@ -292,7 +292,6 @@ tools:
   - glob
   - search_pattern
   - search_symbol_definition
-  - search_semantic
   - activate_skill
   - knowledge
   - create_knowledge

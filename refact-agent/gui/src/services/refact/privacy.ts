@@ -33,11 +33,7 @@ export type PrivacyPolicy = {
   tool_access: PrivacyToolAccess;
 };
 
-export type PrivacyDestinationKind =
-  | "provider"
-  | "mcp"
-  | "subagent_model"
-  | "completion";
+export type PrivacyDestinationKind = "provider" | "mcp" | "subagent_model";
 
 export type PrivacyDestination = {
   id: string;

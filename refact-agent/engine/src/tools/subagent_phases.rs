@@ -29,7 +29,6 @@ pub static DEFAULT_GATHER_FILES_TOOLS: &[&str] = &[
     "cat",
     "search_pattern",
     "search_symbol_definition",
-    "search_semantic",
     "knowledge",
 ];
 

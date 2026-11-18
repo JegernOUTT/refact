@@ -11,10 +11,8 @@ import {
     resolveFilePathWithinWorkspace,
 } from "./sidebarPaths";
 import { v4 as uuidv4 } from "uuid";
-import { getKeyBindingForChat } from "./getKeybindings";
 import {
     type ChatMessages,
-    fim,
     isOpenExternalUrl,
     updateConfig,
     type FileInfo,
@@ -41,7 +39,6 @@ import {
     ideToolCallResponse,
     ideAttachFileToChat,
     TextDocToolCall,
-    ideSetCodeCompletionModel,
     ideSetLoginMessage,
     OpenFilePayload,
     ideTaskDone,
@@ -129,7 +126,6 @@ export class PanelWebview implements vscode.WebviewViewProvider {
     private chatReadyGeneration: number = 0;
     private isChatReady: boolean = false;
     private queuedWebviewMessages: QueuedWebviewMessage[] = [];
-    // public fim_debug: fimDebug.FimDebug | null = null;
     // public chatHistoryProvider: ChatHistoryProvider|undefined;
 
     _disposables: vscode.Disposable[] = [];
@@ -155,7 +151,6 @@ export class PanelWebview implements vscode.WebviewViewProvider {
 
         this._disposables.push(vscode.workspace.onDidChangeConfiguration(event => {
             if(
-                event.affectsConfiguration("refactai.vecdb") ||
                 event.affectsConfiguration("refactai.ast") ||
                 event.affectsConfiguration("refactai.codegraph") ||
                 event.affectsConfiguration("refactai.submitChatWithShiftEnter") ||
@@ -231,9 +226,7 @@ export class PanelWebview implements vscode.WebviewViewProvider {
         return type === updateConfig.type ||
             type === setFileInfo.type ||
             type === setSelectedSnippet.type ||
-            type === setCurrentProjectInfo.type ||
-            type === fim.receive.type ||
-            type === fim.error.type;
+            type === setCurrentProjectInfo.type;
     }
 
     public postMessageToChat(message: unknown, requireReady: boolean = true, durable: boolean = this.isDurableWebviewMessage(message)) {
@@ -395,10 +388,6 @@ export class PanelWebview implements vscode.WebviewViewProvider {
 
     handleSettingsChange() {
         this.bindDecisionScope();
-        const vecdb =
-            vscode.workspace
-                .getConfiguration()
-                ?.get<boolean>("refactai.vecdb") ?? false;
 
         const ast =
             vscode.workspace
@@ -423,7 +412,7 @@ export class PanelWebview implements vscode.WebviewViewProvider {
             daemonPort: global.rust_binary_blob?.daemon_control_port?.(),
             lspPort: port,
             shiftEnterToSubmit: submitChatWithShiftEnter,
-            features: {vecdb, ast, codegraph},
+            features: {ast, codegraph},
             currentWorkspaceName: currentActiveWorkspaceName,
             ...webviewEndpointConfig(
                 backendConfig.backendReady,
@@ -441,7 +430,6 @@ export class PanelWebview implements vscode.WebviewViewProvider {
         const action = ideAttachFileToChat(path);
         this.postMessageToChat(action);
     }
-
 
 
     public new_statistic(view: vscode.WebviewView)
@@ -609,17 +597,12 @@ export class PanelWebview implements vscode.WebviewViewProvider {
         // }
         // case EVENT_NAMES_FROM_CHAT.BACK_FROM_CHAT:
         // case EVENT_NAMES_FROM_STATISTIC.BACK_FROM_STATISTIC:
-        // case FIM_EVENT_NAMES.BACK:
         // case "back-from-chat": {
         //     this.goto_main();
         //     this.chat = null;
         //     break;
         // }
 
-        // case "fim_debug": {
-        //     await open_fim_debug();
-        //     break;
-        // }
         }
     }
 
@@ -645,17 +628,6 @@ export class PanelWebview implements vscode.WebviewViewProvider {
             return this._view?.webview.postMessage({ type: "ide/logLines", payload: { lines: getIdeLogSnapshot(limit) } });
         }
         console.log("sidebar event", e);
-        // FIM Data from IDE
-        if(fim.ready.match(e)|| fim.request.match(e)) {
-            if(global.fim_data_cache) {
-                const event = fim.receive(global.fim_data_cache);
-                this.postMessageToChat(event);
-            } else {
-                const event = fim.error("No FIM data found, please make a completion");
-                this.postMessageToChat(event);
-            }
-        }
-
         if (isOpenExternalUrl(e)) {
             await vscode.env.openExternal(vscode.Uri.parse(e.payload.url));
         }
@@ -711,9 +683,6 @@ export class PanelWebview implements vscode.WebviewViewProvider {
         }
         if(ideIsChatReady.match(e)) {
             return this.handleChatReady(e.payload);
-        }
-        if (ideSetCodeCompletionModel.match(e)) {
-            return this.handleSetCodeCompletionModel(e.payload);
         }
 
         if (ideSetLoginMessage.match(e)) {
@@ -997,7 +966,6 @@ export class PanelWebview implements vscode.WebviewViewProvider {
     }
 
 
-
     async handleCurrentChatPage(page: string) {
         this.context.globalState.update("chat_page", JSON.stringify(page));
         vscode.commands.executeCommand("setContext", "refactai.chat_page", page);
@@ -1019,9 +987,6 @@ export class PanelWebview implements vscode.WebviewViewProvider {
         this.sendSnippetToChat();
     }
 
-    async handleSetCodeCompletionModel(model: string) {
-        await vscode.workspace.getConfiguration().update("refactai.codeCompletionModel", model, vscode.ConfigurationTarget.Global);
-    }
 
     handleSetLoginMessage(message: string) {
         usabilityHints.show_message_from_server('InferenceServer', message);
@@ -1173,12 +1138,10 @@ export class PanelWebview implements vscode.WebviewViewProvider {
         const fontSize = vscode.workspace.getConfiguration().get<number>("editor.fontSize") ?? 12;
         const scaling = fontSize < 14 ? "90%" : "100%";
         const activeColorTheme = this.getColorTheme();
-        const vecdb = vscode.workspace.getConfiguration()?.get<boolean>("refactai.vecdb") ?? false;
         const ast = vscode.workspace.getConfiguration()?.get<boolean>("refactai.ast") ?? false;
         const codegraph = vscode.workspace.getConfiguration()?.get<boolean>("refactai.codegraph") ?? false;
         const rawPort = global.rust_binary_blob?.get_port();
         const port = this.backendLspPort(rawPort);
-        const completeManual = await getKeyBindingForChat("refactaicmd.completionManual");
         const shiftEnterToSubmit = vscode.workspace.getConfiguration()?.get<boolean>("refactai.submitChatWithShiftEnter")?? false;
 
         const currentActiveWorkspaceName = this.getActiveWorkspace();
@@ -1198,14 +1161,10 @@ export class PanelWebview implements vscode.WebviewViewProvider {
                 appearance: activeColorTheme,
             },
             features: {
-                vecdb,
                 ast,
                 codegraph,
                 images: true,
                 statistics: true,
-            },
-            keyBindings: {
-                completeManual,
             },
             lspPort: port,
             ...webviewEndpointConfig(
@@ -1290,7 +1249,6 @@ export class PanelWebview implements vscode.WebviewViewProvider {
         const initialState = await this.createInitialState(chat_thread, tabbed);
         let stringifiedInitialState = JSON.stringify(initialState);
         stringifiedInitialState = stringifiedInitialState.replace(/\<\/script>/gi, "</scr\"+\"ipt>");
-
 
 
         return `<!DOCTYPE html>

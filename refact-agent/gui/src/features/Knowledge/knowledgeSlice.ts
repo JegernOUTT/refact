@@ -3,20 +3,17 @@ import type {
   CodeGraphStatus,
   MemoRecord,
   RagStatus,
-  VecDbStatus,
 } from "../../services/refact/types";
 
 export type KnowledgeState = {
   loaded: boolean;
   memories: Record<string, MemoRecord>;
-  status: null | VecDbStatus;
   ragStatus: null | RagStatus;
 };
 
 const initialState: KnowledgeState = {
   loaded: false,
   memories: {},
-  status: null,
   ragStatus: null,
 };
 
@@ -25,14 +22,9 @@ export const knowledgeSlice = createSlice({
   initialState,
   reducers: {
     // TODO: add reducers
-    setVecDbStatus: (state, action: PayloadAction<VecDbStatus>) => {
-      state.loaded = true;
-      state.status = action.payload;
-    },
     setRagStatus: (state, action: PayloadAction<RagStatus>) => {
       state.loaded = true;
       state.ragStatus = action.payload;
-      state.status = action.payload.vecdb;
     },
     setMemory: (state, action: PayloadAction<MemoRecord>) => {
       state.loaded = true;
@@ -50,7 +42,6 @@ export const knowledgeSlice = createSlice({
   },
   // TODO: selectors
   selectors: {
-    selectVecDbStatus: (state) => state.status,
     selectRagStatus: (state) => state.ragStatus,
     selectCodeGraphStatus: (state): CodeGraphStatus | null =>
       state.ragStatus?.codegraph ?? null,
@@ -59,16 +50,10 @@ export const knowledgeSlice = createSlice({
   },
 });
 
-export const {
-  setVecDbStatus,
-  setRagStatus,
-  setMemory,
-  deleteMemory,
-  clearMemory,
-} = knowledgeSlice.actions;
+export const { setRagStatus, setMemory, deleteMemory, clearMemory } =
+  knowledgeSlice.actions;
 
 export const {
-  selectVecDbStatus,
   selectRagStatus,
   selectCodeGraphStatus,
   selectMemories,

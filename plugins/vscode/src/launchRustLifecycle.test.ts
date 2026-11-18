@@ -126,6 +126,12 @@ export async function runRustBinaryBlobLifecycleTests() {
         delete require.cache[modulePath];
         const { RustBinaryBlob } = require("./launchRust") as typeof import("./launchRust");
         blob = new RustBinaryBlob("/inert/assets");
+        assert.deepStrictEqual(blob.project_settings(), {
+            ast: true,
+            codegraph: true,
+            ast_max_files: 35000,
+            codegraph_max_files: 35000,
+        });
         blob.read_caps = async () => undefined;
         blob.fetch_toolbox_config = async () => ({});
         // Disable only periodic health polling, not lifecycle or socket code.

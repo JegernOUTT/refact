@@ -20,10 +20,10 @@ export type PerformanceAggregate = {
   batch_size_sum?: number;
 };
 
-export type PerformanceIndexWatcherVecdbRollup = {
-  trajectory_index_operations_per_commit?: number;
+export type PerformanceIndexWatcherRollup = {
+  trajectory_index_reads_per_listing_call?: number;
+  calls_by_caller?: [string, number][];
   watcher_rebuilds_per_commit?: number;
-  vecdb_searches_per_enrichment_attempt?: number;
   aggregate?: PerformanceAggregate;
 };
 
@@ -65,7 +65,7 @@ export type PerformanceTelemetryResponse = {
   rollups?: {
     advancement?: PerformanceAggregate;
     tool_stages?: PerformanceAggregate;
-    index_watcher_vecdb_amplification?: PerformanceIndexWatcherVecdbRollup;
+    index_watcher_amplification?: PerformanceIndexWatcherRollup;
     enrichment_stages?: PerformanceAggregate;
   };
   rollout_switches?: Record<string, boolean>;

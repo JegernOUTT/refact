@@ -47,15 +47,11 @@ class AppSettingsComponent {
 
         })
     }
-    private val myModelText = JBTextField()
     private val myAstFileLimitText = JBTextField()
-    private val myVecdbFileLimitText = JBTextField()
     private val myCodegraphFileLimitText = JBTextField()
     private val insecureSSLCheckBox = JCheckBox(RefactAIBundle.message("advancedSettings.insecureSSL"))
     private val experimentalCheckBox = JCheckBox(RefactAIBundle.message("advancedSettings.experimentalLspFlag"))
-    private val pauseCompletionCheckBox = JCheckBox(RefactAIBundle.message("advancedSettings.pauseCompletion"))
-    private val completionMaxTokenText = JBTextField()
-    val astCheckbox = JCheckBox(RefactAIBundle.message("advancedSettings.useMultipleFilesCompletion")).apply {
+    val astCheckbox = JCheckBox(RefactAIBundle.message("advancedSettings.useAst")).apply {
         isVisible = true
     }
     private val developerModeCheckBox = JCheckBox(RefactAIBundle.message("advancedSettings.developerMode")).apply {
@@ -78,10 +74,6 @@ class AppSettingsComponent {
     }
     private val myStagingVersionLabel = JBLabel("Staging version:").apply {
         isVisible = false
-    }
-
-    val vecdbCheckbox = JCheckBox(RefactAIBundle.message("advancedSettings.useVecDB")).apply {
-        isVisible = true
     }
 
     val codegraphCheckbox = JCheckBox(RefactAIBundle.message("advancedSettings.useCodegraph")).apply {
@@ -122,36 +114,10 @@ class AppSettingsComponent {
                 }, 0
             )
 
-            addLabeledComponent(JBLabel(RefactAIBundle.message("advancedSettings.completionMaxTokens")),
-                completionMaxTokenText, (UIUtil.DEFAULT_VGAP * 1.5).toInt(), false)
-            addComponent(
-                JBLabel(
-                    RefactAIBundle.message("advancedSettings.completionMaxTokensDesc"),
-                    UIUtil.ComponentStyle.SMALL, UIUtil.FontColor.BRIGHTER
-                ), 0
-            )
-
-            addLabeledComponent(JBLabel("${RefactAIBundle.message("advancedSettings.codeCompletionModel")}: "),
-                myModelText, (UIUtil.DEFAULT_VGAP * 1.5).toInt(), false)
-            addComponent(
-                JBLabel(
-                    RefactAIBundle.message("advancedSettings.codeCompletionModelDesc"),
-                    UIUtil.ComponentStyle.SMALL, UIUtil.FontColor.BRIGHTER
-                ), 0
-            )
-            addComponent(pauseCompletionCheckBox, UIUtil.LARGE_VGAP)
-            addComponent(
-                JBLabel(
-                    RefactAIBundle.message("advancedSettings.pauseCompletionDesc"),
-                    UIUtil.ComponentStyle.SMALL, UIUtil.FontColor.BRIGHTER
-                ).apply {
-                    setCopyable(true)
-                }, 0
-            )
             addComponent(astCheckbox, UIUtil.LARGE_VGAP)
             addComponent(
                 JBLabel(
-                    RefactAIBundle.message("advancedSettings.useMultipleFilesCompletionDescription"),
+                    RefactAIBundle.message("advancedSettings.useAstDescription"),
                     UIUtil.ComponentStyle.SMALL, UIUtil.FontColor.BRIGHTER
                 ).apply {
                     setCopyable(true)
@@ -164,25 +130,6 @@ class AppSettingsComponent {
                     RefactAIBundle.message("advancedSettings.astFileLimitDescription"),
                     UIUtil.ComponentStyle.SMALL, UIUtil.FontColor.BRIGHTER
                 ), 0
-            )
-
-            addComponent(vecdbCheckbox, UIUtil.LARGE_VGAP)
-            addComponent(
-                JBLabel(
-                    RefactAIBundle.message("advancedSettings.useVecDBDescription"),
-                    UIUtil.ComponentStyle.SMALL, UIUtil.FontColor.BRIGHTER
-                ).apply {
-                    setCopyable(true)
-                }, 0
-            )
-            addLabeledComponent(JBLabel("${RefactAIBundle.message("advancedSettings.vecDBFileLimit")}: "), myVecdbFileLimitText)
-            addComponent(
-                JBLabel(
-                    RefactAIBundle.message("advancedSettings.vecDBFileLimitDescription"),
-                    UIUtil.ComponentStyle.SMALL, UIUtil.FontColor.BRIGHTER
-                ).apply {
-                    setCopyable(true)
-                }, 0
             )
 
             addComponent(codegraphCheckbox, UIUtil.LARGE_VGAP)
@@ -254,16 +201,6 @@ class AppSettingsComponent {
         set(newVal) {
             myAstFileLimitText.text = newVal.toString()
         }
-    var vecdbIsEnabled: Boolean
-        get() = vecdbCheckbox.isSelected
-        set(newVal) {
-            vecdbCheckbox.isSelected = newVal
-        }
-    var vecdbFileLimit: Int
-        get() = myVecdbFileLimitText.text.toIntOrNull() ?: 15000
-        set(newVal) {
-            myVecdbFileLimitText.text = newVal.toString()
-        }
     var codegraphIsEnabled: Boolean
         get() = codegraphCheckbox.isSelected
         set(newVal) {
@@ -274,11 +211,6 @@ class AppSettingsComponent {
         set(newVal) {
             myCodegraphFileLimitText.text = newVal.toString()
         }
-    var inferenceModel: String?
-        get() = myModelText.text
-        set(newVal) {
-            myModelText.text = newVal
-        }
 
     var insecureSSL: Boolean
         get() = insecureSSLCheckBox.isSelected
@@ -286,22 +218,10 @@ class AppSettingsComponent {
             insecureSSLCheckBox.isSelected = newVal
         }
 
-    var completionMaxTokens: Int
-        get() = completionMaxTokenText.text.toIntOrNull() ?: 0
-        set(newVal) {
-            completionMaxTokenText.text = newVal.toString()
-        }
-
     var experimentalLspFlagEnabled: Boolean
         get() = experimentalCheckBox.isSelected
         set(newVal) {
             experimentalCheckBox.isSelected = newVal
-        }
-
-    var pauseCompletion: Boolean
-        get() = pauseCompletionCheckBox.isSelected
-        set(newVal) {
-            pauseCompletionCheckBox.isSelected = newVal
         }
 
     var xDebugLSPPort: Int?

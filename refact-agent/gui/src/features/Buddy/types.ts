@@ -153,7 +153,6 @@ export type SignalType =
   | "memory_extract"
   | "knowledge_update"
   | "indexing"
-  | "vecdb_building"
   | "codegraph_indexing"
   | "ast_parsing"
   | "compression"

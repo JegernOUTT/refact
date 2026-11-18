@@ -27,7 +27,6 @@ use crate::chat::trajectory_index::TrajectoryIndexCoordinator;
 use crate::chat::types::EnqueueCommandOutcome;
 use crate::chat::trajectories::{self, TrajectoryEvent};
 use crate::chat::{self, process_command_queue, SessionsMap};
-use crate::completion_cache::CompletionCache;
 use crate::exec::ExecRegistry;
 use crate::files_blocklist::IndexingEverywhere;
 use crate::files_in_workspace::DocumentsState;
@@ -44,7 +43,6 @@ use crate::voice::SharedVoiceService;
 use crate::yaml_configs::customization_registry::RegistryCacheManager;
 pub use refact_caps_core::caps_state::CapsState;
 pub use refact_core::tokenizer_state::TokenizerState;
-use refact_core::vecdb_types::VecdbSearch;
 use refact_runtime_api::{
     ChatSessionFacade, ChatSessionSnapshot, ChatSessionUpdate, CreateSessionRequest,
 };
@@ -80,9 +78,6 @@ pub struct WorkspaceServices {
     pub documents_state: DocumentsState,
     pub privacy_settings: Arc<PrivacySettings>,
     pub indexing_everywhere: Arc<StdRwLock<Arc<IndexingEverywhere>>>,
-    pub completions_cache: Arc<StdRwLock<CompletionCache>>,
-    pub vec_db: Arc<AMutex<Option<Arc<dyn VecdbSearch>>>>,
-    pub vec_db_error: Arc<StdMutex<String>>,
     pub knowledge_index: Arc<AMutex<KnowledgeIndex>>,
     pub at_commands_preview_cache: Arc<AMutex<AtCommandsPreviewCache>>,
 }
@@ -1654,19 +1649,46 @@ impl AppBuddyEventSink {
             operator_signal_projection,
         }
     }
+
+    async fn buddy_for_chat(
+        &self,
+        chat_id: Option<&str>,
+    ) -> Option<tokio::sync::MutexGuard<'_, Option<BuddyService>>> {
+        let root = self.buddy.lock().await.as_ref()?.project_root.clone();
+        if !self
+            .gcx
+            .buddy_sink_attribution
+            .admits(&self.gcx, &root, chat_id)
+            .await
+        {
+            return None;
+        }
+        let lock = self.buddy.lock().await;
+        lock.as_ref()
+            .is_some_and(|svc| svc.project_root == root)
+            .then_some(lock)
+    }
 }
 
 #[async_trait]
 impl BuddyEventSink for AppBuddyEventSink {
     async fn enqueue_event(&self, event: BuddyRuntimeEvent) {
-        let buddy_arc = self.buddy.clone();
-        let mut lock = buddy_arc.lock().await;
+        let Some(mut lock) = self.buddy_for_chat(event.chat_id.as_deref()).await else {
+            return;
+        };
         if let Some(svc) = lock.as_mut() {
             svc.enqueue_runtime_event(event);
         }
     }
 
     async fn enqueue_operator_signal(&self, signal: OperatorSignal) -> Result<(), String> {
+        let attributed = self
+            .buddy_for_chat(signal.runtime_event.chat_id.as_deref())
+            .await
+            .is_some();
+        if !attributed && self.buddy.lock().await.is_some() {
+            return Ok(());
+        }
         let accepted = {
             let mut projection = self.operator_signal_projection.lock().await;
             projection.accept(signal.clone())?
@@ -1701,8 +1723,9 @@ impl BuddyEventSink for AppBuddyEventSink {
     }
 
     async fn apply_chat_completion(&self, event: BuddyRuntimeEvent, xp: u64, mood: String) {
-        let buddy_arc = self.buddy.clone();
-        let mut lock = buddy_arc.lock().await;
+        let Some(mut lock) = self.buddy_for_chat(event.chat_id.as_deref()).await else {
+            return;
+        };
         let Some(svc) = lock.as_mut() else { return };
         svc.enqueue_runtime_event(event);
         if xp > 0 {
@@ -1722,8 +1745,9 @@ impl BuddyEventSink for AppBuddyEventSink {
         source: Option<&str>,
         chat_id: Option<&str>,
     ) {
-        let buddy_arc = self.buddy.clone();
-        let mut lock = buddy_arc.lock().await;
+        let Some(mut lock) = self.buddy_for_chat(chat_id).await else {
+            return;
+        };
         if let Some(svc) = lock.as_mut() {
             svc.report_error(error_type, error_msg, source, chat_id);
         }
@@ -1737,16 +1761,18 @@ impl BuddyEventSink for AppBuddyEventSink {
         chat_id: Option<&str>,
         model_id: Option<&str>,
     ) {
-        let buddy_arc = self.buddy.clone();
-        let mut lock = buddy_arc.lock().await;
+        let Some(mut lock) = self.buddy_for_chat(chat_id).await else {
+            return;
+        };
         if let Some(svc) = lock.as_mut() {
             svc.report_error_with_model(error_type, error_msg, source, chat_id, model_id);
         }
     }
 
     async fn mark_chat_error(&self, event: BuddyRuntimeEvent) {
-        let buddy_arc = self.buddy.clone();
-        let mut lock = buddy_arc.lock().await;
+        let Some(mut lock) = self.buddy_for_chat(event.chat_id.as_deref()).await else {
+            return;
+        };
         if let Some(svc) = lock.as_mut() {
             svc.enqueue_runtime_event(event);
             svc.state.semantic.mood = "worried".to_string();

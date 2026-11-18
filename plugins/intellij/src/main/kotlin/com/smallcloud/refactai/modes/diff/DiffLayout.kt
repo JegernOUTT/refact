@@ -56,7 +56,7 @@ class DiffLayout(
                 applyPreviewInternal()
             }
         } catch (e: Throwable) {
-            Logger.getInstance(javaClass).warn("Failed in the processes of accepting completion", e)
+            Logger.getInstance(javaClass).warn("Failed in the processes of accepting diff", e)
         } finally {
             Disposer.dispose(this)
         }

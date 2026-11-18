@@ -1,6 +1,6 @@
 //! Idle-stop policy for daemon-managed workers.
 //!
-//! The daemon only owns process lifetime. Project indexes, VecDB state, and any other warm-start
+//! The daemon only owns process lifetime. Project indexes and any other warm-start
 //! caches are persisted by the worker engine itself, so stopping an idle worker is expected to trade
 //! RAM for a later warm restart without daemon-side state migration.
 

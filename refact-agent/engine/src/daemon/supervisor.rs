@@ -2075,11 +2075,6 @@ fn worker_args(
         args.push("--ast-max-files".to_string());
         args.push(spec.settings.ast_max_files.to_string());
     }
-    if spec.settings.vecdb {
-        args.push("--vecdb".to_string());
-        args.push("--vecdb-max-files".to_string());
-        args.push(spec.settings.vecdb_max_files.to_string());
-    }
     args
 }
 
@@ -2379,6 +2374,35 @@ mod tests {
             root,
             settings: ProjectSettings::default(),
         }
+    }
+
+    #[test]
+    fn worker_launch_never_forwards_retired_vecdb_flags() {
+        let mut spec = test_launch_spec(PathBuf::from("project"));
+        spec.settings = serde_json::from_value(serde_json::json!({
+            "ast": true,
+            "ast_max_files": 17,
+            "vecdb": true,
+            "vecdb_max_files": 999,
+        }))
+        .unwrap();
+        let args = worker_args(
+            &spec,
+            PortPair {
+                http_port: 8001,
+                lsp_port: 8002,
+            },
+            "nonce",
+            8000,
+            PathBuf::from("daemon"),
+        );
+        assert!(args.iter().any(|arg| arg == "--ast"));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--ast-max-files", "17"]));
+        assert!(!args
+            .iter()
+            .any(|arg| arg.starts_with("--vecdb") || arg == "--wait-vecdb"));
     }
 
     #[test]

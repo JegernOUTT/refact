@@ -59,11 +59,7 @@ export type ProviderRuntime = {
   readonly: boolean;
   wire_format: WireFormat;
   chat_endpoint: string;
-  completion_endpoint: string;
-  embedding_endpoint: string;
   chat_models: ProviderModel[];
-  completion_models: ProviderModel[];
-  embedding_model: ProviderModel | null;
 };
 
 export type ProviderStatus = "not_configured" | "configured" | "active";
@@ -804,8 +800,6 @@ export type ProviderDefaults = {
   chat_light: ModelTypeDefaults;
   chat_thinking: ModelTypeDefaults;
   chat_buddy?: ModelTypeDefaults;
-  completion_model?: string;
-  embedding_model?: string;
 };
 
 export type ProviderDefaultsUpdateRequest = ProviderDefaults & {

@@ -1264,7 +1264,7 @@ pub async fn handle_v1_buddy_diagnostics_collect(
 pub async fn handle_v1_buddy_diagnostics_list(
     State(app): State<AppState>,
 ) -> Result<axum::Json<Vec<DiagnosticContext>>, ScratchError> {
-    let project_root = crate::buddy::actor::latest_project_root(app.clone())
+    let project_root = crate::buddy::actor::buddy_project_root(app.clone())
         .await
         .map_err(|e| ScratchError::new(StatusCode::SERVICE_UNAVAILABLE, e))?;
     let mut diags = crate::buddy::storage::load_recent_diagnostics(&project_root, 100)

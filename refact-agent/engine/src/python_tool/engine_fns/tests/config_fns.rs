@@ -163,6 +163,7 @@ async fn modes_project_info_lists_blocks_and_carries_records_with_content() {
 #[tokio::test]
 async fn tools_list_reports_groups_gating_and_this_chat() {
     let (_dir, app, _) = fixture().await;
+    assert!(app.gcx.codegraph.lock().await.is_none());
     let out = result(&run(&app, "(await engine('tools.list'))['data']").await);
     let groups = out["groups"].as_array().unwrap();
     assert!(!groups.is_empty(), "{out}");
@@ -178,7 +179,8 @@ async fn tools_list_reports_groups_gating_and_this_chat() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|g| g["enablement"] == "start it with --vecdb"),
+            .any(|g| g["capability"] == "code graph index"
+                && g["enablement"] == "enable code graph indexing"),
         "{out}"
     );
 }

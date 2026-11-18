@@ -2790,15 +2790,33 @@ impl Tool for ToolTaskMemorySearch {
             },
             experimental: false,
             allow_parallel: true,
-            description: "Search task memories and task documents by tag, filename, and content text. Does not use VecDB.".to_string(),
+            description:
+                "Search task memories and task documents by tag, filename, and content text."
+                    .to_string(),
             input_schema: json_schema_from_params(
                 &[
                     ("query", "string", "Text, tag, or filename query."),
                     ("kind", "string", "Optional memory/document kind filter."),
-                    ("namespace", "string", "Optional namespace filter, such as task or card:T-22."),
-                    ("tags", "string", "Optional comma-separated tags that every result must have."),
-                    ("top_k", "number", "Maximum results to return. Defaults to 10."),
-                    ("task_id", "string", "Optional task id. Defaults to current task context when available."),
+                    (
+                        "namespace",
+                        "string",
+                        "Optional namespace filter, such as task or card:T-22.",
+                    ),
+                    (
+                        "tags",
+                        "string",
+                        "Optional comma-separated tags that every result must have.",
+                    ),
+                    (
+                        "top_k",
+                        "number",
+                        "Maximum results to return. Defaults to 10.",
+                    ),
+                    (
+                        "task_id",
+                        "string",
+                        "Optional task id. Defaults to current task context when available.",
+                    ),
                 ],
                 &["query"],
             ),

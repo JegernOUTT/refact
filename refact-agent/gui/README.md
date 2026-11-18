@@ -49,7 +49,7 @@ cargo run -- --http-port 8001 --logs-stderr
 
 Engine builds automatically run the GUI build and embed `dist/chat` into `refact-lsp`, so a separate Vite server is not required for the standalone engine-served UI. The standalone HTML initializes `host: "web"` with `lspUrl: window.location.origin`, which keeps API and SSE calls same-origin.
 
-The toolbar polls `/v1/rag-status` when a usable engine endpoint is configured. It displays CodeGraph, VecDB, and AST mini status chips; CodeGraph status includes `{ counts: { nodes, edges, files, fts_docs }, queued, state, error }` with `state` equal to `turned_off`, `indexing`, `working`, or `error`.
+The toolbar polls `/v1/rag-status` when a usable engine endpoint is configured. It displays CodeGraph and AST mini status chips; CodeGraph status includes `{ counts: { nodes, edges, files, fts_docs }, queued, state, error }` with `state` equal to `turned_off`, `indexing`, `working`, or `error`.
 
 ## Scripts
 
@@ -102,19 +102,19 @@ The UMD build exposes the same API as `window.RefactChat.render`.
 
 `render(element, config)` accepts a partial GUI `Config` object. Common fields:
 
-| Field                  | Purpose                                                                                   |
-| ---------------------- | ----------------------------------------------------------------------------------------- |
-| `host`                 | One of `web`, `ide`, `vscode`, or `jetbrains`                                             |
-| `lspUrl`               | Base URL for the local `refact-lsp` HTTP API                                              |
-| `lspPort`              | Local engine port when `lspUrl` is not provided                                           |
-| `tabbed`               | Enables tab-style host behavior used by some IDE surfaces                                 |
-| `dev`                  | Enables development behavior while previewing another host mode                           |
-| `themeProps`           | Radix theme options passed to the app theme wrapper                                       |
-| `features`             | Optional feature switches for statistics, VecDB, CodeGraph, AST compatibility, and images |
-| `keyBindings`          | Host-provided key binding labels                                                          |
-| `apiKey`               | Optional API key forwarded to API requests when a host requires it                        |
-| `shiftEnterToSubmit`   | Toggles chat submit behavior                                                              |
-| `currentWorkspaceName` | Display name for the active workspace                                                     |
+| Field                  | Purpose                                                                            |
+| ---------------------- | ---------------------------------------------------------------------------------- |
+| `host`                 | One of `web`, `ide`, `vscode`, or `jetbrains`                                      |
+| `lspUrl`               | Base URL for the local `refact-lsp` HTTP API                                       |
+| `lspPort`              | Local engine port when `lspUrl` is not provided                                    |
+| `tabbed`               | Enables tab-style host behavior used by some IDE surfaces                          |
+| `dev`                  | Enables development behavior while previewing another host mode                    |
+| `themeProps`           | Radix theme options passed to the app theme wrapper                                |
+| `features`             | Optional feature switches for statistics, CodeGraph, AST compatibility, and images |
+| `keyBindings`          | Host-provided key binding labels                                                   |
+| `apiKey`               | Optional API key forwarded to API requests when a host requires it                 |
+| `shiftEnterToSubmit`   | Toggles chat submit behavior                                                       |
+| `currentWorkspaceName` | Display name for the active workspace                                              |
 
 ## Host modes and event API
 
@@ -125,7 +125,7 @@ Host modes choose how the GUI communicates with its environment:
 - `vscode` uses the VS Code webview bridge.
 - `jetbrains` uses the JetBrains webview bridge.
 
-The typed public/event API is exported from `refact-chat-js/dist/events`. It includes configuration actions, active-file and selected-snippet actions, chat thread helpers, FIM actions, IDE commands such as opening files or pasting diffs, tool-call request/response helpers, and type guards for Refact API responses.
+The typed public/event API is exported from `refact-chat-js/dist/events`. It includes configuration actions, active-file and selected-snippet actions, chat thread helpers, IDE commands such as opening files or pasting diffs, tool-call request/response helpers, and type guards for Refact API responses.
 
 See `src/events/index.ts`, `src/events/setup.ts`, `src/hooks/useEventBusForIDE.ts`, and `src/hooks/useEventBusForApp.ts` for the current protocol surface.
 
@@ -137,8 +137,8 @@ See `src/events/index.ts`, `src/events/setup.ts`, `src/hooks/useEventBusForIDE.t
 | `src/app/`                         | Redux store, middleware, persistence configuration                    |
 | `src/features/Chat/Thread/`        | Thread state, actions, selectors, reducers, and types                 |
 | `src/services/refact/`             | HTTP API clients, chat commands, RagStatus, and SSE subscription code |
-| `src/components/ConnectionStatus/` | Engine connection plus CodeGraph/VecDB/AST mini status indicators     |
-| `src/features/Knowledge/`          | Memory state plus VecDB/CodeGraph `RagStatus` projections             |
+| `src/components/ConnectionStatus/` | Engine connection plus CodeGraph/AST mini status indicators           |
+| `src/features/Knowledge/`          | Memory state plus CodeGraph `RagStatus` projections                   |
 | `src/components/ChatContent/`      | Message, tool, diff, reasoning, and citation rendering                |
 | `src/components/ChatForm/`         | Prompt form, image attachments, and tool confirmation UI              |
 | `src/features/Providers/`          | BYOK/local provider setup UI                                          |

@@ -66,7 +66,6 @@ const SETTINGS_GROUPS: SettingsGroup[] = [
       "auto_enrichment_total_token_cap",
       "auto_enrichment_card_token_cap",
       "auto_enrichment_knowledge_top_n",
-      "auto_enrichment_trajectory_top_n",
     ],
   },
   {
@@ -101,7 +100,6 @@ const SETTINGS_GROUPS: SettingsGroup[] = [
       "How much trajectory history and planner Q&A text is previewed and indexed. Raising these makes recall richer and increases indexing work and token spend.",
     names: [
       "hist_search_preview_chars",
-      "vecdb_trajectory_split_bytes",
       "planner_qna_question_limit",
       "planner_qna_answer_limit",
     ],
@@ -132,7 +130,6 @@ const SETTINGS_GROUPS: SettingsGroup[] = [
       "trajectory_index_coordinator_enabled",
       "trajectory_watcher_self_write_enabled",
       "tool_catalog_snapshots_enabled",
-      "vecdb_path_coalescing_enabled",
     ],
   },
 ];

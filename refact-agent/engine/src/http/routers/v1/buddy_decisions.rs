@@ -18,6 +18,38 @@ pub(crate) fn same_native_project_root(source: &std::path::Path, root: &std::pat
     dunce::simplified(&source) == dunce::simplified(&root)
 }
 
+pub(crate) enum NativeRow<'a> {
+    Take(tokio::sync::MutexGuard<'a, crate::chat::types::ChatSession>),
+    Skip,
+    More,
+}
+
+pub(crate) async fn next_native_row<'a>(
+    app: &AppState,
+    filter: &crate::buddy::attribution::BuddyRootFilter,
+    chat_id: &str,
+    session: &'a std::sync::Arc<tokio::sync::Mutex<crate::chat::types::ChatSession>>,
+    taken: usize,
+    cap: usize,
+    wait: std::time::Duration,
+) -> Result<NativeRow<'a>, ()> {
+    use crate::buddy::attribution::SessionClaim;
+    let wait = if taken >= cap {
+        std::time::Duration::ZERO
+    } else {
+        wait
+    };
+    match filter
+        .claim(&app.chat.sessions, chat_id, session, wait)
+        .await
+    {
+        SessionClaim::NotOwn => Ok(NativeRow::Skip),
+        SessionClaim::Own(_) | SessionClaim::Busy if taken >= cap => Ok(NativeRow::More),
+        SessionClaim::Own(guard) => Ok(NativeRow::Take(guard)),
+        SessionClaim::Busy => Err(()),
+    }
+}
+
 #[derive(Serialize)]
 pub struct NativeQuestionView {
     project_root: String,
@@ -35,14 +67,27 @@ pub struct NativeDecisionSnapshot {
 }
 
 pub(crate) async fn decision_root(app: &AppState) -> Result<String, ScratchError> {
-    let roots = crate::files_correction::get_unscoped_project_dirs(app.gcx.clone()).await;
-    if roots.len() != 1 {
-        return Err(ScratchError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "native question aggregation requires one unambiguous project root".into(),
-        ));
-    }
-    let root = tokio::fs::canonicalize(&roots[0]).await.map_err(|_| {
+    use crate::buddy::operator_runtime::BuddyRootScope;
+    let root = match crate::buddy::operator_runtime::buddy_root_scope(app).await {
+        BuddyRootScope::Bound(root) => root,
+        BuddyRootScope::Detached(_) => {
+            return Err(ScratchError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Buddy's project is no longer open in this workspace".into(),
+            ))
+        }
+        BuddyRootScope::NoWorkspace | BuddyRootScope::NoService => {
+            let roots = crate::files_correction::get_unscoped_project_dirs(app.gcx.clone()).await;
+            if roots.len() != 1 {
+                return Err(ScratchError::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "native question aggregation requires one unambiguous project root".into(),
+                ));
+            }
+            roots[0].clone()
+        }
+    };
+    let root = tokio::fs::canonicalize(&root).await.map_err(|_| {
         ScratchError::new(
             StatusCode::SERVICE_UNAVAILABLE,
             "Native project root is unavailable".into(),
@@ -64,18 +109,39 @@ pub async fn handle_current_decisions(
         .map(|(id, session)| (id.clone(), session.clone()))
         .collect();
     sessions.sort_by(|a, b| a.0.cmp(&b.0));
-    let mut truncated = sessions.len() > 200;
-    sessions.truncate(200);
+    let filter = crate::buddy::attribution::BuddyRootFilter::new(
+        app.gcx.clone(),
+        std::path::Path::new(&root),
+    )
+    .await;
+    let mut truncated = false;
+    let mut scanned = 0usize;
     let mut questions = Vec::new();
     'sessions: for (chat_id, session) in sessions {
-        let session = tokio::time::timeout(std::time::Duration::from_millis(100), session.lock())
-            .await
-            .map_err(|_| {
-                ScratchError::new(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "native decisions are busy; retry the snapshot".into(),
-                )
-            })?;
+        let session = match next_native_row(
+            &app,
+            &filter,
+            &chat_id,
+            &session,
+            scanned,
+            200,
+            std::time::Duration::from_millis(100),
+        )
+        .await
+        .map_err(|_| {
+            ScratchError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "native decisions are busy; retry the snapshot".into(),
+            )
+        })? {
+            NativeRow::Take(session) => session,
+            NativeRow::Skip => continue,
+            NativeRow::More => {
+                truncated = true;
+                break;
+            }
+        };
+        scanned += 1;
         for question in &session.pending_questions {
             if question.status != PendingQuestionStatus::Pending {
                 continue;
@@ -301,6 +367,14 @@ pub async fn handle_question_state(
             ScratchError::new(StatusCode::NOT_FOUND, "native session is not loaded".into())
         })?;
     let session = session.lock().await;
+    if crate::coordination::scope::session_source_root(&session)
+        .is_none_or(|source| !same_native_project_root(&source, std::path::Path::new(&root)))
+    {
+        return Err(ScratchError::new(
+            StatusCode::CONFLICT,
+            "Question source belongs to another project".into(),
+        ));
+    }
     let question = session
         .pending_questions
         .iter()
@@ -331,6 +405,139 @@ mod tests {
     use refact_chat_api::{PendingQuestion, QuestionAnswer};
     use std::sync::Arc;
     use tokio::sync::Mutex;
+
+    fn pending_question(tool_call_id: &str) -> PendingQuestionSet {
+        PendingQuestionSet {
+            tool_call_id: tool_call_id.into(),
+            asked_at_ms: 1,
+            questions: vec![PendingQuestion {
+                id: "ok".into(),
+                question_type: "yes_no".into(),
+                text: "Continue?".into(),
+                options: None,
+            }],
+            status: PendingQuestionStatus::Pending,
+            answers: vec![],
+            resolution_id: None,
+            response_protocol_version: refact_chat_api::QUESTION_RESPONSE_PROTOCOL_VERSION,
+            response: None,
+        }
+    }
+
+    async fn install_buddy(app: &AppState, root: std::path::PathBuf) {
+        let (tx, _) = tokio::sync::broadcast::channel(16);
+        *app.buddy.buddy.lock().await = Some(crate::buddy::actor::BuddyService::new(
+            root,
+            crate::buddy::state::default_buddy_state(),
+            crate::buddy::settings::BuddySettings::default(),
+            vec![],
+            crate::buddy::runtime_queue::RuntimeQueue::new(),
+            tx,
+            None,
+        ));
+    }
+
+    async fn insert_question_session(app: &AppState, chat_id: &str, source: &std::path::Path) {
+        let mut session = ChatSession::new(chat_id.into());
+        session.work_project_root = Some(source.to_path_buf());
+        session
+            .register_pending_questions(pending_question(&format!("{chat_id}-question")))
+            .unwrap();
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(chat_id.into(), Arc::new(Mutex::new(session)));
+    }
+
+    #[tokio::test]
+    async fn multi_root_workspace_projects_only_the_buddy_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = dunce::canonicalize(temp.path()).unwrap();
+        let buddy_root = base.join("project");
+        let extra = base.join("module");
+        std::fs::create_dir_all(&buddy_root).unwrap();
+        std::fs::create_dir_all(&extra).unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+            base.join("cache"),
+            base.join("config"),
+        )
+        .await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() =
+            vec![extra.clone(), buddy_root.clone()];
+        let app = AppState::from_gcx(gcx.clone()).await;
+        install_buddy(&app, buddy_root.clone()).await;
+        insert_question_session(&app, "buddy-chat", &buddy_root).await;
+        insert_question_session(&app, "extra-chat", &extra).await;
+
+        let projection = handle_current_decisions(State(app.clone()))
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(projection.project_root, buddy_root.to_string_lossy());
+        let chats: Vec<_> = projection
+            .questions
+            .iter()
+            .map(|view| view.chat_id.as_str())
+            .collect();
+        assert_eq!(chats, vec!["buddy-chat"]);
+        assert!(projection
+            .questions
+            .iter()
+            .all(|view| view.project_root == projection.project_root));
+        let work = super::super::buddy_native_work::handle_native_work(
+            State(app.clone()),
+            Query(serde_json::from_value(serde_json::json!({})).unwrap()),
+        )
+        .await
+        .unwrap()
+        .0;
+        let work = serde_json::to_value(&work).unwrap();
+        assert_eq!(work["project_root"], buddy_root.to_string_lossy().as_ref());
+        let chats: Vec<_> = work["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|session| session["chat_id"].as_str().unwrap())
+            .collect();
+        assert_eq!(chats, vec!["buddy-chat"]);
+        let extra_answer = handle_question_state(
+            State(app.clone()),
+            Path(("extra-chat".into(), "extra-chat-question".into())),
+            Query(DecisionProjectQuery {
+                project_root: extra.to_string_lossy().into_owned(),
+            }),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert_eq!(extra_answer.status_code, StatusCode::CONFLICT);
+        let bypass = handle_question_state(
+            State(app.clone()),
+            Path(("extra-chat".into(), "extra-chat-question".into())),
+            Query(DecisionProjectQuery {
+                project_root: buddy_root.to_string_lossy().into_owned(),
+            }),
+        )
+        .await
+        .err()
+        .expect("bound root must not authorize a foreign question");
+        assert_eq!(bypass.status_code, StatusCode::CONFLICT);
+
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![extra.clone()];
+        let detached = handle_current_decisions(State(app.clone()))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(detached.status_code, StatusCode::SERVICE_UNAVAILABLE);
+
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![];
+        let empty = handle_current_decisions(State(app.clone()))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(empty.status_code, StatusCode::SERVICE_UNAVAILABLE);
+    }
 
     #[tokio::test]
     async fn native_projection_preserves_identity_and_waits_for_durable_resolution() {

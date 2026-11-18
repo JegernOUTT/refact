@@ -83,7 +83,7 @@ pub(crate) fn track_cancellable_spawn_owner(
 /// `close_admission` permanently refuses all later spawn-owner registration and
 /// must therefore be set only when the process is actually shutting down.
 /// `BackgroundTasksHolder::abort` is also used to *recycle* a holder at runtime
-/// (vecdb reload), and latching this process-global gate there would make every
+/// during runtime reconfiguration, and latching this process-global gate there would make every
 /// later supervised spawn fail with "spawn owner shutdown or capacity reached"
 /// for the remaining life of the process.
 pub(crate) async fn drain_spawn_owners(close_admission: bool) {

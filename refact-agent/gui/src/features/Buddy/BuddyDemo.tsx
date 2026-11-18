@@ -42,7 +42,6 @@ const SIGNAL_GROUPS: {
       { key: "memory_extract", label: "🧠 Memory", variant: "purple" },
       { key: "knowledge_update", label: "📚 Knowledge", variant: "purple" },
       { key: "indexing", label: "📂 Index", variant: "purple" },
-      { key: "vecdb_building", label: "🧮 VecDB", variant: "purple" },
       { key: "codegraph_indexing", label: "🕸 Codegraph", variant: "purple" },
       { key: "ast_parsing", label: "🌳 AST", variant: "purple" },
       { key: "compression", label: "🗜 Compress", variant: "purple" },

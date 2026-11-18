@@ -64,7 +64,6 @@ const RUN_TOOLS: ReadonlySet<string> = new Set([
 
 const SEARCH_TOOLS: ReadonlySet<string> = new Set([
   "search_pattern",
-  "search_semantic",
   "search_symbol_definition",
   "glob",
   "tree",
@@ -321,7 +320,6 @@ const SPECIALIZED_TOOL_NAMES: ReadonlySet<string> = new Set([
   "cat",
   "tree",
   "search_pattern",
-  "search_semantic",
   "search_symbol_definition",
   "glob",
   "subagent",

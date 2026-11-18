@@ -404,8 +404,6 @@ window.fetch = async (input, init) => {
     return json({
       cloud_name: "Preview",
       chat_models: {},
-      code_completion_models: {},
-      embedding_models: {},
       tokenizer_rewrite_path: {},
       running_models: [],
       models_dict_patch: {},

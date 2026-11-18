@@ -32,7 +32,7 @@ pub fn functions() -> Vec<EngineFn> {
             summary: "One provider's settings with every secret masked, its endpoints and selected models. Does not refresh tokens.",
             class: EngineClass::RedactedRead,
             input: || json!({"type":"object","additionalProperties":false,"required":["provider"],"properties":{"provider":provider_arg()}}),
-            output: || Some(json!({"type":"object","required":["name","base_provider","status","settings"],"properties":{"name":{"type":"string"},"base_provider":{"type":"string"},"display_name":{"type":"string"},"enabled":{"type":"boolean"},"readonly":{"type":"boolean"},"has_credentials":{"type":"boolean"},"status":{"type":"string"},"settings":{"type":"object"},"endpoints":{"type":"object","properties":{"chat":{"type":"string"},"completion":{"type":"string"},"embedding":{"type":"string"}}},"wire_format":{"type":"string"},"chat_models":{"type":"array"},"embedding_model":{"type":"object"}}})),
+            output: || Some(json!({"type":"object","required":["name","base_provider","status","settings"],"properties":{"name":{"type":"string"},"base_provider":{"type":"string"},"display_name":{"type":"string"},"enabled":{"type":"boolean"},"readonly":{"type":"boolean"},"has_credentials":{"type":"boolean"},"status":{"type":"string"},"settings":{"type":"object"},"endpoints":{"type":"object","properties":{"chat":{"type":"string"}}},"wire_format":{"type":"string"},"chat_models":{"type":"array"}}})),
             handler: get,
             preview: None,
             timeout: None,
@@ -131,14 +131,9 @@ fn get<'a>(
         });
         let runtime = &detail["runtime"];
         if runtime.is_object() {
-            data["endpoints"] = masked(
-                json!({"chat":runtime["chat_endpoint"],"completion":runtime["completion_endpoint"],"embedding":runtime["embedding_endpoint"]}),
-            );
+            data["endpoints"] = masked(json!({"chat":runtime["chat_endpoint"]}));
             data["wire_format"] = runtime["wire_format"].clone();
             data["chat_models"] = masked(runtime["chat_models"].clone());
-            if !runtime["embedding_model"].is_null() {
-                data["embedding_model"] = masked(runtime["embedding_model"].clone());
-            }
         }
         let text = format!(
             "{} ({}): {}",
@@ -682,14 +677,7 @@ const REFUSED_KEYS: &[&str] = &[
     "display_name",
 ];
 
-const ENDPOINT_KEYS: &[&str] = &[
-    "chat_endpoint",
-    "completion_endpoint",
-    "embedding_endpoint",
-    "base_url",
-    "endpoint",
-    "api_base",
-];
+const ENDPOINT_KEYS: &[&str] = &["chat_endpoint", "base_url", "endpoint", "api_base"];
 
 /// Keys whose change is a plain settings change; any other key, and any value that is a URL or
 /// host, changes how or where requests go and makes the card risky.

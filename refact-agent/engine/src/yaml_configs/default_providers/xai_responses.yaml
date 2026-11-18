@@ -1,7 +1,5 @@
 wire_format: openai_responses
 chat_endpoint: https://api.x.ai/v1/responses
-supports_completion: false
-
 api_key: xai-...
 
 running_models:

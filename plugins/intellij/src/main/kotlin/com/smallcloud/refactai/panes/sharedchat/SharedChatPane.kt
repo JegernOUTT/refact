@@ -40,8 +40,6 @@ import com.intellij.testFramework.LightVirtualFile
 import com.intellij.util.Alarm
 import com.intellij.util.SystemProperties
 import com.intellij.util.concurrency.AppExecutorUtil
-import com.smallcloud.refactai.FimCache
-import com.smallcloud.refactai.io.InferenceGlobalContext
 import com.smallcloud.refactai.io.InferenceGlobalContextChangedNotifier
 import com.smallcloud.refactai.lsp.LSPBackendConnectionStatus
 import com.smallcloud.refactai.lsp.LSPProcessHolderChangedNotifier
@@ -421,11 +419,6 @@ class SharedChatPane(val project: Project) : JPanel(), Disposable {
                     logger.info("ast changed to: $newValue")
                     this@SharedChatPane.sendUserConfig()
                 }
-
-                override fun vecdbFlagChanged(newValue: Boolean) {
-                    logger.info("vecdb changed to: $newValue")
-                    this@SharedChatPane.sendUserConfig()
-                }
             })
 
         editor.project.messageBus.connect(this)
@@ -461,12 +454,6 @@ class SharedChatPane(val project: Project) : JPanel(), Disposable {
                 this@SharedChatPane.sendUserConfig()
             }
         })
-
-        paneScope.launch {
-            FimCache.subscribe { data ->
-                this@SharedChatPane.sendFimData(data)
-            }
-        }
     }
 
     private fun setLookAndFeel() {
@@ -609,20 +596,6 @@ class SharedChatPane(val project: Project) : JPanel(), Disposable {
                     ShowSettingsUtil.getInstance().showSettingsDialog(project, AppSettingsConfigurable::class.java)
                 }, ModalityState.defaultModalityState())
             }, 25)
-        }
-    }
-
-    private fun sendFimData(data: Events.Fim.FimDebugPayload) {
-        val message = Events.Fim.Receive(data)
-        this.postMessage(message)
-    }
-
-    private fun handleFimRequest() {
-        if (FimCache.last == null) {
-            val message = Events.Fim.Error("Data not found, try causing a completion in the editor.")
-            postMessage(message)
-        } else {
-            this.sendFimData(FimCache.last!!)
         }
     }
 
@@ -1131,7 +1104,6 @@ class SharedChatPane(val project: Project) : JPanel(), Disposable {
             is Editor.NewFile -> this.handleNewFile(event.content)
             is Events.OpenSettings -> this.handleOpenSettings()
             is Events.Setup.OpenExternalUrl -> this.openExternalUrl(event.url)
-            is Events.Fim.Request -> this.handleFimRequest()
             is Events.OpenHotKeys -> this.handleOpenHotKeys()
             is Events.OpenChatInBrowser -> this.handleOpenChatInBrowser()
             is Events.OpenFile -> this.handleOpenFile(event.payload.filePath, event.payload.line)
@@ -1161,10 +1133,6 @@ class SharedChatPane(val project: Project) : JPanel(), Disposable {
                 ProjectRootManager.getInstance(project).contentRoots.forEach {
                     this.handleForceReloadFileByPath(it.path)
                 }
-            }
-
-            is Editor.SetCodeCompletionModel -> {
-                InferenceGlobalContext.instance.model = event.model
             }
 
             is Events.DropdownStateChanged -> {

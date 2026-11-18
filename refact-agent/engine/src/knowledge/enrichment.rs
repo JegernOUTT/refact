@@ -117,10 +117,9 @@ struct EnrichmentCacheKey {
     allowed_roots_fingerprint: [u8; 32],
     privacy_generation: u64,
     index_generation: u64,
-    embedding_config_fingerprint: [u8; 32],
+    lexical_index_fingerprint: [u8; 32],
     current_root_fingerprint: [u8; 32],
     top_n_memories: usize,
-    top_n_trajectories: usize,
     score_threshold_bits: u32,
 }
 
@@ -620,42 +619,17 @@ async fn enrichment_cache_key(
     let current_root = enrichment_current_root_id(gcx.clone(), current_chat_id).await;
     let current_root_fingerprint =
         fingerprint_bytes(&[current_root.as_deref().unwrap_or_default().as_bytes()]);
-    let (embedding_config_fingerprint, index_generation) = {
-        let vecdb = gcx.vec_db.lock().await.clone();
-        match vecdb {
-            Some(vecdb) => {
-                let (config, splitter_window_size) = vecdb.current_constants();
-                let backend_identity = format!("{:p}", Arc::as_ptr(&vecdb));
-                let model = fingerprint_strings([
-                    backend_identity,
-                    config.model_id,
-                    config.endpoint,
-                    config.endpoint_style,
-                    config.embedding_endpoint_style,
-                    config.model_name,
-                    fingerprint_hex(&fingerprint_bytes(&[config.api_key.as_bytes()])),
-                    config.embedding_size.to_string(),
-                    config.dimensions.unwrap_or_default().to_string(),
-                    config.query_prefix,
-                    config.document_prefix,
-                    config.rejection_threshold.to_bits().to_string(),
-                    config.embedding_batch.to_string(),
-                    config.n_ctx.to_string(),
-                    splitter_window_size.to_string(),
-                ]);
-                (
-                    model,
-                    gcx.enrichment_generation
-                        .load(std::sync::atomic::Ordering::Acquire),
-                )
-            }
-            None => (
-                fingerprint_bytes(&[b"fallback-enrichment-search"]),
-                gcx.enrichment_generation
-                    .load(std::sync::atomic::Ordering::Acquire),
-            ),
-        }
-    };
+    let index_generation = gcx
+        .knowledge_generation
+        .load(std::sync::atomic::Ordering::Acquire);
+    let index_ready = gcx.knowledge_index.lock().await.is_ready();
+    let lexical_index_fingerprint = fingerprint_strings([
+        "lexical-knowledge".to_string(),
+        index_ready.to_string(),
+        gcx.enrichment_generation
+            .load(std::sync::atomic::Ordering::Acquire)
+            .to_string(),
+    ]);
     EnrichmentCacheKey {
         query_fingerprint: fingerprint_bytes(&[query_text.as_bytes()]),
         workspace_scope_fingerprint,
@@ -665,10 +639,9 @@ async fn enrichment_cache_key(
             .privacy
             .load(std::sync::atomic::Ordering::Acquire),
         index_generation,
-        embedding_config_fingerprint,
+        lexical_index_fingerprint,
         current_root_fingerprint,
         top_n_memories: settings.auto_enrichment_knowledge_top_n,
-        top_n_trajectories: settings.auto_enrichment_trajectory_top_n,
         score_threshold_bits: score_threshold.to_bits(),
     }
 }
@@ -1025,7 +998,6 @@ async fn create_knowledge_context(
                 gcx_for_fetch.clone(),
                 &query_for_fetch,
                 settings.auto_enrichment_knowledge_top_n,
-                settings.auto_enrichment_trajectory_top_n,
                 current_chat_for_fetch.as_deref(),
                 current_chat_for_fetch.as_deref(),
             )
@@ -1117,7 +1089,7 @@ async fn create_knowledge_context(
     let result_fingerprint = fingerprint_hex(&cached.result_fingerprint);
     let index_fingerprint = fingerprint_hex(&fingerprint_bytes(&[
         cache_key.index_generation.to_string().as_bytes(),
-        &cache_key.embedding_config_fingerprint,
+        &cache_key.lexical_index_fingerprint,
     ]));
     let identity = format!("{query_fingerprint}:{result_fingerprint}:{index_fingerprint}");
     let mut context = ChatMessage {
@@ -1677,10 +1649,9 @@ mod tests {
             allowed_roots_fingerprint: [2; 32],
             privacy_generation: 1,
             index_generation: 1,
-            embedding_config_fingerprint: [3; 32],
+            lexical_index_fingerprint: [3; 32],
             current_root_fingerprint: [4; 32],
             top_n_memories: crate::runtime_settings::current().auto_enrichment_knowledge_top_n,
-            top_n_trajectories: crate::runtime_settings::current().auto_enrichment_trajectory_top_n,
             score_threshold_bits: KNOWLEDGE_SCORE_THRESHOLD.to_bits(),
         }
     }
@@ -1715,7 +1686,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn enrichment_cache_separates_scope_privacy_and_model_identities() {
+    async fn enrichment_cache_separates_scope_privacy_and_index_identities() {
         let cache = EnrichmentCache::default();
         let calls = std::sync::atomic::AtomicUsize::new(0);
         let base = cache_key(1);
@@ -1723,9 +1694,9 @@ mod tests {
         distinct_scope.workspace_scope_fingerprint = [2; 32];
         let mut distinct_privacy = base;
         distinct_privacy.privacy_generation = 2;
-        let mut distinct_model = base;
-        distinct_model.embedding_config_fingerprint = [4; 32];
-        for key in [base, distinct_scope, distinct_privacy, distinct_model] {
+        let mut distinct_index = base;
+        distinct_index.lexical_index_fingerprint = [4; 32];
+        for key in [base, distinct_scope, distinct_privacy, distinct_index] {
             cache
                 .get_or_fetch(key, || async {
                     calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -1736,6 +1707,26 @@ mod tests {
         }
 
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 4);
+    }
+
+    #[tokio::test]
+    async fn lexical_cache_key_invalidates_when_index_becomes_ready_or_knowledge_changes() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let initial =
+            enrichment_cache_key(gcx.clone(), "needle", None, KNOWLEDGE_SCORE_THRESHOLD).await;
+        gcx.knowledge_index.lock().await.mark_ready();
+        let ready =
+            enrichment_cache_key(gcx.clone(), "needle", None, KNOWLEDGE_SCORE_THRESHOLD).await;
+        assert_ne!(initial, ready);
+        gcx.knowledge_generation
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let changed =
+            enrichment_cache_key(gcx.clone(), "needle", None, KNOWLEDGE_SCORE_THRESHOLD).await;
+        assert_ne!(ready, changed);
+        gcx.enrichment_generation
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let refreshed = enrichment_cache_key(gcx, "needle", None, KNOWLEDGE_SCORE_THRESHOLD).await;
+        assert_ne!(changed, refreshed);
     }
 
     #[test]

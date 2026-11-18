@@ -643,28 +643,6 @@ function processToolCalls(
     );
   }
 
-  if (headName === "search_semantic") {
-    const elem = (
-      <SearchTool
-        key={`search-semantic-tool-${processed.length}`}
-        toolCall={normalizedHead}
-        toolType="search_semantic"
-        contextFiles={contextFiles}
-      />
-    );
-    return processToolCalls(
-      tail,
-      toolResults,
-      features,
-      [...processed, elem],
-      contextFilesByToolId,
-      diffsByToolId,
-      activeToolCallId,
-      onOpenTrajectory,
-      threadId,
-    );
-  }
-
   if (headName === "search_symbol_definition") {
     const elem = (
       <SearchTool

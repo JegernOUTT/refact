@@ -54,31 +54,34 @@ fn not_attempted_reason(detail: impl Into<String>) -> OperatorUnavailableReason 
 /// Read-only rollout discovery: an unavailable store must never enable legacy writers.
 /// `mode` is a pure function of (settings.operator_enabled, runtime presence, project
 /// scope): `disabled` only when the user turned the operator off, `enabled` only when
-/// the durable store is open for the single active project root, `unavailable`
-/// otherwise — including a service that has not started yet, a store that failed to
-/// open, and a multi-root or mismatched workspace scope.
+/// the durable store is open and Buddy's bound project root is still a workspace
+/// root, `unavailable` otherwise — including a service that has not started yet, a
+/// store that failed to open, and a workspace that no longer contains Buddy's root.
 pub async fn handle_operator_status(
     State(app): State<AppState>,
 ) -> Result<axum::Json<OperatorStatus>, ScratchError> {
-    let roots = crate::files_correction::get_unscoped_project_dirs(app.gcx.clone()).await;
+    use crate::buddy::operator_runtime::BuddyRootScope;
+    let scope = crate::buddy::operator_runtime::buddy_root_scope(&app).await;
     let buddy = app.buddy.buddy.lock().await;
     let service = buddy.as_ref();
     let features = service.map(|s| s.operator_features).unwrap_or_default();
-    let current = service.filter(|s| roots.len() == 1 && roots[0] == s.project_root);
+    let current = service.filter(|s| scope == BuddyRootScope::Bound(s.project_root.clone()));
     let runtime = current.and_then(|s| s.outcome_runtime.as_ref());
     let mode = match service {
         Some(service) if !service.operator_features.storage => "disabled",
         Some(_) if runtime.is_some() => "enabled",
         _ => "unavailable",
     };
-    let unavailable_reason = (mode == "unavailable").then(|| {
-        current
-            .map(|service| unavailable_reason(service.operator_unavailable_status()))
-            .unwrap_or_else(|| {
-                not_attempted_reason(
-                    "Buddy needs one active project before it can open saved work.",
-                )
-            })
+    let unavailable_reason = (mode == "unavailable").then(|| match current {
+        Some(service) => unavailable_reason(service.operator_unavailable_status()),
+        None if service.is_some() && matches!(scope, BuddyRootScope::Detached(_)) => {
+            OperatorUnavailableReason {
+                kind: OperatorOpenFailureKind::ProjectMismatch.as_str(),
+                detail: "Buddy's saved work belongs to a project that is no longer open in this workspace.".into(),
+                retry_in_seconds: None,
+            }
+        }
+        None => not_attempted_reason("Buddy needs an open project before it can open saved work."),
     });
     Ok(axum::Json(OperatorStatus {
         schema_version: 1,
@@ -1121,6 +1124,77 @@ mod resource_http_tests {
             .unwrap()
             .shutdown()
             .await;
+    }
+
+    #[tokio::test]
+    async fn status_and_reopen_follow_the_bound_root_in_a_multi_root_workspace() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = dunce::canonicalize(temp.path()).unwrap();
+        let root = base.join("project");
+        let extra = base.join("module");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&extra).unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+            base.join("cache"),
+            base.join("config"),
+        )
+        .await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![extra.clone(), root.clone()];
+        let app = AppState::from_gcx(gcx.clone()).await;
+        let holder = crate::buddy::operator_runtime::open_project_runtime(&root).unwrap();
+        let (tx, _) = tokio::sync::broadcast::channel(16);
+        let mut service = crate::buddy::actor::BuddyService::new(
+            root.clone(),
+            crate::buddy::state::default_buddy_state(),
+            crate::buddy::settings::BuddySettings::default(),
+            vec![],
+            crate::buddy::runtime_queue::RuntimeQueue::new(),
+            tx,
+            None,
+        );
+        service.enable_operator_from_settings();
+        assert!(service.outcome_runtime.is_none());
+        *app.buddy.buddy.lock().await = Some(service);
+        let contended = handle_operator_status(State(app.clone())).await.unwrap().0;
+        assert_eq!(contended.mode, "unavailable");
+        assert_eq!(contended.unavailable_reason.unwrap().kind, "already_owned");
+
+        holder.shutdown().await;
+        let reopened = handle_operator_reopen(State(app.clone())).await.unwrap().0;
+        assert_eq!(reopened.mode, "enabled");
+        assert!(reopened.unavailable_reason.is_none());
+        let project = reopened.project.unwrap();
+        assert_eq!(project.canonical_root, root.to_string_lossy());
+        let status = handle_operator_status(State(app.clone())).await.unwrap().0;
+        assert_eq!(status.mode, "enabled");
+        assert_eq!(status.project.unwrap(), project);
+        let runtime = gated_runtime(&app, OperatorCapability::Storage)
+            .await
+            .unwrap();
+        assert_eq!(runtime.project(), project);
+
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![extra.clone()];
+        let detached = handle_operator_status(State(app.clone())).await.unwrap().0;
+        assert_eq!(detached.mode, "unavailable");
+        assert!(detached.project.is_none());
+        assert_eq!(
+            detached.unavailable_reason.unwrap().kind,
+            "project_mismatch"
+        );
+        let still_detached = handle_operator_reopen(State(app.clone())).await.unwrap().0;
+        assert_eq!(still_detached.mode, "unavailable");
+        assert!(gated_runtime(&app, OperatorCapability::Storage)
+            .await
+            .is_err());
+
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![];
+        let empty = handle_operator_status(State(app.clone())).await.unwrap().0;
+        assert_eq!(empty.mode, "unavailable");
+        assert_eq!(empty.unavailable_reason.unwrap().kind, "not_attempted");
+        assert!(gated_runtime(&app, OperatorCapability::Storage)
+            .await
+            .is_err());
+        runtime.shutdown().await;
     }
 
     #[tokio::test]

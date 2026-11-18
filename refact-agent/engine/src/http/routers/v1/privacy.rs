@@ -575,22 +575,6 @@ pub(crate) async fn collect_destinations(
                 display_name: id,
             });
         }
-        for model in caps.completion_models.values() {
-            let id = provider_id(&model.base.id);
-            destinations.push(Destination {
-                id: DestinationId(id.clone()),
-                kind: DestinationKind::Completion,
-                display_name: id,
-            });
-        }
-        if !caps.embedding_model.base.id.is_empty() {
-            let id = provider_id(&caps.embedding_model.base.id);
-            destinations.push(Destination {
-                id: DestinationId(id.clone()),
-                kind: DestinationKind::Provider,
-                display_name: id,
-            });
-        }
     }
     let mut mcp_paths =
         crate::integrations::setting_up_integrations::integrations_all(app.gcx.clone(), false)
@@ -751,7 +735,6 @@ fn destination_key(destination: &Destination) -> (u8, &str) {
         DestinationKind::Provider => 0,
         DestinationKind::Mcp => 1,
         DestinationKind::SubagentModel => 2,
-        DestinationKind::Completion => 3,
     };
     (kind, destination.id.0.as_str())
 }

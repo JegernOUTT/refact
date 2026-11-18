@@ -382,7 +382,7 @@ mod rules {
     }
 
     fn is_checked_default_field(field: &str) -> bool {
-        is_chat_default_field(field) || field == "completion_model"
+        is_chat_default_field(field)
     }
 
     pub fn provider_tuning_missing(

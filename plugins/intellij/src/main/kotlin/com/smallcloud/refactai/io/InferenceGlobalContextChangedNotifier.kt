@@ -8,19 +8,13 @@ interface InferenceGlobalContextChangedNotifier {
     fun userInferenceUriChanged(newUrl: String?) {}
     fun refactBinaryPathChanged(newPath: String?) {}
     fun temperatureChanged(newTemp: Float?) {}
-    fun modelChanged(newModel: String?) {}
-    fun lastAutoModelChanged(newModel: String?) {}
-    fun useAutoCompletionModeChanged(newValue: Boolean) {}
     fun developerModeEnabledChanged(newValue: Boolean) {}
     fun astFlagChanged(newValue: Boolean) {}
     fun astFileLimitChanged(newValue: Int) {}
-    fun vecdbFlagChanged(newValue: Boolean) {}
-    fun vecdbFileLimitChanged(newValue: Int) {}
     fun codegraphFlagChanged(newValue: Boolean) {}
     fun codegraphFileLimitChanged(newValue: Int) {}
     fun xDebugLSPPortChanged(newPort: Int?) {}
     fun insecureSSLChanged(newValue: Boolean) {}
-    fun completionMaxTokensChanged(newMaxTokens: Int) {}
     fun experimentalLspFlagEnabledChanged(newValue: Boolean) {}
     fun httpHostChanged(newValue: String) {}
     fun browserHostChanged(newValue: String) {}

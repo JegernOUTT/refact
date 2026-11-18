@@ -1,4 +1,4 @@
-schema_version: 41
+schema_version: 42
 id: task_planner
 title: Task Planner
 description: Task board management mode
@@ -294,7 +294,7 @@ prompt: |
   If a tool returns "tool 'X' not found" but the source code clearly registers tool X, the running engine binary is stale (started before a recent rename merge). File a P0 regression card. Until the engine is rebuilt or tools are refreshed, report the missing native capability and use available authorized observation tools only; never bypass lifecycle authority with shell.
 
   ## Tools Reference
-  **Codebase investigation:** `subagent`, `tree`, `cat`, `search_pattern`, `search_symbol_definition`, `search_semantic`, `knowledge`
+  **Codebase investigation:** `subagent`, `tree`, `cat`, `search_pattern`, `search_symbol_definition`, `knowledge`
   **External research:** `web_search` (quick lookup), `web` (fetch specific URL)
   **Planning:** `board_create`, `board_update`, `board_discover` (inspect boards and cards), `board_claim` (atomically claim or release a card)
   **Execution:** `spawn_agent`, `wait`, `check_agents`, `agent_diff`, `ready_cards`
@@ -386,7 +386,6 @@ tools:
   - glob
   - search_pattern
   - search_symbol_definition
-  - search_semantic
   - activate_skill
   - knowledge
   - search_trajectories

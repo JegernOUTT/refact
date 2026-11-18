@@ -1128,7 +1128,6 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + Clone + Send + Sync 
                 auth_manager: None,
                 auth_status: MCPAuthStatus::NotApplicable,
                 oauth_refresh_task_handle: None,
-                resource_index_task: None,
                 oauth_probe: None,
                 sampling_session_approved: false,
                 active_progress: Vec::new(),
@@ -1171,9 +1170,6 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + Clone + Send + Sync 
         }
         if let Some(recovery_task) = session_downcasted.recovery_task.take() {
             recovery_task.abort();
-        }
-        if let Some(index_task) = session_downcasted.resource_index_task.take() {
-            index_task.abort();
         }
 
         prepare_mcp_session_for_start(session_downcasted, new_cfg_value.clone(), config_changed);
@@ -1642,7 +1638,7 @@ async fn install_health_monitor<T: MCPTransportInitializer + Clone + Send + Sync
 
 /// Shared tail for every successful connect (initial, initial recovery, health reconnect):
 /// loads server info, resources and prompts, publishes the catalog and starts the owned
-/// resource-index and OAuth refresh tasks. Returns false when the session moved on.
+/// OAuth refresh task. Returns false when the session moved on.
 async fn publish_connected_client(
     session: &SessionArc,
     client_arc: &Arc<AMutex<Option<McpRunningService>>>,
@@ -1729,19 +1725,6 @@ async fn publish_connected_client(
         mcp.connection_status = MCPConnectionStatus::Connected;
         mcp.last_logged_status = None;
         mcp.last_successful_connection = Some(Instant::now());
-        if let Some(previous) = mcp.resource_index_task.take() {
-            previous.abort();
-        }
-        if !resources.is_empty() {
-            let index_task = tokio::spawn(super::mcp_resources::index_mcp_resources(
-                gcx_weak.clone(),
-                config_path.clone(),
-                peer,
-                resources,
-                logs.clone(),
-            ));
-            mcp.resource_index_task = Some(index_task.abort_handle());
-        }
         if mcp.auth_manager.is_some() {
             let refresh_task = tokio::spawn(mcp_oauth_refresh_task(session.clone(), config_path));
             if let Some(old) = mcp
@@ -2090,7 +2073,6 @@ mod tests {
                 auth_manager: None,
                 auth_status: super::super::session_mcp::MCPAuthStatus::NotApplicable,
                 oauth_refresh_task_handle: None,
-                resource_index_task: None,
                 oauth_probe: None,
                 sampling_session_approved: false,
                 active_progress: Vec::new(),
@@ -3003,7 +2985,6 @@ mod tests {
                 auth_manager: None,
                 auth_status: MCPAuthStatus::NotApplicable,
                 oauth_refresh_task_handle: None,
-                resource_index_task: None,
                 oauth_probe: None,
                 sampling_session_approved: false,
                 active_progress: Vec::new(),

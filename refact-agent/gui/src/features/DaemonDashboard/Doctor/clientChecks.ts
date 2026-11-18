@@ -119,15 +119,13 @@ export function collectProviderModels(
 ): string[] {
   if (!data || typeof data !== "object") return [];
   const models: string[] = [];
-  for (const group of ["chat_models", "completion_models"]) {
-    const value = (data as Record<string, unknown>)[group];
-    if (!Array.isArray(value)) continue;
-    for (const entry of value as unknown[]) {
-      if (!entry || typeof entry !== "object") continue;
-      const name = (entry as { name?: unknown }).name;
-      if (typeof name === "string" && name.length > 0) {
-        models.push(`${providerName}/${name}`);
-      }
+  const value = (data as Record<string, unknown>).chat_models;
+  if (!Array.isArray(value)) return models;
+  for (const entry of value as unknown[]) {
+    if (!entry || typeof entry !== "object") continue;
+    const name = (entry as { name?: unknown }).name;
+    if (typeof name === "string" && name.length > 0) {
+      models.push(`${providerName}/${name}`);
     }
   }
   return models;

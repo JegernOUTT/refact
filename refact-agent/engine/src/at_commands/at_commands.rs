@@ -346,7 +346,7 @@ pub trait AtCommand: Send + Sync {
     ) -> Result<(Vec<ContextEnum>, String), String>;
     fn depends_on(&self) -> Vec<String> {
         vec![]
-    } // "ast", "vecdb"
+    }
 }
 
 #[async_trait]
@@ -385,10 +385,6 @@ pub async fn at_commands_dict(app: AppState) -> HashMap<String, Arc<dyn AtComman
             Arc::new(AtWeb::new()) as Arc<dyn AtCommand + Send>,
         ),
         (
-            "@search".to_string(),
-            Arc::new(crate::at_commands::at_search::AtSearch::new()) as Arc<dyn AtCommand + Send>,
-        ),
-        (
             "@knowledge-load".to_string(),
             Arc::new(crate::at_commands::at_knowledge::AtLoadKnowledge::new())
                 as Arc<dyn AtCommand + Send>,
@@ -396,14 +392,10 @@ pub async fn at_commands_dict(app: AppState) -> HashMap<String, Arc<dyn AtComman
     ]);
 
     let codegraph_on = app.gcx.codegraph.lock().await.is_some();
-    let vecdb_on = app.workspace.vec_db.lock().await.is_some();
     let mut result = HashMap::new();
     for (key, value) in at_commands_dict {
         let depends_on = value.depends_on();
         if depends_on.contains(&"codegraph".to_string()) && !codegraph_on {
-            continue;
-        }
-        if depends_on.contains(&"vecdb".to_string()) && !vecdb_on {
             continue;
         }
         result.insert(key, value);

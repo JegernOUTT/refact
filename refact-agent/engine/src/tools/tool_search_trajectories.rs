@@ -6,20 +6,84 @@ use tokio::sync::Mutex as AMutex;
 
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatMessage, ChatContent, ContextEnum};
+use crate::chat::trajectory_search::{
+    query_terms, search_saved_trajectories, RefreshStats, SearchLimits, TrajectoryHit,
+};
 use crate::tools::tools_description::{
     Tool, ToolDesc, ToolSource, ToolSourceType, json_schema_from_params,
 };
-use crate::memories::memories_search;
 
 pub struct ToolSearchTrajectories {
     pub config_path: String,
 }
+
+pub const NO_MATCHING_TRAJECTORIES: &str = "No matching trajectories found.";
 
 fn hist_search_preview_notice(shown: usize, total: usize, limit: usize) -> String {
     format!(
         "\n⚠️ showing {} of {} preview characters (limit: hist_search_preview_chars = {}). 💡 Raise hist_search_preview_chars in trajectory settings or call get_trajectory_context() to expand.",
         shown, total, limit
     )
+}
+
+fn coverage_notes(stats: &RefreshStats) -> String {
+    let mut notes = String::new();
+    if stats.pending > 0 {
+        notes.push_str(&format!(
+            "\n⚠️ {} changed trajectories were not indexed yet (per-search read limit); repeat the search to include them.",
+            stats.pending
+        ));
+    }
+    if stats.over_cap > 0 {
+        notes.push_str(&format!(
+            "\n⚠️ {} older trajectories are beyond the search cap and were not searched.",
+            stats.over_cap
+        ));
+    }
+    notes
+}
+
+pub fn format_search_output(
+    hits: &[TrajectoryHit],
+    stats: &RefreshStats,
+    preview_chars: usize,
+) -> String {
+    let Some(top_score) = hits.first().map(|hit| hit.score) else {
+        return format!("{}{}", NO_MATCHING_TRAJECTORIES, coverage_notes(stats));
+    };
+    let mut result = format!("Found {} relevant trajectories:\n\n", hits.len());
+    for hit in hits {
+        result.push_str("───────────────────────────────────────\n");
+        result.push_str(&format!("📁 {}\n", hit.trajectory_id));
+        result.push_str(&format!("📌 {}\n", hit.title));
+        result.push_str(&format!(
+            "⭐ Relevance: {:.0}%\n",
+            hit.score / top_score * 100.0
+        ));
+        result.push_str(&format!(
+            "📍 Messages: {}-{}\n",
+            hit.message_start, hit.message_end
+        ));
+        result.push('\n');
+        let total_chars = hit.snippet.chars().count();
+        let preview: String = hit.snippet.chars().take(preview_chars).collect();
+        result.push_str(&preview);
+        if total_chars > preview_chars {
+            result.push_str(&hist_search_preview_notice(
+                preview_chars,
+                total_chars,
+                preview_chars,
+            ));
+        }
+        result.push_str("\n\n");
+    }
+    result.push_str("───────────────────────────────────────\n");
+    result.push_str(
+        "💡 Use get_trajectory_context(trajectory_id, message_start, message_end) to expand.\n",
+    );
+    result.push_str("\nNote: these are keyword matches and may be unrelated.");
+    result.push_str(&coverage_notes(stats));
+    result
 }
 
 #[async_trait]
@@ -34,8 +98,8 @@ impl Tool for ToolSearchTrajectories {
             },
             experimental: false,
             allow_parallel: true,
-            description: "Search past chat trajectories for relevant patterns, solutions, and context. Returns matching trajectory IDs with message ranges that can be expanded using get_trajectory_context.".to_string(),
-            input_schema: json_schema_from_params(&[("query", "string", "Search query to find relevant past conversations."), ("top_n", "string", "Maximum number of trajectories to return (default: 5).")], &["query"]),
+            description: "Keyword search over saved past chat trajectories (exact words, not semantic meaning). Returns matching trajectory IDs with message ranges that can be expanded using get_trajectory_context.".to_string(),
+            input_schema: json_schema_from_params(&[("query", "string", "Keywords to find in past conversations."), ("top_n", "string", "Maximum number of trajectories to return (default: 5).")], &["query"]),
             output_schema: None,
             annotations: None,
         }
@@ -61,43 +125,15 @@ impl Tool for ToolSearchTrajectories {
             _ => 5,
         };
 
-        let memories = memories_search(gcx.clone(), &query, 0, top_n, None).await?;
-
-        let output = if memories.is_empty() {
-            "No relevant trajectories found.".to_string()
-        } else {
-            let preview_chars = crate::runtime_settings::current().hist_search_preview_chars;
-            let mut result = format!("Found {} relevant trajectories:\n\n", memories.len());
-            for m in memories.iter() {
-                result.push_str("───────────────────────────────────────\n");
-                result.push_str(&format!("📁 {}\n", m.memid));
-                if let Some(title) = &m.title {
-                    result.push_str(&format!("📌 {}\n", title));
-                }
-                if let Some(score) = m.score {
-                    result.push_str(&format!("⭐ Relevance: {:.0}%\n", score * 100.0));
-                }
-                if let Some((start, end)) = m.line_range {
-                    result.push_str(&format!("📍 Messages: {}-{}\n", start, end));
-                }
-                result.push_str("\n");
-                let total_chars = m.content.chars().count();
-                let preview: String = m.content.chars().take(preview_chars).collect();
-                result.push_str(&preview);
-                if total_chars > preview_chars {
-                    result.push_str(&hist_search_preview_notice(
-                        preview_chars,
-                        total_chars,
-                        preview_chars,
-                    ));
-                }
-                result.push_str("\n\n");
-            }
-            result.push_str("───────────────────────────────────────\n");
-            result.push_str("💡 Use get_trajectory_context(trajectory_id, message_start, message_end) to expand.\n");
-            result.push_str("\nNote: these are heuristic matches and may be unrelated.");
-            result
-        };
+        let terms = query_terms(&query);
+        let dirs = crate::chat::trajectories::get_all_trajectories_dirs(gcx).await;
+        let (hits, stats) =
+            search_saved_trajectories(dirs, terms, top_n, SearchLimits::default()).await?;
+        let output = format_search_output(
+            &hits,
+            &stats,
+            crate::runtime_settings::current().hist_search_preview_chars,
+        );
 
         Ok((
             false,
@@ -115,3 +151,7 @@ impl Tool for ToolSearchTrajectories {
         vec![]
     }
 }
+
+#[cfg(test)]
+#[path = "tool_search_trajectories_tests.rs"]
+mod tests;

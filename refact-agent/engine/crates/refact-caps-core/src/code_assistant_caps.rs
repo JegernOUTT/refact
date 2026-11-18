@@ -4,23 +4,19 @@ use std::sync::Arc;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
-use refact_core::llm_types::EmbeddingModelRecord;
 use refact_core::model_caps::ModelCapabilities;
 use refact_core::provider_types::ProviderDefaults;
 
 use crate::model_records::{
-    CapsMetadata, ChatModelRecord, CompletionModelRecord, DefaultModels,
-    default_hf_tokenizer_template,
+    CapsMetadata, ChatModelRecord, DefaultModels, default_hf_tokenizer_template,
 };
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CodeAssistantCaps {
-    #[serde(skip_deserializing)]
-    pub completion_models: IndexMap<String, Arc<CompletionModelRecord>>,
+    #[serde(flatten, skip_deserializing)]
+    pub legacy_output: crate::legacy_output::LegacyCapsOutput,
     #[serde(skip_deserializing)]
     pub chat_models: IndexMap<String, Arc<ChatModelRecord>>,
-    #[serde(skip_deserializing)]
-    pub embedding_model: EmbeddingModelRecord,
 
     #[serde(flatten, skip_deserializing)]
     pub defaults: DefaultModels,
@@ -50,9 +46,8 @@ pub struct CodeAssistantCaps {
 impl Default for CodeAssistantCaps {
     fn default() -> Self {
         Self {
-            completion_models: IndexMap::new(),
+            legacy_output: Default::default(),
             chat_models: IndexMap::new(),
-            embedding_model: EmbeddingModelRecord::default(),
             defaults: DefaultModels::default(),
             caps_version: 0,
             customization: String::new(),
@@ -70,12 +65,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn obsolete_caps_input_cannot_enable_removed_models() {
+        let caps: CodeAssistantCaps = serde_json::from_value(serde_json::json!({
+            "completion_models": {"old/model": {"enabled": true}},
+            "completion_default_model": "old/model",
+            "embedding_model": {"name": "old/embedding"}
+        }))
+        .unwrap();
+        let value = serde_json::to_value(caps).unwrap();
+        assert_eq!(value["completion_models"], serde_json::json!({}));
+        assert_eq!(value["completion_default_model"], "");
+        assert_eq!(
+            value["embedding_model"],
+            serde_json::to_value(crate::legacy_output::LegacyDisabledEmbeddingOutput::default())
+                .unwrap()
+        );
+    }
+
+    #[test]
     fn serde_defaults_and_skip_fields_match_caps_contract() {
         let decoded: CodeAssistantCaps = serde_json::from_value(serde_json::json!({})).unwrap();
 
-        assert!(decoded.completion_models.is_empty());
+        assert!(decoded.legacy_output.completion_models.is_empty());
         assert!(decoded.chat_models.is_empty());
-        assert_eq!(decoded.embedding_model, EmbeddingModelRecord::default());
         assert_eq!(decoded.defaults, DefaultModels::default());
         assert_eq!(
             decoded.hf_tokenizer_template,

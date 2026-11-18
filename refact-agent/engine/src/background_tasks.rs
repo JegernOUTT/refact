@@ -117,7 +117,7 @@ impl BackgroundTasksHolder {
     pub async fn abort(&mut self) {
         // Closing spawn-owner admission is a SHUTDOWN action, not an "abort this
         // holder" action: `abort` is also how a holder is recycled while the
-        // process keeps running (see `vecdb_background_reload`). Only latch the
+        // process keeps running. Only latch the
         // process-global gate when this engine is genuinely shutting down.
         let close_admission = self
             .gcx
@@ -288,9 +288,6 @@ pub async fn start_background_tasks(
             tokio::spawn(crate::files_in_workspace::files_in_workspace_init_task(
                 gcx.clone(),
             )),
-            tokio::spawn(crate::vecdb::vdb_highlev::vecdb_background_reload(
-                gcx.clone(),
-            )),
             tokio::spawn(crate::codegraph::cg_highlev::codegraph_background_task(
                 gcx.clone(),
             )),
@@ -357,6 +354,9 @@ pub async fn start_background_tasks(
             tokio::spawn(async move {
                 let index = build_knowledge_index(gcx_for_knowledge_index.clone()).await;
                 *gcx_for_knowledge_index.knowledge_index.lock().await = index;
+                gcx_for_knowledge_index
+                    .knowledge_generation
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 tracing::info!("knowledge_index: built");
                 knowledge_index_watcher_background_task(gcx_for_knowledge_index).await;
             }),

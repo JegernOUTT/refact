@@ -3,10 +3,7 @@ use std::sync::{Arc, OnceLock};
 
 use indexmap::IndexMap;
 
-use crate::caps::{
-    BaseModelRecord, ChatModelRecord, CodeAssistantCaps, CompletionModelRecord,
-    EmbeddingModelRecord, HasBaseModelRecord, strip_model_from_finetune,
-};
+use crate::caps::{BaseModelRecord, ChatModelRecord, CodeAssistantCaps};
 use crate::custom_error::YamlError;
 
 #[cfg(test)]
@@ -14,13 +11,12 @@ use refact_core::llm_types::WireFormat;
 use refact_providers::identity::provider_identity_from_yaml;
 
 pub use refact_caps_core::provider_config::{
-    CapsProvider, CompletionPresets, EmbeddingPresets, default_endpoint_style, extend_collection,
-    extend_model_collection, set_field_if_exists,
+    CapsProvider, default_endpoint_style, extend_collection, extend_model_collection,
+    set_field_if_exists,
 };
 
 const LITELLM_PROVIDER_TEMPLATE: &str = r#"
 wire_format: openai_chat_completions
-supports_completion: false
 "#;
 
 const PROVIDER_TEMPLATES: &[(&str, &str)] = &[
@@ -176,9 +172,6 @@ pub fn post_process_provider(
     add_name_and_id_to_model_records(provider);
     if !include_disabled_models {
         provider.chat_models.retain(|_, model| model.base.enabled);
-        provider
-            .completion_models
-            .retain(|_, model| model.base.enabled);
     }
 }
 
@@ -344,7 +337,6 @@ fn add_running_models(provider: &mut CapsProvider) {
         &provider.chat_light_model,
         &provider.chat_thinking_model,
         &provider.chat_buddy_model,
-        &provider.completion_default_model,
     ];
 
     for model in models_to_add {
@@ -388,12 +380,7 @@ pub async fn get_latest_provider_mtime(config_dir: &Path) -> Option<u64> {
     })
 }
 
-pub fn add_models_to_caps(
-    caps: &mut CodeAssistantCaps,
-    providers: Vec<CapsProvider>,
-) -> Vec<EmbeddingModelRecord> {
-    let mut embedding_models = Vec::new();
-
+pub fn add_models_to_caps(caps: &mut CodeAssistantCaps, providers: Vec<CapsProvider>) {
     fn add_provider_details_to_model(
         base_model_rec: &mut BaseModelRecord,
         provider: &CapsProvider,
@@ -421,36 +408,6 @@ pub fn add_models_to_caps(
     }
 
     for mut provider in providers {
-        let completion_models = std::mem::take(&mut provider.completion_models);
-        for (model_name, mut model_rec) in completion_models {
-            inherit_provider_auth(&mut model_rec.base, &provider);
-            model_rec.base.supports_cache_control =
-                model_rec.base.supports_cache_control && provider.supports_cache_control;
-            if model_rec.base.endpoint.is_empty() {
-                add_provider_details_to_model(
-                    &mut model_rec.base,
-                    &provider,
-                    &model_name,
-                    &provider.completion_endpoint,
-                );
-
-                if provider.code_completion_n_ctx > 0 {
-                    if model_rec.base.n_ctx == 0
-                        || provider.code_completion_n_ctx < model_rec.base.n_ctx
-                    {
-                        model_rec.base.n_ctx = provider.code_completion_n_ctx;
-                    }
-                }
-            }
-            if !provider.completion_endpoint_style.is_empty() {
-                model_rec.base.completion_endpoint_style =
-                    provider.completion_endpoint_style.clone();
-            }
-
-            caps.completion_models
-                .insert(model_rec.base.id.clone(), Arc::new(model_rec));
-        }
-
         let chat_models = std::mem::take(&mut provider.chat_models);
         for (model_name, mut model_rec) in chat_models {
             inherit_provider_auth(&mut model_rec.base, &provider);
@@ -469,61 +426,20 @@ pub fn add_models_to_caps(
                 .insert(model_rec.base.id.clone(), Arc::new(model_rec));
         }
 
-        if provider.embedding_model.is_configured() && provider.embedding_model.base.enabled {
-            let mut embedding_model = std::mem::take(&mut provider.embedding_model);
-            inherit_provider_auth(&mut embedding_model.base, &provider);
-            embedding_model.base.supports_cache_control =
-                embedding_model.base.supports_cache_control && provider.supports_cache_control;
-
-            if embedding_model.base.endpoint.is_empty() {
-                let model_name = embedding_model.base.name.clone();
-                add_provider_details_to_model(
-                    &mut embedding_model.base,
-                    &provider,
-                    &model_name,
-                    &provider.embedding_endpoint,
-                );
-            }
-            if !provider.embedding_endpoint_style.is_empty() {
-                embedding_model.base.embedding_endpoint_style =
-                    provider.embedding_endpoint_style.clone();
-            }
-            embedding_models.push(embedding_model.clone());
-            caps.embedding_model = embedding_model;
-        }
-
         caps.defaults
             .apply_override(&provider.defaults(), Some(&provider.name));
     }
-
-    embedding_models
 }
 
 fn add_name_and_id_to_model_records(provider: &mut CapsProvider) {
-    for (model_name, model_rec) in &mut provider.completion_models {
-        model_rec.base.name = model_name.to_string();
-        model_rec.base.id = format!("{}/{}", provider.name, model_name);
-    }
-
     for (model_name, model_rec) in &mut provider.chat_models {
         model_rec.base.name = model_name.to_string();
         model_rec.base.id = format!("{}/{}", provider.name, model_name);
-    }
-
-    if provider.embedding_model.is_configured() {
-        provider.embedding_model.base.id =
-            format!("{}/{}", provider.name, provider.embedding_model.base.name);
     }
 }
 
 fn apply_models_dict_patch(provider: &mut CapsProvider) {
     for (model_name, rec_patched) in provider.models_dict_patch.iter() {
-        if let Some(completion_rec) = provider.completion_models.get_mut(model_name) {
-            if let Some(n_ctx) = rec_patched.get("n_ctx").and_then(|v| v.as_u64()) {
-                completion_rec.base.n_ctx = n_ctx as usize;
-            }
-        }
-
         if let Some(chat_rec) = provider.chat_models.get_mut(model_name) {
             if let Some(n_ctx) = rec_patched.get("n_ctx").and_then(|v| v.as_u64()) {
                 chat_rec.base.n_ctx = n_ctx as usize;
@@ -544,105 +460,14 @@ fn apply_models_dict_patch(provider: &mut CapsProvider) {
     }
 }
 
-const UNPARSED_COMPLETION_PRESETS: &str = include_str!("../completion_presets.json");
-const UNPARSED_EMBEDDING_PRESETS: &str = include_str!("../embedding_presets.json");
-
-static COMPLETION_PRESETS: OnceLock<CompletionPresets> = OnceLock::new();
-static EMBEDDING_PRESETS: OnceLock<EmbeddingPresets> = OnceLock::new();
-
-pub fn get_completion_presets() -> &'static CompletionPresets {
-    COMPLETION_PRESETS.get_or_init(|| {
-        serde_json::from_str::<CompletionPresets>(UNPARSED_COMPLETION_PRESETS).unwrap_or_else(|e| {
-            let up_to_line = UNPARSED_COMPLETION_PRESETS
-                .lines()
-                .take(e.line())
-                .collect::<Vec<&str>>()
-                .join("\n");
-            panic!("{}\nfailed to parse COMPLETION_PRESETS: {}", up_to_line, e);
-        })
-    })
-}
-
-pub fn get_embedding_presets() -> &'static EmbeddingPresets {
-    EMBEDDING_PRESETS.get_or_init(|| {
-        serde_json::from_str::<EmbeddingPresets>(UNPARSED_EMBEDDING_PRESETS).unwrap_or_else(|e| {
-            let up_to_line = UNPARSED_EMBEDDING_PRESETS
-                .lines()
-                .take(e.line())
-                .collect::<Vec<&str>>()
-                .join("\n");
-            panic!("{}\nfailed to parse EMBEDDING_PRESETS: {}", up_to_line, e);
-        })
-    })
-}
-
-/// Augment an existing completion model with scratchpad data from a matching preset.
-/// Models imported from user/provider config can have correct endpoint/tokenizer
-/// but lack FIM token configuration. This fills in the missing data from
-/// completion_presets.json without overwriting configured fields.
-fn augment_completion_model_from_preset(
-    model: &mut CompletionModelRecord,
-    model_name: &str,
-    known_presets: &IndexMap<String, CompletionModelRecord>,
-    experimental: bool,
-) {
-    // Skip if model already has FIM-specific scratchpad configuration
-    if model.scratchpad_patch.get("fim_prefix").is_some() {
-        return;
-    }
-
-    let name_owned = model_name.to_string();
-    if let Some(preset) =
-        find_model_match(&name_owned, &IndexMap::new(), known_presets, experimental)
-    {
-        model.scratchpad_patch = preset.scratchpad_patch.clone();
-        model.scratchpad = preset.scratchpad.clone();
-        if model.model_family.is_none() {
-            model.model_family = preset.model_family;
-        }
-        if model.base.tokenizer.is_empty() {
-            model.base.tokenizer = preset.base.tokenizer.clone();
-        }
-        if model.base.n_ctx == 0 && preset.base.n_ctx > 0 {
-            model.base.n_ctx = preset.base.n_ctx;
-        }
-    }
-}
-
 fn populate_model_records(
     provider: &mut CapsProvider,
-    experimental: bool,
+    _experimental: bool,
     catalog_models: Option<&std::collections::HashSet<String>>,
 ) {
-    let completion_presets = get_completion_presets();
-    let embedding_presets = get_embedding_presets();
     let had_declared_chat_models = !provider.chat_models.is_empty();
 
     for model_name in &provider.running_models {
-        if provider.supports_completion {
-            if !provider.completion_models.contains_key(model_name) {
-                if let Some(model_rec) = find_model_match(
-                    model_name,
-                    &provider.completion_models,
-                    &completion_presets.completion_models,
-                    experimental,
-                ) {
-                    provider
-                        .completion_models
-                        .insert(model_name.clone(), model_rec);
-                }
-            } else {
-                // Model already exists but may lack scratchpad data (FIM tokens).
-                // Augment from preset without overwriting configured fields.
-                augment_completion_model_from_preset(
-                    provider.completion_models.get_mut(model_name).unwrap(),
-                    model_name,
-                    &completion_presets.completion_models,
-                    experimental,
-                );
-            }
-        }
-
         if !provider.chat_models.contains_key(model_name) {
             let backfilled_default = catalog_models
                 .map(|catalog| !catalog.contains(model_name))
@@ -666,123 +491,6 @@ fn populate_model_records(
             provider.chat_models.insert(model_name.clone(), placeholder);
         }
     }
-
-    // Augment all completion models that lack FIM tokens with preset scratchpad data.
-    if provider.supports_completion {
-        let model_names: Vec<String> = provider.completion_models.keys().cloned().collect();
-        for model_name in &model_names {
-            augment_completion_model_from_preset(
-                provider.completion_models.get_mut(model_name).unwrap(),
-                model_name,
-                &completion_presets.completion_models,
-                experimental,
-            );
-        }
-    }
-
-    if !provider.embedding_model.is_configured() && !provider.embedding_model.base.name.is_empty() {
-        let model_name = provider.embedding_model.base.name.clone();
-        if let Some(model_rec) = find_model_match(
-            &model_name,
-            &IndexMap::new(),
-            &embedding_presets.embedding_models,
-            experimental,
-        ) {
-            provider.embedding_model = model_rec;
-            provider.embedding_model.base.name = model_name;
-        } else {
-            tracing::warn!(
-                "Unknown embedding model '{}', maybe configure it or update this binary",
-                model_name
-            );
-        }
-    }
-
-    if provider.embedding_model.is_configured() {
-        let model_name = provider.embedding_model.base.name.clone();
-        if let Some(preset) = find_model_match(
-            &model_name,
-            &IndexMap::new(),
-            &embedding_presets.embedding_models,
-            experimental,
-        ) {
-            if provider.embedding_model.base.tokenizer.is_empty() {
-                provider.embedding_model.base.tokenizer = preset.base.tokenizer.clone();
-            }
-            if !provider.embedding_model.base.user_configured {
-                if provider.embedding_model.base.n_ctx == 0 {
-                    provider.embedding_model.base.n_ctx = preset.base.n_ctx;
-                }
-                if provider.embedding_model.embedding_size == 0 {
-                    provider.embedding_model.embedding_size = preset.embedding_size;
-                }
-                if provider.embedding_model.rejection_threshold == 0.0 {
-                    provider.embedding_model.rejection_threshold = preset.rejection_threshold;
-                }
-                if provider.embedding_model.embedding_batch == 0 {
-                    provider.embedding_model.embedding_batch = preset.embedding_batch;
-                }
-            }
-        }
-        if provider.embedding_model.base.tokenizer.is_empty() {
-            tracing::warn!(
-                "Embedding model '{}' has no tokenizer configured and no preset match; VecDB may fail to start",
-                provider.embedding_model.base.name
-            );
-        }
-    }
-}
-
-fn find_model_match<T: Clone + HasBaseModelRecord>(
-    model_name: &String,
-    provider_models: &IndexMap<String, T>,
-    known_models: &IndexMap<String, T>,
-    experimental: bool,
-) -> Option<T> {
-    let model_stripped = strip_model_from_finetune(model_name);
-
-    if let Some(model) = provider_models
-        .get(model_name)
-        .or_else(|| provider_models.get(&model_stripped))
-    {
-        if !model.base().experimental || experimental {
-            return Some(model.clone());
-        }
-    }
-
-    for model in provider_models.values() {
-        if model.base().similar_models.contains(model_name)
-            || model.base().similar_models.contains(&model_stripped)
-        {
-            if !model.base().experimental || experimental {
-                return Some(model.clone());
-            }
-        }
-    }
-
-    if let Some(model) = known_models
-        .get(model_name)
-        .or_else(|| known_models.get(&model_stripped))
-    {
-        if !model.base().experimental || experimental {
-            return Some(model.clone());
-        }
-    }
-
-    for model in known_models.values() {
-        if model
-            .base()
-            .similar_models
-            .contains(&model_name.to_string())
-            || model.base().similar_models.contains(&model_stripped)
-        {
-            if !model.base().experimental || experimental {
-                return Some(model.clone());
-            }
-        }
-    }
-
-    None
 }
 
 pub fn resolve_api_key(
@@ -857,25 +565,6 @@ pub async fn get_provider_from_template_and_config_file(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_supports_completion_false_blocks_completion_models() {
-        let mut provider = CapsProvider {
-            name: "test".to_string(),
-            supports_completion: false,
-            running_models: vec!["qwen2.5/coder/1.5b/base".to_string()],
-            ..Default::default()
-        };
-        populate_model_records(&mut provider, false, None);
-        assert!(
-            provider.completion_models.is_empty(),
-            "supports_completion=false should prevent completion model population"
-        );
-        assert!(
-            !provider.chat_models.is_empty(),
-            "chat models should still be populated regardless of supports_completion"
-        );
-    }
 
     async fn write_provider_config(temp: &tempfile::TempDir, file_name: &str, yaml: &str) {
         let providers_dir = temp.path().join("providers.d");
@@ -965,62 +654,5 @@ mod tests {
             .any(|message| message.contains("mutually exclusive")));
         assert!(messages.iter().any(|message| *message
             == "command credentials are supported only for custom and litellm providers"));
-    }
-
-    #[test]
-    fn command_credential_reaches_completion_and_embedding_records_without_execution() {
-        let credential: refact_core::provider_types::CredentialSpec =
-            serde_yaml::from_str("type: command\ncommand: helper-that-must-not-run-during-caps\n")
-                .unwrap();
-        let mut provider = CapsProvider {
-            name: "custom_runtime".to_string(),
-            credential: Some(credential.clone()),
-            completion_endpoint: "https://example.com/v1/completions".to_string(),
-            embedding_endpoint: "https://example.com/v1/embeddings".to_string(),
-            completion_models: indexmap::indexmap! {
-                "completion".to_string() => CompletionModelRecord {
-                    base: BaseModelRecord {
-                        id: "custom_runtime/completion".to_string(),
-                        name: "completion".to_string(),
-                        endpoint: "https://model.example/v1/completions".to_string(),
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                }
-            },
-            embedding_model: EmbeddingModelRecord {
-                base: BaseModelRecord {
-                    id: "custom_runtime/embedding".to_string(),
-                    name: "embedding".to_string(),
-                    n_ctx: 512,
-                    endpoint: "https://model.example/v1/embeddings".to_string(),
-                    enabled: true,
-                    ..Default::default()
-                },
-                embedding_size: 1,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-
-        add_name_and_id_to_model_records(&mut provider);
-        let mut caps = CodeAssistantCaps::default();
-        let embeddings = add_models_to_caps(&mut caps, vec![provider]);
-
-        assert_eq!(
-            caps.completion_models["custom_runtime/completion"]
-                .base
-                .credential,
-            Some(credential.clone())
-        );
-        assert_eq!(
-            caps.embedding_model.base.credential,
-            Some(credential.clone())
-        );
-        assert_eq!(embeddings[0].base.credential, Some(credential));
-        assert!(caps.completion_models["custom_runtime/completion"]
-            .base
-            .api_key
-            .is_empty());
     }
 }

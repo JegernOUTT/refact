@@ -381,7 +381,7 @@ const store = setUpStore({
     themeProps: {
       appearance: params.get("theme") === "light" ? "light" : "dark",
     },
-    features: { images: true, vecdb: true, ast: true },
+    features: { images: true, ast: true },
   },
   connection: {
     browserOnline: true,

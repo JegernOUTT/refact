@@ -116,16 +116,13 @@ available:
             readonly: false,
             wire_format: self.default_wire_format(),
             chat_endpoint: "https://api.openai.com/v1/responses".to_string(),
-            completion_endpoint: String::new(),
-            embedding_endpoint: String::new(),
+
             api_key,
             auth_token: String::new(),
             tokenizer_api_key: String::new(),
             extra_headers,
             supports_cache_control: true,
             chat_models: Vec::new(),
-            completion_models: Vec::new(),
-            embedding_model: None,
         })
     }
 

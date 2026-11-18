@@ -154,23 +154,43 @@ pub async fn handle_native_work(
         .map(|(id, session)| (id.clone(), session.clone()))
         .collect();
     sessions.sort_by(|a, b| a.0.cmp(&b.0));
-    let has_more = sessions.len() > 20;
-    sessions.truncate(20);
-    let next_cursor = has_more
-        .then(|| sessions.last().map(|row| row.0.clone()))
-        .flatten();
-    let mut views = Vec::with_capacity(sessions.len());
-    for (_, session) in sessions {
-        let guard = tokio::time::timeout(std::time::Duration::from_millis(100), session.lock())
-            .await
-            .map_err(|_| {
-                ScratchError::new(
-                    hyper::StatusCode::SERVICE_UNAVAILABLE,
-                    "native work is busy; refresh the snapshot".into(),
-                )
-            })?;
+    let filter = crate::buddy::attribution::BuddyRootFilter::new(
+        app.gcx.clone(),
+        std::path::Path::new(&project_root),
+    )
+    .await;
+    let mut views = Vec::with_capacity(20);
+    let mut has_more = false;
+    let mut last_retained = None;
+    for (chat_id, session) in sessions {
+        use super::buddy_decisions::NativeRow;
+        let guard = match super::buddy_decisions::next_native_row(
+            &app,
+            &filter,
+            &chat_id,
+            &session,
+            views.len(),
+            20,
+            std::time::Duration::from_millis(100),
+        )
+        .await
+        .map_err(|_| {
+            ScratchError::new(
+                hyper::StatusCode::SERVICE_UNAVAILABLE,
+                "native work is busy; refresh the snapshot".into(),
+            )
+        })? {
+            NativeRow::Take(guard) => guard,
+            NativeRow::Skip => continue,
+            NativeRow::More => {
+                has_more = true;
+                break;
+            }
+        };
         views.push(project_session(&guard));
+        last_retained = Some(chat_id);
     }
+    let next_cursor = has_more.then_some(last_retained).flatten();
     Ok(axum::Json(NativeWorkSnapshot {
         schema_version: 1,
         project_root,

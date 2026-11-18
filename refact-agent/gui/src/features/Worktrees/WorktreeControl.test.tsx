@@ -279,7 +279,7 @@ function configState(host: Host = "web") {
     lspPort: 8001,
     apiKey: null,
     themeProps: { appearance: "dark" as const },
-    features: { images: true, statistics: true, vecdb: true, ast: true },
+    features: { images: true, statistics: true, ast: true },
   };
 }
 

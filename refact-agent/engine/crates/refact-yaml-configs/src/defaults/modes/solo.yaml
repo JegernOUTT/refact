@@ -1,4 +1,4 @@
-schema_version: 9
+schema_version: 10
 id: solo
 title: Solo
 description: Full coding workflow in one chat, without subagents or orchestration tools
@@ -189,7 +189,6 @@ tools:
   - glob
   - search_pattern
   - search_symbol_definition
-  - search_semantic
   - activate_skill
   - knowledge
   - create_knowledge

@@ -146,10 +146,9 @@ class Editor (val project: Project) {
 
     fun getUserConfig(): Events.Config.UpdatePayload {
         val hasAst = AppSettingsState.instance.astIsEnabled
-        val hasVecdb = AppSettingsState.instance.vecdbIsEnabled
         val hasCodegraph = AppSettingsState.instance.codegraphIsEnabled
         val hasExperimental = AppSettingsState.instance.experimentalLspFlagEnabled
-        val features = Events.Config.Features(hasAst, hasVecdb, hasCodegraph, knowledge = hasExperimental)
+        val features = Events.Config.Features(hasAst, hasCodegraph, knowledge = hasExperimental)
         val isDarkMode = LafManager.getInstance().currentUIThemeLookAndFeel.isDark
         val mode = if (isDarkMode) "dark" else "light"
         val themeProps = Events.Config.ThemeProps(mode)
@@ -162,14 +161,12 @@ class Editor (val project: Project) {
         }
         val lspPort = if (rawPort > 0) rawPort else 0
         val urls = backendConfigUrls(backendReady, lspHolder?.baseUrlOrNull(), lspHolder?.browserUrlOrNull())
-        val keyBindings = Events.Config.KeyBindings("")
         val connectionIssue = configConnectionIssue(connectionStatus, lspHolder?.connectionIssue())
 
         return Events.Config.UpdatePayload(
             features = features,
             themeProps = themeProps,
             lspPort = lspPort,
-            keyBindings = keyBindings,
             lspUrl = urls.lspUrl,
             backendReady = backendReady,
             connectionStatus = connectionStatus.wireName,

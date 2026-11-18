@@ -4,9 +4,6 @@ use axum::routing::{get, post, patch, delete};
 
 use crate::app_state::AppState;
 use crate::http::utils::request_logging_middleware;
-use crate::http::routers::v1::code_completion::{
-    handle_v1_code_completion_web, handle_v1_code_completion_prompt,
-};
 use crate::http::routers::v1::code_lens::handle_v1_code_lens;
 use crate::http::routers::v1::code_intel::{
     handle_v1_code_intel_communities, handle_v1_code_intel_dead_code,
@@ -77,9 +74,7 @@ use crate::providers::http::{
     handle_v1_providers_list,
 };
 
-use crate::http::routers::v1::vecdb::{
-    handle_v1_codegraph_search, handle_v1_vecdb_search, handle_v1_vecdb_status,
-};
+use crate::http::routers::v1::codegraph_search::handle_v1_codegraph_search;
 use crate::http::routers::v1::knowledge_graph::handle_v1_knowledge_graph;
 use crate::http::routers::v1::knowledge_ops::{
     handle_v1_knowledge_update_memory, handle_v1_knowledge_delete_memory,
@@ -173,10 +168,10 @@ mod causal;
 pub(crate) mod chat_activity;
 pub mod chat_based_handlers;
 mod chat_modes;
-pub mod code_completion;
 mod code_edit;
 pub mod code_intel;
 pub mod code_lens;
+pub mod codegraph_search;
 mod commands_marketplace;
 pub mod customization;
 pub(crate) mod customization_editor;
@@ -197,6 +192,7 @@ mod hooks;
 pub mod knowledge_enrichment;
 pub(crate) mod knowledge_graph;
 pub mod knowledge_ops;
+pub mod legacy_code_completion;
 pub mod links;
 pub mod lsp_like_handlers;
 pub(crate) mod mcp_config_sharing;
@@ -229,7 +225,6 @@ pub mod tasks;
 pub(crate) mod trajectory_ops;
 pub mod v1_browser;
 mod v1_integrations;
-pub mod vecdb;
 pub mod voice;
 mod web_search_settings;
 pub(crate) mod work;
@@ -339,7 +334,6 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
         .merge(git_routes())
         .merge(files_routes())
         .merge(providers_routes())
-        .merge(code_completion_routes())
         .merge(code_lens_routes())
         .merge(sync_files_routes())
         .merge(system_prompt_routes())
@@ -393,6 +387,10 @@ fn core_routes() -> Router<AppState> {
         .route("/model-capabilities", get(handle_v1_model_capabilities))
         .route("/model-supported", get(handle_v1_model_supported))
         .route("/rag-status", get(handle_v1_rag_status))
+        .route(
+            "/code-completion",
+            post(legacy_code_completion::handle_legacy_code_completion),
+        )
         .route("/config-path", get(handle_v1_config_path))
         .route("/customization", get(handle_v1_customization))
         .route("/chat-modes", get(handle_v1_chat_modes))
@@ -782,15 +780,6 @@ fn providers_routes() -> Router<AppState> {
         .route("/google-gemini/health", get(handle_v1_google_gemini_health))
 }
 
-fn code_completion_routes() -> Router<AppState> {
-    Router::new()
-        .route("/code-completion", post(handle_v1_code_completion_web))
-        .route(
-            "/code-completion-prompt",
-            post(handle_v1_code_completion_prompt),
-        )
-}
-
 fn code_lens_routes() -> Router<AppState> {
     Router::new().route("/code-lens", post(handle_v1_code_lens))
 }
@@ -811,8 +800,6 @@ fn system_prompt_routes() -> Router<AppState> {
 
 fn code_intel_routes() -> Router<AppState> {
     Router::new()
-        .route("/vdb-search", post(handle_v1_vecdb_search))
-        .route("/vdb-status", get(handle_v1_vecdb_status))
         .route("/codegraph-search", post(handle_v1_codegraph_search))
         .route("/codegraph-status", get(handle_v1_codegraph_status))
         .route("/file-index-status", get(handle_v1_file_index_status))
@@ -1908,7 +1895,7 @@ mod router_tests {
             ("GET", "/git/status"),
             ("GET", "/files/tree"),
             ("GET", "/models"),
-            ("POST", "/code-completion"),
+            ("POST", "/at-command-completion"),
             ("POST", "/code-lens"),
             ("POST", "/sync-files-extract-tar"),
             (
@@ -1916,6 +1903,7 @@ mod router_tests {
                 "/prepend-system-prompt-and-maybe-more-initial-messages",
             ),
             ("GET", "/codegraph-status"),
+            ("POST", "/codegraph-search"),
             ("GET", "/knowledge-graph"),
             ("GET", "/trajectories/all"),
             ("GET", "/chats/subscribe"),
@@ -1963,6 +1951,50 @@ mod router_tests {
                 StatusCode::METHOD_NOT_ALLOWED,
                 "{method} {uri}"
             );
+        }
+
+        for body in ["", "not JSON", r#"{"stream":true,"model":"missing"}"#] {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/code-completion")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let value: serde_json::Value =
+                serde_json::from_slice(&hyper::body::to_bytes(response.into_body()).await.unwrap())
+                    .unwrap();
+            assert_eq!(
+                value,
+                serde_json::json!({
+                    "choices": [{"index": 0, "code_completion": "", "finish_reason": "stop"}],
+                    "created": 0.0, "model": "", "cached": false,
+                })
+            );
+        }
+
+        for (method, uri) in [
+            ("POST", "/code-completion-prompt"),
+            ("POST", "/vdb-search"),
+            ("GET", "/vdb-status"),
+        ] {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{method} {uri}");
         }
 
         let wrong_method = router

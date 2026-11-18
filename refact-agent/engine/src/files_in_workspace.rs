@@ -1777,11 +1777,7 @@ pub fn is_path_to_enqueue_valid(path: &PathBuf) -> Result<(), String> {
     Ok(())
 }
 
-pub async fn enqueue_some_docs_with_read_paths(
-    gcx: Arc<GlobalContext>,
-    paths: &[QueuedPath],
-    force: bool,
-) {
+pub async fn enqueue_some_docs_with_read_paths(gcx: Arc<GlobalContext>, paths: &[QueuedPath]) {
     if paths.is_empty() {
         return;
     }
@@ -1792,10 +1788,10 @@ pub async fn enqueue_some_docs_with_read_paths(
         .iter()
         .map(|path| resolve_codegraph_queue_path(Path::new(&path.read_path), &worktree_mappings))
         .collect::<Vec<_>>();
-    enqueue_resolved_docs(gcx, queue_paths, workspace_files_changed, force).await;
+    enqueue_resolved_docs(gcx, queue_paths, workspace_files_changed).await;
 }
 
-async fn enqueue_some_docs(gcx: Arc<GlobalContext>, paths: &Vec<String>, force: bool) {
+async fn enqueue_some_docs(gcx: Arc<GlobalContext>, paths: &Vec<String>) {
     let worktree_mappings =
         crate::files_correction::registered_worktree_path_mappings(gcx.cache_dir.as_path());
     let workspace_files_changed = normalize_workspace_files_for_unscoped(&gcx, &worktree_mappings);
@@ -1803,14 +1799,13 @@ async fn enqueue_some_docs(gcx: Arc<GlobalContext>, paths: &Vec<String>, force: 
         .iter()
         .map(|path| resolve_codegraph_queue_path(Path::new(path), &worktree_mappings))
         .collect::<Vec<_>>();
-    enqueue_resolved_docs(gcx, queue_paths, workspace_files_changed, force).await;
+    enqueue_resolved_docs(gcx, queue_paths, workspace_files_changed).await;
 }
 
 async fn enqueue_resolved_docs(
     gcx: Arc<GlobalContext>,
     queue_paths: Vec<QueuedPath>,
     workspace_files_changed: bool,
-    force: bool,
 ) {
     let queue_paths = queue_paths
         .into_iter()
@@ -1832,7 +1827,6 @@ async fn enqueue_resolved_docs(
     if normalized_paths.len() > 5 {
         info!("    ...");
     }
-    crate::indexing_routing::route_index_enqueue(gcx.clone(), &normalized_paths, force, true).await;
     let roots = crate::indexing_routing::memory_plane_roots(gcx.clone()).await;
     let (_memory_paths, code_paths) =
         crate::indexing_routing::partition_paths(&normalized_paths, &roots);
@@ -1848,7 +1842,7 @@ async fn enqueue_resolved_docs(
             Some(service) => service.enqueue_paths_with_read_paths(&code_queue_paths),
             None => {
                 tracing::warn!(
-                    "codegraph unavailable; skipping {} code file(s) (memory-plane vec_db never receives code)",
+                    "codegraph unavailable; skipping {} code file(s) (memory artifacts never enter the code index)",
                     code_queue_paths.len()
                 );
             }
@@ -1914,8 +1908,7 @@ fn normalize_workspace_files_for_unscoped(
 
 pub async fn enqueue_all_files_from_workspace_folders(
     gcx: Arc<GlobalContext>,
-    wake_up_indexers: bool,
-    vecdb_only: bool,
+    memory_only: bool,
 ) -> i32 {
     let folders = crate::files_correction::get_unscoped_project_dirs(gcx.clone()).await;
 
@@ -1982,14 +1975,8 @@ pub async fn enqueue_all_files_from_workspace_folders(
     );
     let paths_nodups: Vec<String> = updated_paths.into_iter().collect();
 
-    crate::indexing_routing::route_index_enqueue(
-        gcx.clone(),
-        &paths_nodups,
-        wake_up_indexers,
-        vecdb_only,
-    )
-    .await;
-    if !vecdb_only {
+    if !memory_only {
+        crate::indexing_routing::route_index_enqueue(gcx.clone(), &paths_nodups).await;
         for path in removed_paths {
             on_did_delete(gcx.clone(), &path).await;
         }
@@ -2018,7 +2005,7 @@ pub async fn on_workspaces_init(gcx: Arc<GlobalContext>) -> i32 {
     )
     .await;
     watcher_init(gcx.clone()).await;
-    let files_enqueued = enqueue_all_files_from_workspace_folders(gcx.clone(), false, false).await;
+    let files_enqueued = enqueue_all_files_from_workspace_folders(gcx.clone(), false).await;
 
     crate::git::checkpoints::enqueue_init_shadow_repos(gcx.clone()).await;
 
@@ -2118,7 +2105,7 @@ pub async fn on_did_change(gcx: Arc<GlobalContext>, path: &PathBuf, text: &Strin
         .to_string_lossy()
         .to_string();
     if go_ahead {
-        enqueue_some_docs(gcx.clone(), &vec![cpath], false).await;
+        enqueue_some_docs(gcx.clone(), &vec![cpath]).await;
     }
 
     info!(
@@ -2138,29 +2125,17 @@ pub async fn on_did_delete(gcx: Arc<GlobalContext>, path: &PathBuf) {
         crate::nicer_logs::last_n_chars(&path.to_string_lossy().to_string(), 30)
     );
 
-    let (vec_db_module, codegraph, dirty_arc) = {
+    let (codegraph, dirty_arc) = {
         let cx = gcx.clone();
         remove_memory_document_for_path(cx.clone(), path).await;
         let codegraph = cx.codegraph.lock().await.clone();
-        (
-            cx.vec_db.clone(),
-            codegraph,
-            cx.documents_state.cache_dirty.clone(),
-        )
+        (codegraph, cx.documents_state.cache_dirty.clone())
     };
 
     crate::files_correction::mark_files_cache_dirty(&dirty_arc).await;
 
     let delete_path = normalize_path_for_index_store(&gcx, path);
 
-    let vec_db = vec_db_module.lock().await.clone();
-    match vec_db {
-        Some(db) => match db.remove_file(&delete_path).await {
-            Ok(_) => {}
-            Err(err) => info!("VECDB Error removing: {}", err),
-        },
-        None => {}
-    }
     if let Some(service) = &codegraph {
         let _ = service
             .remove_path(&delete_path.to_string_lossy().to_string())
@@ -2447,7 +2422,7 @@ async fn enqueue_branch_head_changes(gcx: Arc<GlobalContext>, changes: Vec<Branc
                     change.repo_path.display(),
                     err
                 );
-                enqueue_all_files_from_workspace_folders(gcx, true, false).await;
+                enqueue_all_files_from_workspace_folders(gcx, false).await;
                 return;
             }
         }
@@ -2463,7 +2438,7 @@ async fn enqueue_branch_head_changes(gcx: Arc<GlobalContext>, changes: Vec<Branc
             on_did_delete(gcx.clone(), &path).await;
         }
     }
-    enqueue_some_docs(gcx, &docs, true).await;
+    enqueue_some_docs(gcx, &docs).await;
 }
 
 fn schedule_branch_head_debounce(gcx: Arc<GlobalContext>, repo_path: PathBuf) {
@@ -2790,7 +2765,7 @@ async fn flush_debounced_file_paths(gcx: Arc<GlobalContext>, events: Vec<Pending
         .into_iter()
         .map(|event| event.queued_path())
         .collect::<Vec<_>>();
-    enqueue_some_docs_with_read_paths(gcx, &docs, false).await;
+    enqueue_some_docs_with_read_paths(gcx, &docs).await;
 }
 
 async fn flush_debounced_file_event_worker(gcx: Arc<GlobalContext>) {
@@ -3103,7 +3078,7 @@ pub async fn file_watcher_event(event: Event, gcx_weak: Weak<GlobalContext>) {
 
             if should_reindex {
                 tracing::info!("Reindexing all files");
-                enqueue_all_files_from_workspace_folders(gcx, false, false).await;
+                enqueue_all_files_from_workspace_folders(gcx, false).await;
             }
         }
     }
@@ -3168,7 +3143,7 @@ pub async fn files_in_workspace_init_task(gcx: Arc<GlobalContext>) {
         ev,
     )
     .await;
-    let file_count = enqueue_all_files_from_workspace_folders(gcx.clone(), true, false).await;
+    let file_count = enqueue_all_files_from_workspace_folders(gcx.clone(), false).await;
     let current_folders = gcx
         .documents_state
         .workspace_folders
@@ -3195,7 +3170,7 @@ pub async fn files_in_workspace_init_task(gcx: Arc<GlobalContext>) {
             });
         };
     }
-    enqueue_all_docs_from_jsonl_but_read_first(gcx.clone(), true, false).await;
+    enqueue_all_docs_from_jsonl_but_read_first(gcx.clone(), false).await;
     crate::git::checkpoints::enqueue_init_shadow_repos(gcx.clone()).await;
     let ev = crate::buddy::actor::make_runtime_event(
         "indexing",

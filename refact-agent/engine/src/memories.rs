@@ -30,7 +30,6 @@ use crate::knowledge_graph::kg_structs::KnowledgeFrontmatter;
 use crate::knowledge_graph::kg_subchat::{enrich_knowledge_metadata, check_deprecation};
 use crate::knowledge_graph::build_knowledge_graph;
 use crate::http::routers::v1::knowledge_ops::auto_link_memory;
-use refact_core::vecdb_types::VecdbSearchScope;
 
 pub(crate) const MAX_CONCURRENT_ENRICHMENT_SEARCHES: usize = 8;
 static ENRICHMENT_SEARCH_PERMITS: OnceLock<Arc<Semaphore>> = OnceLock::new();
@@ -68,7 +67,7 @@ pub struct MemoRecord {
     pub title: Option<String>,
     pub created: Option<String>,
     pub kind: Option<String>,
-    pub score: Option<f32>, // VecDB similarity score (lower distance = higher relevance)
+    pub score: Option<f32>,
 }
 
 fn generate_slug(content: &str) -> String {
@@ -129,17 +128,6 @@ fn root_chat_memo_insert_many(chat_ids: impl IntoIterator<Item = String>, root_c
     for chat_id in chat_ids {
         insert_bounded_root_chat_memo(&mut memo, chat_id, root_chat_id.to_string());
     }
-}
-
-async fn load_root_chat_id_from_trajectory(
-    gcx: Arc<GlobalContext>,
-    path: &PathBuf,
-) -> Option<String> {
-    let text = get_file_text_from_memory_or_disk(gcx, path).await.ok()?;
-    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
-    v.get("root_chat_id")
-        .and_then(|x| x.as_str())
-        .map(|s| s.to_string())
 }
 
 async fn resolve_root_chat_id(
@@ -436,7 +424,6 @@ fn push_file_path_tags(tags: &mut Vec<String>, file: &str) {
             "component:providers",
             &["/providers/", "src/providers/"][..],
         ),
-        ("component:vecdb", &["/vecdb/", "src/vecdb/"][..]),
         ("component:ast", &["/ast/", "src/ast/"][..]),
         ("component:http-api", &["/http/", "src/http/"][..]),
     ];
@@ -753,19 +740,6 @@ pub async fn memories_add(
                 frontmatter,
                 Some(content),
             );
-        }
-
-        let roots = crate::indexing_routing::memory_plane_roots(gcx.clone()).await;
-        let vec_db = gcx.vec_db.clone();
-        let vecdb = vec_db.lock().await.clone();
-        if let Some(vecdb) = vecdb {
-            vecdb
-                .vectorizer_enqueue_files(
-                    &vec![file_path.to_string_lossy().to_string()],
-                    true,
-                    roots,
-                )
-                .await;
         }
 
         Ok(file_path)
@@ -1350,18 +1324,9 @@ pub async fn memories_search(
     gcx: Arc<GlobalContext>,
     query: &str,
     top_n_memories: usize,
-    top_n_trajectories: usize,
     exclude_trajectory_id: Option<&str>,
 ) -> Result<Vec<MemoRecord>, String> {
-    memories_search_inner(
-        gcx,
-        query,
-        top_n_memories,
-        top_n_trajectories,
-        exclude_trajectory_id,
-        None,
-    )
-    .await
+    memories_search_inner(gcx, query, top_n_memories, exclude_trajectory_id, None).await
 }
 
 pub async fn memo_record_visible_to_memory_reader(
@@ -1452,7 +1417,6 @@ pub async fn memories_search_for_enrichment(
     gcx: Arc<GlobalContext>,
     query: &str,
     top_n_memories: usize,
-    top_n_trajectories: usize,
     exclude_trajectory_id: Option<&str>,
     diagnostic_chat_id: Option<&str>,
 ) -> Result<Vec<MemoRecord>, String> {
@@ -1460,59 +1424,16 @@ pub async fn memories_search_for_enrichment(
         gcx,
         query,
         top_n_memories,
-        top_n_trajectories,
         exclude_trajectory_id,
         diagnostic_chat_id,
     )
     .await
 }
 
-fn trajectory_matched_content(
-    messages: &[serde_json::Value],
-    ranges: &[(u64, u64)],
-) -> Vec<String> {
-    let mut matched_content = Vec::new();
-    for (start, end) in ranges {
-        let start_idx = *start as usize;
-        let end_idx = (*end as usize).min(messages.len().saturating_sub(1));
-
-        for idx in start_idx..=end_idx {
-            if let Some(msg) = messages.get(idx) {
-                let role = msg
-                    .get("role")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown");
-                if msg.as_object().is_some_and(|extra| {
-                    refact_core::chat_types::is_never_model_visible_parts(role, extra)
-                }) {
-                    continue;
-                }
-                let content = msg
-                    .get("content")
-                    .map(|v| {
-                        if let Some(s) = v.as_str() {
-                            s.chars().take(500).collect::<String>()
-                        } else {
-                            v.to_string().chars().take(500).collect()
-                        }
-                    })
-                    .unwrap_or_default();
-
-                if !content.is_empty() && role != "system" && role != "context_file" {
-                    matched_content.push(format!("[msg {}] {}: {}", idx, role, content));
-                }
-            }
-        }
-    }
-
-    matched_content
-}
-
 async fn memories_search_inner(
     gcx: Arc<GlobalContext>,
     query: &str,
     top_n_memories: usize,
-    top_n_trajectories: usize,
     exclude_trajectory_id: Option<&str>,
     diagnostic_chat_id: Option<&str>,
 ) -> Result<Vec<MemoRecord>, String> {
@@ -1542,364 +1463,11 @@ async fn memories_search_inner(
         Some(usize::from(exclude_root.is_some()) as u64),
     );
 
-    // Resolve trajectory dirs before acquiring vec_db lock to avoid holding the
-    // mutex across gcx.read() calls (which could deadlock with concurrent gcx.write()).
-    let trajectory_dirs = crate::chat::trajectories::get_all_trajectories_dirs(gcx.clone()).await;
-
-    let vecdb_arc = {
-        let gcx_read = gcx.clone();
-        gcx_read.vec_db.clone()
-    };
-
-    let vecdb_lock_started = perf_diagnostics::is_enabled().then(Instant::now);
-    let vecdb = vecdb_arc.lock().await.clone();
-    record_enrichment_metric(
-        diagnostic_chat_id,
-        PerfComponent::EnrichmentVecdbLockWait,
-        PerfOutcome::Success,
-        elapsed_us(vecdb_lock_started),
-        None,
-        Some(1),
-    );
-    let vecdb_hold_started = perf_diagnostics::is_enabled().then(Instant::now);
-    let Some(vecdb) = vecdb else {
-        record_enrichment_metric(
-            diagnostic_chat_id,
-            PerfComponent::EnrichmentVecdbLockHold,
-            PerfOutcome::Success,
-            elapsed_us(vecdb_hold_started),
-            None,
-            Some(0),
-        );
-        return memories_search_fallback(
-            gcx,
-            query,
-            top_n_memories,
-            &knowledge_dirs,
-            exclude_root.as_deref(),
-            diagnostic_chat_id,
-        )
-        .await;
-    };
-    record_enrichment_metric(
-        diagnostic_chat_id,
-        PerfComponent::EnrichmentVecdbLockHold,
-        PerfOutcome::Success,
-        elapsed_us(vecdb_hold_started),
-        None,
-        Some(0),
-    );
-
     let _enrichment_permit = enrichment_search_semaphore()
         .acquire_owned()
         .await
         .map_err(|_| "knowledge enrichment search is shutting down".to_string())?;
-
-    // Improve recall by doing two scoped searches:
-    // - knowledge roots
-    // - trajectory roots
-    // This avoids code chunks dominating a global top-K.
-    let embedding_started = perf_diagnostics::is_enabled().then(Instant::now);
-    let embedding = vecdb.embed_query(query).await;
-    record_enrichment_metric(
-        diagnostic_chat_id,
-        PerfComponent::EnrichmentEmbedding,
-        if embedding.is_ok() {
-            PerfOutcome::Success
-        } else {
-            PerfOutcome::Failure
-        },
-        elapsed_us(embedding_started),
-        None,
-        Some(1),
-    );
-    let embedding = embedding?;
-
-    let k_knowledge = ((top_n_memories.max(1) + top_n_trajectories.max(1)) * 50).min(400);
-    let k_trajectories = ((top_n_memories.max(1) + top_n_trajectories.max(1)) * 50).min(400);
-
-    let scoped_search_started = perf_diagnostics::is_enabled().then(Instant::now);
-    let scopes = knowledge_dirs
-        .iter()
-        .map(|dir| VecdbSearchScope {
-            path_prefix: scope_prefix(dir),
-            top_n: k_knowledge,
-        })
-        .chain(trajectory_dirs.iter().map(|dir| VecdbSearchScope {
-            path_prefix: scope_prefix(dir),
-            top_n: k_trajectories,
-        }))
-        .collect::<Vec<_>>();
-    let scoped_searches = u64::from(!scopes.is_empty());
-    let mut combined_results = vecdb
-        .vecdb_search_scopes_with_embedding(&embedding, &scopes)
-        .await
-        .unwrap_or_else(|error| {
-            warn!("memories: scoped VecDB search failed: {}", error);
-            vec![Vec::new(); scopes.len()]
-        })
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>();
-    record_enrichment_metric(
-        diagnostic_chat_id,
-        PerfComponent::EnrichmentScopedSearch,
-        PerfOutcome::Success,
-        elapsed_us(scoped_search_started),
-        None,
-        Some(scoped_searches),
-    );
-
-    // De-dup identical segments; keep best usefulness.
-    let merge_dedup_started = perf_diagnostics::is_enabled().then(Instant::now);
-    combined_results.sort_by(|a, b| b.usefulness.total_cmp(&a.usefulness));
-    let mut deduped = Vec::new();
-    let mut seen = std::collections::HashSet::<(PathBuf, u64, u64)>::new();
-    for r in combined_results {
-        let key = (r.file_path.clone(), r.start_line, r.end_line);
-        if seen.insert(key) {
-            deduped.push(r);
-        }
-        if deduped.len() >= (k_knowledge + k_trajectories) {
-            break;
-        }
-    }
-
-    let search_result = crate::vecdb::vdb_structs::SearchResult {
-        query_text: query.to_string(),
-        results: deduped,
-    };
-    record_enrichment_metric(
-        diagnostic_chat_id,
-        PerfComponent::EnrichmentMergeDedup,
-        PerfOutcome::Success,
-        elapsed_us(merge_dedup_started),
-        None,
-        Some(search_result.results.len() as u64),
-    );
-    struct KnowledgeMatch {
-        best_score: f32,
-    }
-    struct TrajectoryMatch {
-        best_score: f32,
-        matched_ranges: Vec<(u64, u64)>,
-    }
-
-    let mut knowledge_matches: HashMap<PathBuf, KnowledgeMatch> = HashMap::new();
-    let mut trajectory_matches: HashMap<PathBuf, TrajectoryMatch> = HashMap::new();
-
-    for rec in search_result.results.iter() {
-        // Prefer VecDB usefulness normalization over raw distance.
-        let score = (rec.usefulness / 100.0).clamp(0.0, 1.0);
-        let is_knowledge = knowledge_dirs.iter().any(|d| rec.file_path.starts_with(d))
-            && !path_contains_component(&rec.file_path, "archive");
-        let is_trajectory = trajectory_dirs.iter().any(|d| rec.file_path.starts_with(d))
-            && rec
-                .file_path
-                .extension()
-                .map(|e| e == "json")
-                .unwrap_or(false);
-
-        if is_knowledge {
-            knowledge_matches
-                .entry(rec.file_path.clone())
-                .and_modify(|m| {
-                    if score > m.best_score {
-                        m.best_score = score;
-                    }
-                })
-                .or_insert(KnowledgeMatch {
-                    best_score: score,
-                });
-        } else if is_trajectory {
-            let traj_id = rec
-                .file_path
-                .file_stem()
-                .map(|s| s.to_string_lossy().to_string())
-                .unwrap_or_default();
-
-            if let Some(ref ex_root) = exclude_root {
-                if !traj_id.is_empty() {
-                    let candidate_root = if let Some(cached) = root_cache.get(&traj_id) {
-                        cached.clone()
-                    } else if let Some(stored_root) =
-                        load_root_chat_id_from_trajectory(gcx.clone(), &rec.file_path).await
-                    {
-                        root_cache.insert(traj_id.clone(), stored_root.clone());
-                        stored_root
-                    } else {
-                        resolve_root_chat_id(gcx.clone(), &traj_id, &mut root_cache).await
-                    };
-                    if candidate_root == *ex_root {
-                        continue;
-                    }
-                }
-            }
-
-            trajectory_matches
-                .entry(rec.file_path.clone())
-                .and_modify(|m| {
-                    if score > m.best_score {
-                        m.best_score = score;
-                    }
-                    m.matched_ranges.push((rec.start_line, rec.end_line));
-                })
-                .or_insert(TrajectoryMatch {
-                    best_score: score,
-                    matched_ranges: vec![(rec.start_line, rec.end_line)],
-                });
-        }
-    }
-
-    let mut records = Vec::new();
-
-    // Process knowledge files (whole content)
-    let mut sorted_knowledge: Vec<_> = knowledge_matches.into_iter().collect();
-    sorted_knowledge.sort_by(|a, b| {
-        b.1.best_score
-            .partial_cmp(&a.1.best_score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-
-    let reread_started = perf_diagnostics::is_enabled().then(Instant::now);
-    let mut reread_count = 0u64;
-    let mut reread_bytes = 0u64;
-    for (file_path, file_match) in sorted_knowledge.into_iter().take(top_n_memories) {
-        let text = match get_file_text_from_memory_or_disk(gcx.clone(), &file_path).await {
-            Ok(t) => {
-                reread_count += 1;
-                reread_bytes = reread_bytes.saturating_add(t.len() as u64);
-                t
-            }
-            Err(_) => continue,
-        };
-
-        let (frontmatter, content_start) = KnowledgeFrontmatter::parse(&text);
-        if frontmatter.is_archived() || frontmatter.is_deprecated() {
-            continue;
-        }
-
-        if let (Some(ref ex_root), Some(ref source_id)) =
-            (&exclude_root, &frontmatter.source_chat_id)
-        {
-            if source_id == ex_root {
-                tracing::debug!(
-                    "Excluding knowledge created by current chat: {:?}",
-                    file_path
-                );
-                continue;
-            }
-        }
-
-        let content = text[content_start..].trim().to_string();
-        let line_count = content.lines().count();
-        let id = frontmatter
-            .id
-            .clone()
-            .unwrap_or_else(|| file_path.to_string_lossy().to_string());
-
-        records.push(MemoRecord {
-            memid: id,
-            tags: frontmatter.tags,
-            content,
-            file_path: Some(file_path),
-            line_range: Some((1, line_count as u64)),
-            title: frontmatter.title,
-            created: frontmatter.created,
-            kind: frontmatter.kind,
-            score: Some(file_match.best_score),
-        });
-    }
-
-    // Process trajectories (matched parts only)
-    let mut sorted_trajectories: Vec<_> = trajectory_matches.into_iter().collect();
-    sorted_trajectories.sort_by(|a, b| {
-        b.1.best_score
-            .partial_cmp(&a.1.best_score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-
-    for (file_path, traj_match) in sorted_trajectories.into_iter().take(top_n_trajectories) {
-        let text = match get_file_text_from_memory_or_disk(gcx.clone(), &file_path).await {
-            Ok(t) => {
-                reread_count += 1;
-                reread_bytes = reread_bytes.saturating_add(t.len() as u64);
-                t
-            }
-            Err(_) => continue,
-        };
-
-        let traj_json: serde_json::Value = match serde_json::from_str(&text) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-
-        let traj_id = file_path
-            .file_stem()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_default();
-        let traj_title = traj_json
-            .get("title")
-            .and_then(|v| v.as_str())
-            .unwrap_or("Untitled")
-            .to_string();
-
-        let messages = match traj_json.get("messages").and_then(|v| v.as_array()) {
-            Some(m) => m,
-            None => continue,
-        };
-
-        let matched_content = trajectory_matched_content(messages, &traj_match.matched_ranges);
-
-        if matched_content.is_empty() {
-            continue;
-        }
-
-        let content = format!(
-            "Trajectory: {} ({})\n\n{}",
-            traj_title,
-            traj_id,
-            matched_content.join("\n\n")
-        );
-
-        records.push(MemoRecord {
-            memid: traj_id.clone(),
-            tags: vec!["trajectory".to_string()],
-            content,
-            file_path: Some(file_path),
-            line_range: None,
-            title: Some(traj_title),
-            created: None,
-            kind: Some("trajectory".to_string()),
-            score: Some(traj_match.best_score),
-        });
-    }
-
-    tracing::info!(
-        "memories_search: found {} knowledge + {} trajectories",
-        records
-            .iter()
-            .filter(|r| r.kind.as_deref() != Some("trajectory"))
-            .count(),
-        records
-            .iter()
-            .filter(|r| r.kind.as_deref() == Some("trajectory"))
-            .count()
-    );
-    record_enrichment_metric(
-        diagnostic_chat_id,
-        PerfComponent::EnrichmentFileReread,
-        PerfOutcome::Success,
-        elapsed_us(reread_started),
-        Some(reread_bytes),
-        Some(reread_count),
-    );
-
-    if !records.is_empty() {
-        return Ok(records);
-    }
-
-    memories_search_fallback(
+    memories_search_lexical(
         gcx,
         query,
         top_n_memories,
@@ -1910,7 +1478,7 @@ async fn memories_search_inner(
     .await
 }
 
-async fn memories_search_fallback(
+async fn memories_search_lexical(
     gcx: Arc<GlobalContext>,
     query: &str,
     top_n: usize,
@@ -1918,7 +1486,7 @@ async fn memories_search_fallback(
     exclude_root: Option<&str>,
     diagnostic_chat_id: Option<&str>,
 ) -> Result<Vec<MemoRecord>, String> {
-    let fallback_started = perf_diagnostics::is_enabled().then(Instant::now);
+    let lexical_started = perf_diagnostics::is_enabled().then(Instant::now);
     let query_lower = query.to_lowercase();
     const FALLBACK_STOP_WORDS: &[&str] = &[
         "the", "and", "for", "with", "that", "this", "from", "into", "about", "what", "where",
@@ -1933,16 +1501,16 @@ async fn memories_search_fallback(
         .filter(|w| !FALLBACK_STOP_WORDS.contains(w))
         .filter(|w| seen_query_words.insert((*w).to_string()))
         .collect();
-    if knowledge_dirs.is_empty() || query_words.is_empty() {
+    if top_n == 0 || knowledge_dirs.is_empty() || query_words.is_empty() {
         record_enrichment_metric(
             diagnostic_chat_id,
-            PerfComponent::EnrichmentFallback,
+            PerfComponent::EnrichmentLexical,
             PerfOutcome::Skipped,
-            elapsed_us(fallback_started),
+            elapsed_us(lexical_started),
             Some(0),
             Some(0),
         );
-        return Ok(vec![]);
+        return Ok(Vec::new());
     }
 
     let candidate_cap = top_n.saturating_mul(4).clamp(1, 32);
@@ -1995,17 +1563,17 @@ async fn memories_search_fallback(
         (records, index_available)
     };
     if !index_available {
-        warn!("memories: fallback index unavailable; returning no knowledge candidates");
+        warn!("memories: knowledge index unavailable; returning no knowledge candidates");
     }
     record_enrichment_metric(
         diagnostic_chat_id,
-        PerfComponent::EnrichmentFallback,
+        PerfComponent::EnrichmentLexical,
         if index_available {
             PerfOutcome::Success
         } else {
             PerfOutcome::Skipped
         },
-        elapsed_us(fallback_started),
+        elapsed_us(lexical_started),
         Some(0),
         Some(0),
     );
@@ -2037,15 +1605,6 @@ fn enrichment_search_semaphore() -> Arc<Semaphore> {
     ENRICHMENT_SEARCH_PERMITS
         .get_or_init(|| Arc::new(Semaphore::new(MAX_CONCURRENT_ENRICHMENT_SEARCHES)))
         .clone()
-}
-
-fn scope_prefix(dir: &Path) -> String {
-    let dir = dir.to_string_lossy();
-    if dir.ends_with(std::path::MAIN_SEPARATOR) {
-        dir.to_string()
-    } else {
-        format!("{}{}", dir, std::path::MAIN_SEPARATOR)
-    }
 }
 
 pub async fn deprecate_document(
@@ -2127,23 +1686,6 @@ pub async fn rewrite_memory_document(
             }
         }
 
-        let roots = crate::indexing_routing::memory_plane_roots(gcx.clone()).await;
-        let vec_db = gcx.vec_db.clone();
-        let vecdb = vec_db.lock().await.clone();
-        if let Some(vecdb) = vecdb {
-            if frontmatter.is_archived() || frontmatter.is_deprecated() {
-                let _ = vecdb.remove_file(&path_buf).await;
-            } else {
-                vecdb
-                    .vectorizer_enqueue_files(
-                        &vec![path_buf.to_string_lossy().to_string()],
-                        true,
-                        roots,
-                    )
-                    .await;
-            }
-        }
-
         gcx.documents_state
             .memory_document_map
             .lock()
@@ -2213,12 +1755,6 @@ pub async fn delete_document_from_disk(
         info!("Deleted document from disk: {}", doc_path.display());
 
         gcx.knowledge_index.lock().await.remove_path(doc_path);
-
-        let vec_db = gcx.vec_db.clone();
-        let vecdb = vec_db.lock().await.clone();
-        if let Some(vecdb) = vecdb {
-            let _ = vecdb.remove_file(doc_path).await;
-        }
 
         gcx.documents_state
             .memory_document_map
@@ -2559,21 +2095,6 @@ pub async fn memories_add_enriched(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn trajectory_matched_content_excludes_never_visible_and_keeps_indices() {
-        let messages = serde_json::json!([
-            {"role":"user","content":"visible"},
-            {"role":"error","content":"secret error"},
-            {"role":"assistant","content":"secret partial","_ui_only":true},
-            {"role":"assistant","content":"answer"}
-        ]);
-        let result = trajectory_matched_content(messages.as_array().unwrap(), &[(0, 3)]);
-        assert_eq!(
-            result,
-            vec!["[msg 0] user: visible", "[msg 3] assistant: answer"]
-        );
-    }
 
     #[tokio::test]
     async fn local_dedup_never_touches_other_project_memory() {
@@ -2986,121 +2507,6 @@ mod tests {
 #[cfg(test)]
 mod firewall_tests {
     use super::*;
-    use crate::vecdb::vdb_structs::{
-        EmbeddingModelConfig, SearchResult, VecDbStatus, VecdbRecord, VecdbSearch,
-    };
-    use async_trait::async_trait;
-    use tokio::sync::Notify;
-    use std::sync::Mutex as StdMutex;
-
-    struct StubVecdb {
-        record_path: PathBuf,
-        seen_scopes: Arc<StdMutex<Vec<Vec<VecdbSearchScope>>>>,
-        embed_calls: Arc<StdMutex<usize>>,
-        search_calls: Arc<StdMutex<usize>>,
-        embed_gate: Option<(Arc<Notify>, Arc<Notify>)>,
-    }
-
-    #[async_trait]
-    impl VecdbSearch for StubVecdb {
-        async fn vecdb_search(
-            &self,
-            _query: String,
-            _top_n: usize,
-            _filter_mb: Option<String>,
-        ) -> Result<SearchResult, String> {
-            Ok(SearchResult {
-                query_text: String::new(),
-                results: vec![],
-            })
-        }
-
-        async fn get_status(&self) -> Result<VecDbStatus, String> {
-            Err("stub has no status".to_string())
-        }
-
-        async fn remove_file(&self, _file_path: &PathBuf) -> Result<(), String> {
-            Ok(())
-        }
-
-        async fn vectorizer_enqueue_files(
-            &self,
-            _documents: &[String],
-            _process_immediately: bool,
-            _roots: refact_core::memory_plane::MemoryPlaneRoots,
-        ) {
-        }
-
-        fn current_constants(&self) -> (EmbeddingModelConfig, usize) {
-            (
-                EmbeddingModelConfig {
-                    model_id: String::new(),
-                    endpoint: String::new(),
-                    endpoint_style: String::new(),
-                    embedding_endpoint_style: String::new(),
-                    api_key: String::new(),
-                    model_name: String::new(),
-                    embedding_size: 0,
-                    dimensions: None,
-                    query_prefix: String::new(),
-                    document_prefix: String::new(),
-                    rejection_threshold: 0.0,
-                    embedding_batch: 0,
-                    n_ctx: 0,
-                },
-                0,
-            )
-        }
-
-        async fn embed_query(&self, _query: &str) -> Result<Vec<f32>, String> {
-            *self.embed_calls.lock().unwrap() += 1;
-            if let Some((started, release)) = &self.embed_gate {
-                started.notify_one();
-                release.notified().await;
-            }
-            Ok(vec![0.1, 0.2, 0.3])
-        }
-
-        async fn vecdb_search_with_embedding(
-            &self,
-            _embedding: &Vec<f32>,
-            _top_n: usize,
-            _filter_mb: Option<String>,
-        ) -> Result<Vec<VecdbRecord>, String> {
-            *self.search_calls.lock().unwrap() += 1;
-            Ok(vec![VecdbRecord {
-                vector: None,
-                file_path: self.record_path.clone(),
-                start_line: 1,
-                end_line: 1,
-                distance: 0.1,
-                usefulness: 90.0,
-            }])
-        }
-
-        async fn vecdb_search_scopes_with_embedding(
-            &self,
-            _embedding: &Vec<f32>,
-            scopes: &[VecdbSearchScope],
-        ) -> Result<Vec<Vec<VecdbRecord>>, String> {
-            *self.search_calls.lock().unwrap() += 1;
-            self.seen_scopes.lock().unwrap().push(scopes.to_vec());
-            Ok(scopes
-                .iter()
-                .map(|_| {
-                    vec![VecdbRecord {
-                        vector: None,
-                        file_path: self.record_path.clone(),
-                        start_line: 1,
-                        end_line: 1,
-                        distance: 0.1,
-                        usefulness: 90.0,
-                    }]
-                })
-                .collect())
-        }
-    }
-
     async fn write_knowledge_note(knowledge_dir: &Path, name: &str, body: &str) -> PathBuf {
         tokio::fs::create_dir_all(knowledge_dir).await.unwrap();
         let path = knowledge_dir.join(name);
@@ -3117,103 +2523,7 @@ mod firewall_tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn memories_search_uses_one_embedding_and_batched_scopes() {
-        let dir = tempfile::tempdir().unwrap();
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        {
-            *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().to_path_buf()];
-        }
-
-        let project_root = get_project_dirs(gcx.clone())
-            .await
-            .into_iter()
-            .next()
-            .expect("test workspace must resolve to a project dir");
-        let knowledge_dir = project_root.join(KNOWLEDGE_FOLDER_NAME);
-        write_knowledge_note(
-            &knowledge_dir,
-            "note.md",
-            "Firewall stub body about codegraph.",
-        )
-        .await;
-
-        let seen_scopes = Arc::new(StdMutex::new(Vec::<Vec<VecdbSearchScope>>::new()));
-        let embed_calls = Arc::new(StdMutex::new(0usize));
-        let search_calls = Arc::new(StdMutex::new(0usize));
-        let stub: Arc<dyn VecdbSearch> = Arc::new(StubVecdb {
-            record_path: PathBuf::new(),
-            seen_scopes: seen_scopes.clone(),
-            embed_calls: embed_calls.clone(),
-            search_calls: search_calls.clone(),
-            embed_gate: None,
-        });
-        *gcx.vec_db.lock().await = Some(stub);
-
-        let _records = memories_search(gcx.clone(), "codegraph", 5, 5, None)
-            .await
-            .unwrap();
-
-        assert_eq!(
-            *embed_calls.lock().unwrap(),
-            1,
-            "memories_search must embed the query once"
-        );
-        assert_eq!(*search_calls.lock().unwrap(), 1);
-        let scopes = seen_scopes.lock().unwrap().clone();
-        let knowledge_str = knowledge_dir.to_string_lossy().to_string();
-        assert!(
-            scopes
-                .iter()
-                .flatten()
-                .any(|scope| scope.path_prefix.starts_with(&knowledge_str)),
-            "expected a scope rooted at {knowledge_str}, got {scopes:?}"
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn memories_search_survives_vecdb_reload_while_embedding() {
-        let dir = tempfile::tempdir().unwrap();
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        {
-            *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().to_path_buf()];
-        }
-        let started = Arc::new(Notify::new());
-        let release = Arc::new(Notify::new());
-        let old_embed_calls = Arc::new(StdMutex::new(0usize));
-        let old: Arc<dyn VecdbSearch> = Arc::new(StubVecdb {
-            record_path: PathBuf::new(),
-            seen_scopes: Arc::new(StdMutex::new(Vec::new())),
-            embed_calls: old_embed_calls.clone(),
-            search_calls: Arc::new(StdMutex::new(0)),
-            embed_gate: Some((started.clone(), release.clone())),
-        });
-        *gcx.vec_db.lock().await = Some(old);
-
-        let search = tokio::spawn(memories_search(gcx.clone(), "reload", 1, 1, None));
-        tokio::time::timeout(std::time::Duration::from_secs(1), started.notified())
-            .await
-            .expect("search started embedding");
-
-        let replacement: Arc<dyn VecdbSearch> = Arc::new(StubVecdb {
-            record_path: PathBuf::new(),
-            seen_scopes: Arc::new(StdMutex::new(Vec::new())),
-            embed_calls: Arc::new(StdMutex::new(0)),
-            search_calls: Arc::new(StdMutex::new(0)),
-            embed_gate: None,
-        });
-        tokio::time::timeout(std::time::Duration::from_secs(1), async {
-            *gcx.vec_db.lock().await = Some(replacement);
-        })
-        .await
-        .expect("VecDB reload must not wait for the embedding");
-        release.notify_one();
-
-        search.await.unwrap().unwrap();
-        assert_eq!(*old_embed_calls.lock().unwrap(), 1);
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn fallback_search_uses_ready_index_without_reading_the_corpus() {
+    async fn lexical_search_uses_ready_index_without_reading_the_corpus() {
         let dir = tempfile::tempdir().unwrap();
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let project_root =
@@ -3242,20 +2552,199 @@ mod firewall_tests {
             index.mark_ready();
         }
 
-        let records = memories_search(gcx, "codegraph", 5, 0, None).await.unwrap();
+        let records = memories_search(gcx, "codegraph", 5, None).await.unwrap();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].file_path.as_deref(), Some(indexed.as_path()));
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn fallback_search_discloses_unavailable_index_without_scanning() {
+    async fn lexical_search_discloses_unavailable_index_without_scanning() {
         let dir = tempfile::tempdir().unwrap();
         let gcx = crate::global_context::tests::make_test_gcx().await;
         *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().to_path_buf()];
         let knowledge_dir = dir.path().join(KNOWLEDGE_FOLDER_NAME);
         write_knowledge_note(&knowledge_dir, "unavailable.md", "codegraph needle").await;
 
-        let records = memories_search(gcx, "codegraph", 5, 0, None).await.unwrap();
+        let records = memories_search(gcx, "codegraph", 5, None).await.unwrap();
         assert!(records.is_empty());
+    }
+    #[tokio::test]
+    async fn lexical_search_tracks_rewrite_archive_and_delete() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() =
+            vec![dunce::simplified(&std::fs::canonicalize(dir.path()).unwrap()).to_path_buf()];
+        gcx.knowledge_index.lock().await.mark_ready();
+        let frontmatter = create_frontmatter(
+            Some("Routing decision"),
+            &vec!["routing".to_string()],
+            &Vec::new(),
+            &Vec::new(),
+            "domain",
+        );
+        let path = memories_add(gcx.clone(), &frontmatter, "originalneedle")
+            .await
+            .unwrap();
+        let hits = memories_search(gcx.clone(), "originalneedle", 1, None)
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].file_path.as_deref(), Some(path.as_path()));
+        assert_ne!(hits[0].kind.as_deref(), Some("trajectory"));
+        assert!(memories_search(gcx.clone(), "originalneedle", 0, None)
+            .await
+            .unwrap()
+            .is_empty());
+
+        rewrite_memory_document(gcx.clone(), &path, &frontmatter, "replacementneedle")
+            .await
+            .unwrap();
+        assert!(memories_search(gcx.clone(), "originalneedle", 1, None)
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            memories_search(gcx.clone(), "replacementneedle", 1, None)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        let mut archived = frontmatter.clone();
+        archived.status = Some("archived".to_string());
+        rewrite_memory_document(gcx.clone(), &path, &archived, "replacementneedle")
+            .await
+            .unwrap();
+        assert!(memories_search(gcx.clone(), "replacementneedle", 1, None)
+            .await
+            .unwrap()
+            .is_empty());
+        rewrite_memory_document(gcx.clone(), &path, &frontmatter, "replacementneedle")
+            .await
+            .unwrap();
+        assert_eq!(
+            memories_search(gcx.clone(), "replacementneedle", 1, None)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        delete_document_from_disk(gcx.clone(), &path).await.unwrap();
+        assert!(memories_search(gcx, "replacementneedle", 1, None)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn lexical_search_skips_stop_words_and_short_tokens() {
+        struct Clock;
+        impl perf_diagnostics::PerfClock for Clock {
+            fn now_us(&self) -> u64 {
+                0
+            }
+        }
+        let sink = Arc::new(perf_diagnostics::MemoryPerfSink::new());
+        let _recorder = perf_diagnostics::install_test_recorder(Arc::new(
+            perf_diagnostics::PerfRecorder::new(Arc::new(Clock), sink.clone()),
+        ));
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let knowledge = dir.path().join(KNOWLEDGE_FOLDER_NAME);
+        let fm = create_frontmatter(
+            Some("how does this work"),
+            &vec![],
+            &vec![],
+            &vec![],
+            "domain",
+        );
+        {
+            let mut index = gcx.knowledge_index.lock().await;
+            crate::knowledge_index::add_knowledge_frontmatter_to_index(
+                &mut index,
+                knowledge.join("note.md"),
+                &fm,
+                Some("how does this work? an ox is up"),
+            );
+            index.mark_ready();
+            assert!(!index
+                .search_bounded(
+                    "how does this work?",
+                    &KnowledgeSearchFilters::default(),
+                    4,
+                    4
+                )
+                .is_empty());
+        }
+        for query in [
+            "how does this work?",
+            "an ox is up",
+            "--how-- does this work?",
+        ] {
+            assert!(
+                memories_search_lexical(
+                    gcx.clone(),
+                    query,
+                    3,
+                    &[knowledge.clone()],
+                    None,
+                    Some("stop-word-test")
+                )
+                .await
+                .unwrap()
+                .is_empty(),
+                "{query}"
+            );
+        }
+        let events = sink.events();
+        assert_eq!(events.len(), 3);
+        for event in events {
+            assert_eq!(event.component, "enrichment.lexical");
+            assert_eq!(event.outcome, "skipped");
+            assert_eq!(event.size_bytes, Some(0));
+            assert_eq!(event.item_count, Some(0));
+        }
+    }
+
+    #[tokio::test]
+    async fn lexical_search_excludes_foreign_roots_and_current_chat_sources() {
+        let dir = tempfile::tempdir().unwrap();
+        let foreign = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let root = dunce::simplified(&std::fs::canonicalize(dir.path()).unwrap()).to_path_buf();
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![root.clone()];
+        let local = root.join(KNOWLEDGE_FOLDER_NAME).join("local.md");
+        let foreign = foreign.path().join("foreign.md");
+        let mut fm = create_frontmatter(Some("needle"), &vec![], &vec![], &vec![], "domain");
+        fm.source_chat_id = Some("current-root".to_string());
+        {
+            let mut index = gcx.knowledge_index.lock().await;
+            crate::knowledge_index::add_knowledge_frontmatter_to_index(
+                &mut index,
+                local.clone(),
+                &fm,
+                Some("needle"),
+            );
+            fm.source_chat_id = None;
+            crate::knowledge_index::add_knowledge_frontmatter_to_index(
+                &mut index,
+                foreign,
+                &fm,
+                Some("needle"),
+            );
+            index.mark_ready();
+        }
+        let dirs = vec![root.join(KNOWLEDGE_FOLDER_NAME)];
+        let hits = memories_search_lexical(gcx.clone(), "needle", 8, &dirs, None, None)
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].file_path.as_ref(), Some(&local));
+        assert!(
+            memories_search_lexical(gcx, "needle", 8, &dirs, Some("current-root"), None)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 }

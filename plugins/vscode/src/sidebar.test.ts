@@ -199,7 +199,6 @@ async function runRuntimeVersionsPayloadTests() {
         loader._load = function(request: string, parent: { filename?: string }, isMain: boolean) {
             if (parent?.filename === modulePath) {
                 if (request === "vscode") { return { workspace: { getConfiguration: () => ({ get: () => undefined }) } }; }
-                if (request === "./getKeybindings") { return { getKeyBindingForChat: async () => "" }; }
                 if (request.startsWith("./") && !["./backendStatus", "./sidebarConfig", "./runtimeVersions", "./sidebarPaths"].includes(request)) { return {}; }
             }
             return originalLoad.call(this, request, parent, isMain);
@@ -223,6 +222,10 @@ async function runRuntimeVersionsPayloadTests() {
         } as unknown as typeof global.rust_binary_blob;
         const initial = await panel.createInitialState();
         panel.handleSettingsChange();
+        assert.deepStrictEqual(initial.config.features, {
+            ast: false, codegraph: false, images: true, statistics: true,
+        });
+        assert.deepStrictEqual((payload as { features: unknown }).features, { ast: false, codegraph: false });
         assert.deepStrictEqual(initial.config.runtimeVersions, versions);
         assert.deepStrictEqual((payload as { runtimeVersions: unknown }).runtimeVersions, versions);
         versions.selected.version = "unknown";

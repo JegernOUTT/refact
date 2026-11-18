@@ -14,9 +14,34 @@ struct Publications {
 }
 
 #[derive(Default)]
-pub(crate) struct SessionPublications(Mutex<Publications>);
+pub(crate) struct SessionPublications(
+    Mutex<Publications>,
+    Mutex<HashMap<String, Option<std::path::PathBuf>>>,
+);
 
 impl SessionPublications {
+    pub(crate) fn record_source_root(&self, id: &str, root: Option<std::path::PathBuf>) {
+        self.1
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(id.into(), root);
+    }
+
+    pub(crate) fn retain_source_roots(&self, keep: impl Fn(&str) -> bool) {
+        self.1
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|id, _| keep(id));
+    }
+
+    pub(crate) fn source_root_hint(&self, id: &str) -> Option<Option<std::path::PathBuf>> {
+        self.1
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(id)
+            .cloned()
+    }
+
     pub(crate) fn publish(&self, id: &str) {
         let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
         state.seq = state.seq.wrapping_add(1);

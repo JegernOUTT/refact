@@ -14,10 +14,10 @@ pub fn functions() -> Vec<EngineFn> {
     vec![
         EngineFn {
             name: "index.status",
-            summary: "CodeGraph, VecDB and file-index progress, sizes and errors (a snapshot; call again to watch progress). Error strings are redacted.",
+            summary: "CodeGraph and file-index progress, sizes and errors (a snapshot; call again to watch progress). Error strings are redacted.",
             class: EngineClass::RedactedRead,
-            input: || json!({"type":"object","additionalProperties":false,"properties":{"parts":{"type":"array","minItems":1,"uniqueItems":true,"items":{"enum":["codegraph","vecdb","file_index"]},"description":"Every part by default."}}}),
-            output: || Some(json!({"type":"object","properties":{"codegraph":{"type":"object","properties":{"state":{"type":"string"},"error":{"type":"string"},"queued":{"type":"integer"},"counts":{"type":"object"},"cross_file_edges":{"type":"integer"},"cross_file_ready":{"type":"boolean"},"throughput_files_per_min":{"type":"number"},"eta_seconds":{"type":"integer"},"parse_failures":{"type":"integer"},"parse_failure_paths":{"type":"array","items":{"type":"string"}},"parse_failure_note":{"type":"string"}}},"vecdb":{"type":"object","properties":{"alive":{"enum":["turned_off","starting","working","error"]},"error":{"type":"string"},"status":{"type":"object"}}},"file_index":{"type":"object"}}})),
+            input: || json!({"type":"object","additionalProperties":false,"properties":{"parts":{"type":"array","minItems":1,"uniqueItems":true,"items":{"enum":["codegraph","file_index"]},"description":"Every part by default."}}}),
+            output: || Some(json!({"type":"object","properties":{"codegraph":{"type":"object","properties":{"state":{"type":"string"},"error":{"type":"string"},"queued":{"type":"integer"},"counts":{"type":"object"},"cross_file_edges":{"type":"integer"},"cross_file_ready":{"type":"boolean"},"throughput_files_per_min":{"type":"number"},"eta_seconds":{"type":"integer"},"parse_failures":{"type":"integer"},"parse_failure_paths":{"type":"array","items":{"type":"string"}},"parse_failure_note":{"type":"string"}}},"file_index":{"type":"object"}}})),
             handler: status,
             preview: None,
             timeout: None,
@@ -34,9 +34,9 @@ pub fn functions() -> Vec<EngineFn> {
         },
         EngineFn {
             name: "index.rescan",
-            summary: "Re-walk every workspace folder and enqueue all files for CodeGraph and VecDB indexing, after the user approves. Returns when the walk has enumerated the files; poll index.status for progress.",
+            summary: "Re-walk every workspace folder and enqueue all files for CodeGraph indexing, after the user approves. Returns when the walk has enumerated the files; poll index.status for progress.",
             class: EngineClass::Change,
-            input: || json!({"type":"object","additionalProperties":false,"properties":{"vecdb_only":{"type":"boolean","description":"Enqueue for VecDB only; false by default."}}}),
+            input: || json!({"type":"object","additionalProperties":false,"properties":{}}),
             output: || Some(json!({"type":"object","required":["files_enqueued"],"properties":{"files_enqueued":{"type":"integer"}}})),
             handler: rescan,
             preview: Some(rescan_preview),
@@ -55,7 +55,7 @@ pub fn functions() -> Vec<EngineFn> {
     ]
 }
 
-const MORE_INDEXED_WARNING: &str = "More files will be indexed, and with VecDB enabled their contents are sent to the embedding provider.";
+const MORE_INDEXED_WARNING: &str = "More files will be indexed.";
 
 async fn current_settings(
     ctx: &EngineCtx,
@@ -250,7 +250,7 @@ fn status<'a>(
         let gcx = ctx.app.gcx.clone();
         let mut data = serde_json::Map::new();
         let mut text = Vec::new();
-        if wanted(args, "codegraph") || wanted(args, "vecdb") {
+        if wanted(args, "codegraph") {
             let rag = crate::http::routers::v1::status::get_rag_status(gcx.clone()).await;
             if wanted(args, "codegraph") {
                 let mut codegraph = to_value(&rag.codegraph)?;
@@ -267,20 +267,6 @@ fn status<'a>(
                     codegraph["queued"]
                 ));
                 data.insert("codegraph".into(), codegraph);
-            }
-            if wanted(args, "vecdb") {
-                let mut vecdb = json!({"alive":rag.vecdb_alive,"error":redact(&rag.vec_db_error)});
-                if let Some(status) = &rag.vecdb {
-                    let mut status = to_value(status)?;
-                    if let Some(errors) = status["vecdb_errors"].as_object() {
-                        let redacted: serde_json::Map<String, Value> =
-                            errors.iter().map(|(k, v)| (redact(k), v.clone())).collect();
-                        status["vecdb_errors"] = Value::Object(redacted);
-                    }
-                    vecdb["status"] = status;
-                }
-                text.push(format!("vecdb {}", rag.vecdb_alive));
-                data.insert("vecdb".into(), vecdb);
             }
         }
         if wanted(args, "file_index") {
@@ -339,12 +325,11 @@ fn check_rescan(ctx: &EngineCtx) -> Result<(), EngineError> {
 
 fn rescan_preview<'a>(
     ctx: &'a EngineCtx,
-    args: &'a Value,
+    _args: &'a Value,
 ) -> BoxFuture<'a, Result<Preview, EngineError>> {
     Box::pin(async move {
         check_rescan(ctx)?;
         let indexed = ctx.app.gcx.file_index.status().entries;
-        let vecdb_only = args.get("vecdb_only").and_then(Value::as_bool) == Some(true);
         let approved = previewed::plan(Value::Null);
         Ok(Preview {
             plan: approved,
@@ -352,11 +337,7 @@ fn rescan_preview<'a>(
             items: vec![item(
                 "files",
                 Some(json!(format!("{indexed} indexed"))),
-                Some(json!(if vecdb_only {
-                    "re-enqueue all workspace files for VecDB"
-                } else {
-                    "re-enqueue all workspace files"
-                })),
+                Some(json!("re-enqueue all workspace files")),
             )],
             scope: Some("engine (all chats, all workspace folders)".into()),
             class: EngineClass::Change,
@@ -375,7 +356,7 @@ impl Drop for Running {
 
 fn rescan<'a>(
     ctx: &'a EngineCtx,
-    args: &'a Value,
+    _args: &'a Value,
 ) -> BoxFuture<'a, Result<EngineOutput, EngineError>> {
     Box::pin(async move {
         previewed::take(ctx, "index.rescan", &Value::Null)?;
@@ -386,13 +367,10 @@ fn rescan<'a>(
             ));
         }
         let _running = Running;
-        let vecdb_only = args.get("vecdb_only").and_then(Value::as_bool) == Some(true);
         let gcx = ctx.app.gcx.clone();
         crate::files_blocklist::reload_indexing_everywhere_now(gcx.clone()).await;
-        let count = crate::files_in_workspace::enqueue_all_files_from_workspace_folders(
-            gcx, true, vecdb_only,
-        )
-        .await;
+        let count =
+            crate::files_in_workspace::enqueue_all_files_from_workspace_folders(gcx, false).await;
         Ok(EngineOutput::new(
             json!({"files_enqueued":count}),
             format!("enqueued {count} files for indexing; poll index.status for progress"),

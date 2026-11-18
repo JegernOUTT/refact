@@ -471,7 +471,7 @@ export const CHAT_WITH_DIFF_ACTIONS: ChatThread = {
     {
       role: "tool",
       tool_call_id: "call_n5qeQaFZNAoaP3qJzRiGO6Js",
-      content: "performed vecdb search, results below",
+      content: "performed search, results below",
       tool_failed: false,
     },
     {
@@ -612,7 +612,7 @@ export const LARGE_DIFF: ChatThread = {
     {
       role: "tool",
       tool_call_id: "call_YozL4pz5zNwdEaNWhdVQdcIF",
-      content: "performed vecdb search, results below",
+      content: "performed search, results below",
       tool_failed: false,
     },
     {

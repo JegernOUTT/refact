@@ -1,4 +1,4 @@
-schema_version: 12
+schema_version: 13
 id: subagent
 title: Subagent
 description: General-purpose background subagent for focused research and implementation work
@@ -60,7 +60,6 @@ tools:
   - glob
   - search_pattern
   - search_symbol_definition
-  - search_semantic
   - codegraph_overview
   - code_health
   - git_risk

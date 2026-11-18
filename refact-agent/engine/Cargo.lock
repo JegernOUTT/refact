@@ -5526,7 +5526,6 @@ dependencies = [
  "base64 0.22.1",
  "hyper 0.14.32",
  "image",
- "indexmap 1.9.3",
  "itertools 0.14.0",
  "md5",
  "regex",
@@ -5670,7 +5669,6 @@ dependencies = [
  "lazy_static",
  "rand 0.8.5",
  "refact-chat-api",
- "refact-chat-history",
  "refact-core",
  "refact-privacy",
  "reqwest",
@@ -5695,7 +5693,6 @@ dependencies = [
  "base64 0.22.1",
  "cap-fs-ext",
  "cap-std",
- "cc",
  "chrono",
  "chrono-tz",
  "clap",
@@ -5780,7 +5777,6 @@ dependencies = [
  "refact-stats",
  "refact-tasks",
  "refact-tool-api",
- "refact-vecdb",
  "refact-voice",
  "refact-work-core",
  "refact-worktrees",
@@ -5805,7 +5801,6 @@ dependencies = [
  "shell-escape",
  "shell-words",
  "similar 2.7.0",
- "sqlite-vec",
  "sse-stream",
  "strsim",
  "sysinfo",
@@ -5830,7 +5825,6 @@ dependencies = [
  "webpki-roots 0.26.11",
  "which 7.0.3",
  "winreg 0.55.0",
- "zerocopy",
  "zip 2.4.2",
 ]
 
@@ -6007,11 +6001,8 @@ dependencies = [
 name = "refact-scratchpads"
 version = "0.1.0"
 dependencies = [
- "async-trait",
- "refact-codegraph",
  "refact-core",
  "refact-postprocessing",
- "ropey",
  "serde_json",
  "tokenizers",
  "tracing",
@@ -6072,29 +6063,6 @@ dependencies = [
  "serde_json",
  "shell-words",
  "tracing",
-]
-
-[[package]]
-name = "refact-vecdb"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "indexmap 1.9.3",
- "log",
- "refact-core",
- "regex",
- "reqwest",
- "rusqlite",
- "serde",
- "serde_json",
- "sqlite-vec",
- "tokenizers",
- "tokio",
- "tokio-rusqlite",
- "tracing",
- "uuid",
- "zerocopy",
 ]
 
 [[package]]
@@ -7446,15 +7414,6 @@ dependencies = [
  "nom",
  "serde",
  "unicode-segmentation",
-]
-
-[[package]]
-name = "sqlite-vec"
-version = "0.1.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4ec77b84fb8dd5f0f8def127226db83b5d1152c5bf367f09af03998b76ba554a"
-dependencies = [
- "cc",
 ]
 
 [[package]]

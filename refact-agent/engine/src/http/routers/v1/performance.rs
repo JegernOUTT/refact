@@ -39,7 +39,6 @@ pub(crate) struct RolloutSwitches {
     trajectory_index_coordinator_enabled: bool,
     trajectory_watcher_self_write_enabled: bool,
     tool_catalog_snapshots_enabled: bool,
-    vecdb_path_coalescing_enabled: bool,
 }
 
 pub(crate) fn rollout_switches() -> RolloutSwitches {
@@ -50,8 +49,6 @@ pub(crate) fn rollout_switches() -> RolloutSwitches {
         trajectory_watcher_self_write_enabled:
             crate::chat::trajectories::trajectory_watcher_self_write_rollout_enabled(),
         tool_catalog_snapshots_enabled: crate::app_state::tool_catalog_snapshot_rollout_enabled(),
-        vecdb_path_coalescing_enabled:
-            refact_vecdb::vdb_thread::vecdb_path_coalescing_rollout_enabled(),
     }
 }
 

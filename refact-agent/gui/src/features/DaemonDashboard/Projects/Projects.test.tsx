@@ -48,20 +48,6 @@ function worker(
 const ragStatus = {
   ast: null,
   ast_alive: "",
-  vecdb: {
-    files_unprocessed: 0,
-    files_total: 12,
-    requests_made_since_start: 1,
-    vectors_made_since_start: 12,
-    db_size: 1,
-    db_cache_size: 1,
-    state: "done",
-    queue_additions: false,
-    vecdb_max_files_hit: false,
-    vecdb_errors: {},
-  },
-  vecdb_alive: "true",
-  vec_db_error: "",
   codegraph: {
     counts: { nodes: 10, edges: 9, files: 3, fts_docs: 2 },
     queued: 0,

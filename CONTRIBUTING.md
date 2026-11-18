@@ -19,7 +19,6 @@ If you have something else in mind, start a GitHub Discussion or issue in [Jeger
 - [🛠️ Development Environment Setup](#️-development-environment-setup)
 - [🔑 Model Providers: BYOK or Local Runtime](#-model-providers-byok-or-local-runtime)
 - [🧠 Adding Chat Models](#-adding-chat-models)
-- [⚡ Adding Completion Models](#-adding-completion-models)
 - [🔌 Adding New Providers](#-adding-new-providers)
 - [🧪 Testing Your Contributions](#-testing-your-contributions)
 - [📋 Best Practices](#-best-practices)
@@ -34,8 +33,7 @@ Before diving deep, here are the moving parts:
 1. **Engine**: Rust binary `refact-lsp`, serving HTTP and/or LSP locally.
 2. **GUI**: React frontend in `refact-agent/gui/`, connecting to the local engine on port `8001` during development.
 3. **Chat Models**: conversational/agentic models such as Claude, GPT, DeepSeek, or local OpenAI-compatible runtimes.
-4. **Completion Models**: code-completion models, preferably FIM models such as Qwen Coder, StarCoder, or DeepSeek Coder.
-5. **Providers**: YAML definitions and user configuration that tell Refact how to reach a model host.
+4. **Providers**: YAML definitions and user configuration that tell Refact how to reach a model host.
 
 For deeper docs, see the GitHub Wiki pages for [BYOK](https://github.com/JegernOUTT/refact/wiki/BYOK), [Providers](https://github.com/JegernOUTT/refact/wiki/Providers), [Supported Models](https://github.com/JegernOUTT/refact/wiki/Supported-Models), and [Agent Tools](https://github.com/JegernOUTT/refact/wiki/Agent-Tools).
 
@@ -66,7 +64,7 @@ cargo check
 cargo build
 
 # Run a local HTTP + LSP dev server for the current workspace
-cargo run -- --http-port 8001 --lsp-port 8002 --logs-stderr --vecdb --workspace-folder ../..
+cargo run -- --http-port 8001 --lsp-port 8002 --logs-stderr --workspace-folder ../..
 ```
 
 Useful current engine flags are defined in `refact-agent/engine/src/global_context.rs` and wired through `refact-agent/engine/src/main.rs`/`src/lib.rs`:
@@ -74,9 +72,8 @@ Useful current engine flags are defined in `refact-agent/engine/src/global_conte
 - `--http-port 8001` starts the local HTTP API used by the GUI and IDE integrations.
 - `--lsp-port 8002` starts a TCP LSP server; use `--lsp-stdin-stdout 1` for stdio LSP mode instead.
 - `--logs-stderr` prints logs in the terminal; otherwise logs go under `~/.cache/refact/logs/`.
-- `--vecdb` enables memory-plane vector search indexing when an embedding model is configured.
 - CodeGraph source indexing starts with the engine and stores project databases under `~/.cache/refact/codegraph/`; check `/v1/codegraph-status` or `/v1/rag-status` for readiness.
-- `--workspace-folder <path>` seeds the workspace files for CodeGraph and VecDB.
+- `--workspace-folder <path>` seeds the workspace files for CodeGraph.
 
 ### Setting Up the React Frontend (GUI)
 
@@ -123,8 +120,6 @@ chat_models:
     tokenizer: anthropic
 ```
 
-For related defaults, also review completion and embedding presets in the engine YAML/config directories.
-
 ### Step 2: Test the Model
 
 Once configured, test the model in the Refact GUI:
@@ -134,49 +129,6 @@ Once configured, test the model in the Refact GUI:
 - Can it call tools if `supports_tools` is enabled?
 - Does multimodality work if enabled?
 - Do reasoning and context-window settings match the provider's real behavior?
-
-## ⚡ Adding Completion Models
-
-Completion models are used for code completion. FIM (Fill-in-the-Middle) models work best.
-
-### Step 1: Understand FIM Tokens
-
-FIM models use special tokens:
-
-- `fim_prefix`: text before the cursor.
-- `fim_suffix`: text after the cursor.
-- `fim_middle`: where the generated completion goes.
-- `eot`: end-of-text token.
-
-### Step 2: Add to Known Models
-
-Add the model to a provider YAML or the relevant known-model JSON:
-
-```json
-{
-  "completion_models": {
-    "your-completion-model": {
-      "n_ctx": 8192,
-      "scratchpad_patch": {
-        "fim_prefix": "<|fim_prefix|>",
-        "fim_suffix": "<|fim_suffix|>",
-        "fim_middle": "<|fim_middle|>",
-        "eot": "<|endoftext|>",
-        "extra_stop_tokens": ["<|repo_name|>", "<|file_sep|>"],
-        "context_format": "your-format",
-        "rag_ratio": 0.5
-      },
-      "scratchpad": "FIM-PSM",
-      "tokenizer": "hf://your-tokenizer-path",
-      "similar_models": []
-    }
-  }
-}
-```
-
-### Step 3: Test Code Completion
-
-Use the Refact IDE plugin in xDebug/local-development mode so it connects to your local `refact-lsp` server. Trigger completions in a real workspace and verify latency, stop tokens, and FIM placement.
 
 ## 🔌 Adding New Providers
 
@@ -188,9 +140,6 @@ Create `refact-agent/engine/src/yaml_configs/default_providers/your-provider.yam
 
 ```yaml
 chat_endpoint: https://api.your-provider.com/v1/chat/completions
-completion_endpoint: https://api.your-provider.com/v1/completions
-embedding_endpoint: https://api.your-provider.com/v1/embeddings
-supports_completion: true
 
 api_key: your-api-key-format
 
@@ -205,9 +154,6 @@ model_default_settings_ui:
     supports_multimodality: false
     supports_agent: true
     tokenizer: hf://your-default-tokenizer
-  completion:
-    n_ctx: 8192
-    tokenizer: hf://your-completion-tokenizer
 ```
 
 ### Step 2: Add to Provider List
@@ -225,7 +171,7 @@ const PROVIDER_TEMPLATES: &[(&str, &str)] = &[
 
 ### Step 3: Test Provider Integration
 
-Use the GUI Provider Setup and `/v1/caps` to verify the provider can be configured, models appear correctly, and chat/completion requests use the expected endpoint and authorization format.
+Use the GUI Provider Setup and `/v1/caps` to verify the provider can be configured, models appear correctly, and chat requests use the expected endpoint and authorization format.
 
 ## 🧪 Testing Your Contributions
 
@@ -265,7 +211,6 @@ npm run build
 
 - Model/provider appears in the capabilities endpoint (`/v1/caps`).
 - Chat functionality works.
-- Code completion works for completion models.
 - Tool calling works when supported.
 - Multimodality works when supported.
 - Errors are clear and recoverable.
@@ -301,7 +246,7 @@ npm run build
 **Model not appearing in capabilities:**
 
 - Ensure the provider YAML is loaded.
-- Check that the model is listed under `running_models` and the correct `chat_models` or `completion_models` section.
+- Check that the model is listed under `running_models` and the `chat_models` section.
 - Confirm required capability flags such as `supports_agent` are set for agentic mode.
 
 **Tokenizer errors:**
@@ -314,12 +259,6 @@ npm run build
 - Verify endpoint URLs and authorization format.
 - Check your BYOK credentials or local runtime health.
 - Test the endpoint with `curl` or the provider's own examples.
-
-**Completion not working:**
-
-- Ensure FIM tokens are configured correctly.
-- Check `scratchpad` type and context format.
-- Verify the IDE extension is connected to the local LSP/HTTP server you started.
 
 ### Debug Commands
 
@@ -361,28 +300,11 @@ chat_models:
     tokenizer: anthropic
 ```
 
-### Example 2: Adding a New FIM Model
-
-```json
-"new-coder-model": {
-  "n_ctx": 16384,
-  "scratchpad_patch": {
-    "fim_prefix": "<PRE>",
-    "fim_suffix": "<SUF>",
-    "fim_middle": "<MID>",
-    "eot": "<EOT>"
-  },
-  "scratchpad": "FIM-PSM",
-  "tokenizer": "hf://company/new-coder-model"
-}
-```
-
-### Example 3: Adding a Custom Provider
+### Example 2: Adding a Custom Provider
 
 ```yaml
 # custom-ai.yaml
 chat_endpoint: https://api.example.com/v1/chat/completions
-supports_completion: false
 
 api_key: sk-example-...
 

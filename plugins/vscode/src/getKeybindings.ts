@@ -74,18 +74,3 @@ export async function getKeybindings(key?: string): Promise<string | Record<stri
         return data;
     }
 }
-
-export async function getKeyBindingForChat(name: string): Promise<string> {
-    const system = getSystem();
-    let key = await getKeybindings(name);
-
-    if(system === "macos") {
-        key = key
-			.replace("alt", "⌥")
-			.replace("ctrl", "⌃")
-			.replace("cmd", "⌘")
-			.toLocaleUpperCase();
-        return key;
-    }
-    return key.replace(/\w+/g, w => (w.substring(0,1).toUpperCase()) + w.substring(1));
-}

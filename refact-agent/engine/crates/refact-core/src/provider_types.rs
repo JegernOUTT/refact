@@ -136,8 +136,6 @@ pub struct ProviderRuntime {
     pub readonly: bool,
     pub wire_format: WireFormat,
     pub chat_endpoint: String,
-    pub completion_endpoint: String,
-    pub embedding_endpoint: String,
     #[serde(skip_serializing)]
     pub api_key: String,
     #[serde(skip_serializing)]
@@ -150,8 +148,6 @@ pub struct ProviderRuntime {
     #[serde(default = "default_true_runtime")]
     pub supports_cache_control: bool,
     pub chat_models: Vec<ProviderModel>,
-    pub completion_models: Vec<ProviderModel>,
-    pub embedding_model: Option<ProviderModel>,
 }
 
 impl ProviderRuntime {
@@ -298,6 +294,28 @@ pub async fn defaults_compare_exchange(
     Ok(())
 }
 
+#[cfg(test)]
+mod legacy_defaults_input_tests {
+    use super::*;
+
+    #[test]
+    fn obsolete_defaults_are_ignored_and_never_persisted() {
+        let defaults: ProviderDefaults = serde_json::from_value(serde_json::json!({
+            "completion_model": {"ignored": true}, "embedding_model": ["ignored"],
+            "chat": {"model": "openai/gpt-4o"}
+        }))
+        .unwrap();
+        assert_eq!(defaults.chat.model.as_deref(), Some("openai/gpt-4o"));
+        let value = serde_json::to_value(defaults).unwrap();
+        assert!(value.get("completion_model").is_none());
+        assert!(value.get("embedding_model").is_none());
+        assert!(
+            serde_json::from_value::<ProviderDefaults>(serde_json::json!({"chat": "invalid"}))
+                .is_err()
+        );
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ProviderDefaults {
     #[serde(default)]
@@ -312,10 +330,6 @@ pub struct ProviderDefaults {
     pub chat_thinking: ModelTypeDefaults,
     #[serde(default)]
     pub chat_buddy: ModelTypeDefaults,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub completion_model: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub embedding_model: Option<String>,
 }
 
 impl ProviderDefaults {
@@ -343,8 +357,6 @@ impl ProviderDefaults {
         changed |= clear_legacy_refact_model_field(&mut self.chat_light.model);
         changed |= clear_legacy_refact_model_field(&mut self.chat_thinking.model);
         changed |= clear_legacy_refact_model_field(&mut self.chat_buddy.model);
-        changed |= clear_legacy_refact_model_field(&mut self.completion_model);
-        changed |= clear_legacy_refact_model_field(&mut self.embedding_model);
         changed
     }
 

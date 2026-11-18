@@ -22,7 +22,7 @@ React App → Redux (RTK Query) → LSP Server (:8001)   [chat, tools, caps, mod
                                → IDE (postMessage)     [file ops, theme, context]
 ```
 
-CodeGraph status is a first-class GUI surface: RTK Query polls `/v1/rag-status`, stores the typed `RagStatus` payload in the Knowledge slice, and renders toolbar mini indicators for CodeGraph, VecDB, and the legacy AST compatibility status.
+CodeGraph status is a first-class GUI surface: RTK Query polls `/v1/rag-status`, stores the typed `RagStatus` payload in the Knowledge slice, and renders toolbar mini indicators for CodeGraph and the legacy AST compatibility status.
 
 ### Directory Layout
 
@@ -36,10 +36,9 @@ src/
 │   ├── Connection/   # SSE connection status
 │   ├── Customization/# Agent modes, subagent forms, tool parameter editor
 │   ├── AgentsPanel/  # Live background-agent tree, messaging, cancellation
-│   ├── FIM/          # Fill-in-Middle debug
 │   ├── History/      # Chat history
 │   ├── Integrations/ # Integration config
-│   ├── Knowledge/    # Memory system, VecDB/CodeGraph status, knowledge graph view
+│   ├── Knowledge/    # Memory system, CodeGraph status, knowledge graph view
 │   ├── Login/        # Login page
 │   ├── Pages/        # Navigation stack
 │   ├── PatchesAndDiffsTracker/
@@ -50,7 +49,6 @@ src/
 ├── components/       # Reusable UI (50+ dirs)
 │   ├── ChatContent/  # Message rendering (ChatContent, ToolsContent, DiffContent)
 │   ├── ChatForm/     # Input form + ToolConfirmation
-│   ├── FIMDebug/     # FIM debug panel
 │   ├── IntegrationsView/ # Integration UI + Docker + MCP logs
 │   ├── Providers/    # ProviderForm, ProviderOAuth, ModelCard
 │   ├── Sidebar/      # Navigation
@@ -262,7 +260,7 @@ Status semantics mirror the backend: `active=true` means this chat owns the goal
 
 ### ToolsContent (src/components/ChatContent/ToolsContent.tsx)
 
-Largest component (~1900 lines). Dispatches a `ToolCall` list to the right specialized `ToolCard` via a `processToolCalls` switch on `normalizeToolName(toolCall.function.name)`. Covers file ops (`cat`, `tree`, `search_pattern`, `search_semantic`, `search_symbol_definition`, `mv`, `rm`, `add_workspace_folder`), shells (`shell`, `shell_service`, `process_*`), agentic tools (`subagent`, `tasks_set`, `task_done`, `wait`, `schedule`, `pause`, `agent_lifecycle`, `agent_done`, `final_report`), knowledge (`knowledge`, `search_trajectories`, `get_trajectory_context`, `create_knowledge`), web (`web`, `web_search`), editing (`patch_*` raw-text-doc family, `text_edit`), Chrome/browser (`ask_questions`, `chrome_*`), and the OpenAI Responses tool family (`audio`, `web_search_call`, `file_search_call`, `code_interpreter_call`, `computer_call*`, `image_generation_call`, `mcp_call`, `mcp_list_tools`, `refusal`). Falls back to `GenericTool` for anything unhandled.
+Largest component (~1900 lines). Dispatches a `ToolCall` list to the right specialized `ToolCard` via a `processToolCalls` switch on `normalizeToolName(toolCall.function.name)`. Covers file ops (`cat`, `tree`, `search_pattern`, `search_symbol_definition`, `mv`, `rm`, `add_workspace_folder`), shells (`shell`, `shell_service`, `process_*`), agentic tools (`subagent`, `tasks_set`, `task_done`, `wait`, `schedule`, `pause`, `agent_lifecycle`, `agent_done`, `final_report`), knowledge (`knowledge`, `search_trajectories`, `get_trajectory_context`, `create_knowledge`), web (`web`, `web_search`), editing (`patch_*` raw-text-doc family, `text_edit`), Chrome/browser (`ask_questions`, `chrome_*`), and the OpenAI Responses tool family (`audio`, `web_search_call`, `file_search_call`, `code_interpreter_call`, `computer_call*`, `image_generation_call`, `mcp_call`, `mcp_list_tools`, `refusal`). Falls back to `GenericTool` for anything unhandled.
 
 - New background work is created with `subagent`. Its results are decorated with a `BackgroundAgentCard` built from `BackgroundAgentSummary`, showing status, selected model, current tool, goal/plan, worktree/merge state, questions, usage, and edit/result summaries. Legacy delegate calls and records are normalized into the same card only for compatibility.
 - Multimodal results (`MultiModalToolResult` with image content) are rendered by `MultiModalToolContent` and surface inline image previews via `DialogImage`.
@@ -582,11 +580,10 @@ Chat can proceed when ALL true: `snapshot_received && !streaming && !waiting_for
 - **Hidden Roles**: `event` messages feed EventLog except `plan_delta`, `goal_delta`, and `goal_pursuit`; legacy `plan` plus `plan_delta` messages feed the history-only PlanBanner fallback; `goal` plus goal delta/pursuit projection feeds TaskProgressWidget through `thread.goal`. All hidden roles stay out of `selectVisibleMessages`.
 - **Thinking Blocks**: `thinking_blocks: [{thinking, signature}]` on assistant messages. Collapsible UI. Signatures are opaque — never mutate.
 - **Reasoning Content**: Separate `reasoning_content` field. Collapsible.
-- **Knowledge/Memory**: `remember_how_to_use_tools` → vecdb → `context_file` messages. Knowledge graph view.
+- **Knowledge/Memory**: `remember_how_to_use_tools` → `context_file` messages. Knowledge graph view.
 - **Customization**: Agent modes, subagent forms, tool parameter editor.
 - **Tour/Onboarding**: Welcome screen, guided tour bubbles.
-- **FIM Debug**: Fill-in-Middle debug panel with search context and symbol list.
-- **CodeGraph status**: Toolbar mini indicators surface CodeGraph, VecDB, and legacy AST compatibility state from `/v1/rag-status`; CodeGraph settings are host-provided feature flags and status lives in the Knowledge slice.
+- **CodeGraph status**: Toolbar mini indicators surface CodeGraph and legacy AST compatibility state from `/v1/rag-status`; CodeGraph settings are host-provided feature flags and status lives in the Knowledge slice.
 - **Performance**: The Toolbar menu opens the `performance` page, implemented in `features/Performance`. `PerformancePage` fetches `GET /v1/performance/telemetry` with visible-tab five-second polling and uses its POST enable/disable and reset endpoints for process-local aggregate collection. Its trajectory settings panel fetches `GET /v1/trajectory-settings` and posts the complete server-loaded configuration to `POST /v1/trajectory-settings`; preserve every returned key, including fields without a descriptor, because the endpoint treats omitted fields as defaults and a metadata-rebuilt payload can silently lose settings.
 - **Privacy & Access**: Settings owns destination-first access editing (zone cards, blocked patterns, per-destination zone and MCP toggles, read-only audit matrix) and observation status; chat owns the model shield, destination inspector, blocked-send card, and local-only withheld-output reveal; FileTree shows each resolved zone and persists exact-path moves through the complete policy.
 - **Docker**: Container list, start/stop/kill/remove, env vars, smart links.

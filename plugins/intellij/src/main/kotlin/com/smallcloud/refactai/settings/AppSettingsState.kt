@@ -25,7 +25,6 @@ import java.net.URI
 ])
 class AppSettingsState : PersistentStateComponent<AppSettingsState> {
     var temperature: Float? = null
-    var model: String? = null
     var userLoggedIn: String? = null
     var inferenceUri: String? = null
     var userInferenceUri: String? = null
@@ -33,20 +32,15 @@ class AppSettingsState : PersistentStateComponent<AppSettingsState> {
     var loginMessage: String? = null
     var tooltipMessage: String? = null
     var inferenceMessage: String? = null
-    var useAutoCompletion: Boolean = true
     var developerModeEnabled: Boolean = false
     var xDebugLSPPort: Int? = null
     var stagingVersion: String = ""
     var astIsEnabled: Boolean = true
     var astIsEnabledDefaultChanged: Boolean = false
-    var vecdbIsEnabled: Boolean = true
-    var vecdbIsEnabledDefaultChanged: Boolean = false
     var codegraphIsEnabled: Boolean = true
     var codegraphIsEnabledDefaultChanged: Boolean = false
     var astFileLimit: Int = 15000
-    var vecdbFileLimit: Int = 15000
     var codegraphFileLimit: Int = 15000
-    var completionMaxTokens: Int = 0
     var insecureSSL: Boolean = false
     var isFirstStart: Boolean = true
     var experimentalLspFlagEnabled: Boolean = false
@@ -74,17 +68,10 @@ class AppSettingsState : PersistentStateComponent<AppSettingsState> {
                         instance.refactBinaryPath = newPath?.trim()?.ifEmpty { null }
                     }
 
-                    override fun modelChanged(newModel: String?) {
-                        instance.model = newModel?.trim()
-                    }
-
                     override fun temperatureChanged(newTemp: Float?) {
                         instance.temperature = newTemp
                     }
 
-                    override fun useAutoCompletionModeChanged(newValue: Boolean) {
-                        instance.useAutoCompletion = newValue
-                    }
                     override fun developerModeEnabledChanged(newValue: Boolean) {
                         instance.developerModeEnabled = newValue
                     }
@@ -95,13 +82,6 @@ class AppSettingsState : PersistentStateComponent<AppSettingsState> {
                     }
                     override fun astFileLimitChanged(newValue: Int) {
                         instance.astFileLimit = newValue
-                    }
-                    override fun vecdbFileLimitChanged(newValue: Int) {
-                        instance.vecdbFileLimit = newValue
-                    }
-                    override fun vecdbFlagChanged(newValue: Boolean) {
-                        instance.vecdbIsEnabled = newValue
-                        instance.vecdbIsEnabledDefaultChanged = true
                     }
                     override fun codegraphFileLimitChanged(newValue: Int) {
                         instance.codegraphFileLimit = newValue
@@ -116,9 +96,6 @@ class AppSettingsState : PersistentStateComponent<AppSettingsState> {
 
                     override fun insecureSSLChanged(newValue: Boolean) {
                         instance.insecureSSL = newValue
-                    }
-                    override fun completionMaxTokensChanged(newMaxTokens: Int) {
-                        instance.completionMaxTokens = newMaxTokens
                     }
                     override fun experimentalLspFlagEnabledChanged(newValue: Boolean) {
                         instance.experimentalLspFlagEnabled = newValue

@@ -127,7 +127,7 @@ export class ChatTab {
         }));
 
         this._disposables.push(vscode.workspace.onDidChangeConfiguration(event => {
-            if(event.affectsConfiguration("refactai.vecdb") || event.affectsConfiguration("refactai.ast") || event.affectsConfiguration("refactai.codegraph")) {
+            if(event.affectsConfiguration("refactai.ast") || event.affectsConfiguration("refactai.codegraph")) {
                 this.handleSettingsChange();
             }
         }));
@@ -873,22 +873,6 @@ export class ChatTab {
     // }
 
     handleSettingsChange() {
-        // const vecdb =
-        //     vscode.workspace
-        //         .getConfiguration()
-        //         ?.get<boolean>("refactai.vecdb") ?? false;
-
-        // const ast =
-        //     vscode.workspace
-        //         .getConfiguration()
-        //         ?.get<boolean>("refactai.ast") ?? false;
-        // const message: UpdateConfigMessage = {
-        //     type: EVENT_NAMES_TO_CONFIG.UPDATE,
-        //     payload: {
-        //         features: { vecdb, ast }
-        //     }
-        // };
-        // this.web_panel.webview.postMessage(message);
     }
 
 
@@ -897,9 +881,6 @@ export class ChatTab {
         extensionUri: any,
         isTab = false
     ): string {
-        const vecdb = vscode.workspace
-			.getConfiguration()
-			?.get<boolean>("refactai.vecdb") ?? false;
 
         const ast = vscode.workspace.getConfiguration()?.get<boolean>("refactai.ast") ?? false;
 
@@ -930,7 +911,6 @@ export class ChatTab {
                 scaling,
             },
             features: {
-                vecdb,
                 ast,
                 codegraph,
             },

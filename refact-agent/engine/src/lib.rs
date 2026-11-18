@@ -19,8 +19,6 @@ use crate::background_tasks::start_background_tasks;
 use crate::lsp::spawn_lsp_task;
 use crate::yaml_configs::create_configs::yaml_configs_try_create_all;
 use crate::yaml_configs::customization_registry::get_project_registry;
-use sqlite_vec::sqlite3_vec_init;
-use rusqlite::ffi::sqlite3_auto_extension;
 
 #[global_allocator]
 static GLOBAL_ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -74,7 +72,6 @@ pub mod version;
 pub mod yaml_configs;
 
 pub mod at_commands;
-pub mod completion_cache;
 pub mod coordination;
 pub mod file_activity;
 pub mod file_filter;
@@ -101,11 +98,8 @@ mod subchat_pressure_retry_tests;
 pub mod tokens;
 pub mod tool_jobs;
 pub mod tools;
-pub mod vecdb;
 pub mod web_search_settings;
 
-pub mod fetch_embedding;
-pub mod forward_to_openai_endpoint;
 pub mod llm;
 pub use refact_postprocessing;
 pub use refact_providers;
@@ -117,7 +111,6 @@ mod attention_leave_tests;
 mod attention_timeout_tests;
 pub mod providers;
 pub mod questions;
-pub mod restream;
 pub mod runtime_settings;
 pub mod worktrees;
 
@@ -206,8 +199,6 @@ pub async fn run_with_cmdline(cmdline: global_context::CommandLine) {
     chat::perf_diagnostics::initialize_from_environment();
 
     unsafe {
-        sqlite3_auto_extension(Some(std::mem::transmute(sqlite3_vec_init as *const ())));
-
         // Disabling owner validation in Git can theoretically allow code execution, but libgit2 doesn't run
         // executables, so the original risk doesn't apply. Repos in locations like CARGO_HOME would otherwise
         // be blocked, plus several more common cases in Windows. IDEs like VSCode and JetBrains already
@@ -346,7 +337,6 @@ pub async fn run_with_cmdline(cmdline: global_context::CommandLine) {
     let _caps = crate::global_context::try_load_caps_quickly_if_not_present(gcx.clone(), 0).await;
 
     let mut background_tasks = start_background_tasks(gcx.clone(), &config_dir).await;
-    // vector db will spontaneously start if the downloaded caps and command line parameters are right
 
     let should_start_http = cmdline.http_port != 0;
     let should_start_lsp = (cmdline.lsp_port == 0 && cmdline.lsp_stdin_stdout == 1)

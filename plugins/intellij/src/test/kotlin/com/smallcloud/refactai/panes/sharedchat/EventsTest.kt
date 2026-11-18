@@ -18,7 +18,7 @@ class EventsTest {
             selected = com.smallcloud.refactai.lsp.RuntimeVersionObservation(source = "local", observedAtMs = 123),
         )
         val payload = Events.Config.UpdatePayload(
-            Events.Config.Features(true, false), null, 0, Events.Config.KeyBindings(""),
+            Events.Config.Features(true), null, 0,
             runtimeVersions = snapshot,
         )
         val initial = com.google.gson.JsonParser.parseString(com.google.gson.Gson().toJson(payload)).asJsonObject
@@ -58,31 +58,36 @@ class EventsTest {
     }
 
     @Test
+    fun removedCompletionEventsAreNotParsed() {
+        assertNull(Events.parse("""{"type":"fim/request"}"""))
+        assertNull(Events.parse("""{"type":"fim/ready"}"""))
+        assertNull(Events.parse("""{"type":"ide/setCodeCompletionModel","payload":"model"}"""))
+    }
+
+    @Test
     fun configMessage() {
         val payload = Events.Config.UpdatePayload(
-            Events.Config.Features(true, false),
+            Events.Config.Features(true),
             Events.Config.ThemeProps("light"),
-            8001,
-            Events.Config.KeyBindings("foo"))
+            8001)
         val message = Events.Config.Update(payload)
         val result = Events.stringify(message)
-        val expected = """{"type":"config/update","payload":{"features":{"ast":true,"vecdb":false,"codegraph":true,"images":true,"statistics":true,"knowledge":false},"themeProps":{"appearance":"light","hasBackground":false,"scale":"90%","accentColor":"gray"},"lspPort":8001,"keyBindings":{"completeManual":"foo"},"backendReady":true,"connectionStatus":"ready","tabbed":false,"host":"jetbrains","connectionIssue":null,"runtimeVersions":null}}"""
+        val expected = """{"type":"config/update","payload":{"features":{"ast":true,"codegraph":true,"images":true,"statistics":true,"knowledge":false},"themeProps":{"appearance":"light","hasBackground":false,"scale":"90%","accentColor":"gray"},"lspPort":8001,"backendReady":true,"connectionStatus":"ready","tabbed":false,"host":"jetbrains","connectionIssue":null,"runtimeVersions":null}}"""
         assertEquals(expected, result)
     }
 
     @Test
     fun configMessageWithLspUrl() {
         val payload = Events.Config.UpdatePayload(
-            Events.Config.Features(true, false),
+            Events.Config.Features(true),
             Events.Config.ThemeProps("light"),
             8001,
-            Events.Config.KeyBindings("foo"),
             "http://127.0.0.1:8488/p/project-123/",
             browserUrl = "http://host.local:8488/p/project-123/"
         )
         val message = Events.Config.Update(payload)
         val result = Events.stringify(message)
-        val expected = """{"type":"config/update","payload":{"features":{"ast":true,"vecdb":false,"codegraph":true,"images":true,"statistics":true,"knowledge":false},"themeProps":{"appearance":"light","hasBackground":false,"scale":"90%","accentColor":"gray"},"lspPort":8001,"keyBindings":{"completeManual":"foo"},"lspUrl":"http://127.0.0.1:8488/p/project-123/","backendReady":true,"connectionStatus":"ready","browserUrl":"http://host.local:8488/p/project-123/","tabbed":false,"host":"jetbrains","connectionIssue":null,"runtimeVersions":null}}"""
+        val expected = """{"type":"config/update","payload":{"features":{"ast":true,"codegraph":true,"images":true,"statistics":true,"knowledge":false},"themeProps":{"appearance":"light","hasBackground":false,"scale":"90%","accentColor":"gray"},"lspPort":8001,"lspUrl":"http://127.0.0.1:8488/p/project-123/","backendReady":true,"connectionStatus":"ready","browserUrl":"http://host.local:8488/p/project-123/","tabbed":false,"host":"jetbrains","connectionIssue":null,"runtimeVersions":null}}"""
         assertEquals(expected, result)
     }
 
@@ -113,26 +118,24 @@ class EventsTest {
     @Test
     fun configMessageBackendNotReady() {
         val payload = Events.Config.UpdatePayload(
-            Events.Config.Features(true, false),
+            Events.Config.Features(true),
             Events.Config.ThemeProps("light"),
             0,
-            Events.Config.KeyBindings("foo"),
             backendReady = false,
             connectionStatus = LSPBackendConnectionStatus.STARTING.wireName
         )
         val message = Events.Config.Update(payload)
         val result = Events.stringify(message)
-        val expected = """{"type":"config/update","payload":{"features":{"ast":true,"vecdb":false,"codegraph":true,"images":true,"statistics":true,"knowledge":false},"themeProps":{"appearance":"light","hasBackground":false,"scale":"90%","accentColor":"gray"},"lspPort":0,"keyBindings":{"completeManual":"foo"},"backendReady":false,"connectionStatus":"starting","tabbed":false,"host":"jetbrains","connectionIssue":null,"runtimeVersions":null}}"""
+        val expected = """{"type":"config/update","payload":{"features":{"ast":true,"codegraph":true,"images":true,"statistics":true,"knowledge":false},"themeProps":{"appearance":"light","hasBackground":false,"scale":"90%","accentColor":"gray"},"lspPort":0,"backendReady":false,"connectionStatus":"starting","tabbed":false,"host":"jetbrains","connectionIssue":null,"runtimeVersions":null}}"""
         assertEquals(expected, result)
     }
 
     @Test
     fun configMessageWithWorkspaceBusyIssueAndDaemonPort() {
         val payload = Events.Config.UpdatePayload(
-            Events.Config.Features(true, false),
+            Events.Config.Features(true),
             Events.Config.ThemeProps("light"),
             0,
-            Events.Config.KeyBindings("foo"),
             backendReady = false,
             connectionStatus = LSPBackendConnectionStatus.FAILED.wireName,
             connectionIssue = configConnectionIssue(
@@ -142,7 +145,7 @@ class EventsTest {
             daemonPort = configDaemonPort(8488),
         )
         val result = Events.stringify(Events.Config.Update(payload))
-        val expected = """{"type":"config/update","payload":{"features":{"ast":true,"vecdb":false,"codegraph":true,"images":true,"statistics":true,"knowledge":false},"themeProps":{"appearance":"light","hasBackground":false,"scale":"90%","accentColor":"gray"},"lspPort":0,"keyBindings":{"completeManual":"foo"},"backendReady":false,"connectionStatus":"failed","tabbed":false,"host":"jetbrains","connectionIssue":{"code":"workspace_busy","holderPid":4082485,"holderHttpPort":8005},"daemonPort":8488,"runtimeVersions":null}}"""
+        val expected = """{"type":"config/update","payload":{"features":{"ast":true,"codegraph":true,"images":true,"statistics":true,"knowledge":false},"themeProps":{"appearance":"light","hasBackground":false,"scale":"90%","accentColor":"gray"},"lspPort":0,"backendReady":false,"connectionStatus":"failed","tabbed":false,"host":"jetbrains","connectionIssue":{"code":"workspace_busy","holderPid":4082485,"holderHttpPort":8005},"daemonPort":8488,"runtimeVersions":null}}"""
         assertEquals(expected, result)
     }
 

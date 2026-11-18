@@ -9,10 +9,6 @@ function matchesHost(tipHost: TipHost, host: string): boolean {
 
 export const tips: [TipHost, string][] = [
   ["all", "Press 'Shift + Enter' to move to a new line in the chat input box."],
-  [
-    "all",
-    "Need a break from code suggestions? You can pause them by clicking the 'Refact' icon in the status bar. On pause, the manual code completion still works: press [MANUAL_COMPLETION].",
-  ],
   ["all", "Use @file <file_name> to attach a file to the chat context."],
   [
     "all",
@@ -32,7 +28,7 @@ export const tips: [TipHost, string][] = [
   ],
   [
     "all",
-    'You can manually combine @file @definition @references @search to collect a lot of context, and ask a complex question. Try it, the chat handles complex questions pretty well! If there is too much code to fit into model limits, context post-processing will start to skeletonize the code -- replace function bodies with "..."',
+    'You can manually combine @file @definition @references to collect a lot of context, and ask a complex question. Try it, the chat handles complex questions pretty well! If there is too much code to fit into model limits, context post-processing will start to skeletonize the code -- replace function bodies with "..."',
   ],
   [
     "all",
@@ -58,37 +54,26 @@ export const tipOfTheDaySlice = createSlice({
   name: "tipOfTheDay",
   initialState,
   reducers: (create) => ({
-    nextTip: create.reducer<{ host: Config["host"]; completeManual?: string }>(
-      (state, action) => {
-        const { host, completeManual } = action.payload;
+    nextTip: create.reducer<{ host: Config["host"] }>((state, action) => {
+      const { host } = action.payload;
 
-        let tip: string | undefined = undefined;
-        let nextIndex = (state.current + 1) % tips.length;
+      let tip: string | undefined = undefined;
+      let nextIndex = (state.current + 1) % tips.length;
 
-        while (tip === undefined) {
-          const [tipHost, curTip] = tips[nextIndex];
-          nextIndex = (nextIndex + 1) % tips.length;
+      while (tip === undefined) {
+        const [tipHost, curTip] = tips[nextIndex];
+        nextIndex = (nextIndex + 1) % tips.length;
 
-          if (!matchesHost(tipHost, host)) {
-            continue;
-          }
-
-          if (completeManual !== undefined) {
-            tip = curTip.replace("[MANUAL_COMPLETION]", completeManual);
-          } else {
-            tip = curTip.replace(
-              "[MANUAL_COMPLETION]",
-              "the key binding for manual completion",
-            );
-          }
+        if (matchesHost(tipHost, host)) {
+          tip = curTip;
         }
+      }
 
-        return {
-          current: nextIndex,
-          tip,
-        };
-      },
-    ),
+      return {
+        current: nextIndex,
+        tip,
+      };
+    }),
   }),
   selectors: {
     currentTipOfTheDay: (state) => state.tip,

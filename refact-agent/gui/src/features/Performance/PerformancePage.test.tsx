@@ -58,16 +58,18 @@ function telemetry(
       advancement: rollup,
       tool_stages: rollup,
       enrichment_stages: rollup,
-      index_watcher_vecdb_amplification: {
+      index_watcher_amplification: {
         aggregate: rollup,
-        trajectory_index_operations_per_commit: 1.25,
+        trajectory_index_reads_per_listing_call: 1.25,
+        calls_by_caller: [
+          ["sidebar", 3],
+          ["search", 1],
+        ],
         watcher_rebuilds_per_commit: 0.5,
-        vecdb_searches_per_enrichment_attempt: 0.75,
       },
     },
     rollout_switches: {
       trajectory_writer_enabled: true,
-      vecdb_path_coalescing_enabled: false,
     },
   };
 }
@@ -186,7 +188,10 @@ describe("PerformancePage", () => {
     expect(
       screen.getByText("Trajectory persistence / index"),
     ).toBeInTheDocument();
-    expect(screen.getByText("Watcher / VecDB")).toBeInTheDocument();
+    expect(screen.getByText("Watcher / index")).toBeInTheDocument();
+    expect(screen.getByText("Index reads / listing call")).toBeInTheDocument();
+    expect(screen.getByText("sidebar: 3 · search: 1")).toBeInTheDocument();
+    expect(screen.queryByText(/vecdb/i)).not.toBeInTheDocument();
     expect(screen.getByText("Automatic enrichment")).toBeInTheDocument();
     await screen.findByRole("switch", { name: "Trajectory writer enabled" });
     const rollouts = screen.getByRole("heading", {

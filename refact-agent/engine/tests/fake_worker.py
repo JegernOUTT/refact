@@ -328,8 +328,6 @@ def main():
     parser.add_argument("--logs-to-file")
     parser.add_argument("--ast", action="store_true")
     parser.add_argument("--ast-max-files")
-    parser.add_argument("--vecdb", action="store_true")
-    parser.add_argument("--vecdb-max-files")
     args, _ = parser.parse_known_args()
 
     port_busy_exit = os.environ.get("FAKE_WORKER_PORT_BUSY_EXIT")

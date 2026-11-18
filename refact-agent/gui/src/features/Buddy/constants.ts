@@ -352,17 +352,6 @@ export const SIGNALS: Record<string, SignalDef> = {
     duration: 0,
     animVariant: "sorting",
   },
-  vecdb_building: {
-    mood: "focused",
-    animationType: "work",
-    icon: "🧮",
-    isError: false,
-    isWin: false,
-    scene: "working",
-    category: "active",
-    duration: 0,
-    animVariant: "building",
-  },
   codegraph_indexing: {
     mood: "focused",
     animationType: "work",

@@ -1284,7 +1284,7 @@ mod tests {
             .subagents
             .get("subagent")
             .expect("subagent should load");
-        assert_eq!(subagent.schema_version, 12);
+        assert_eq!(subagent.schema_version, 13);
         assert!(!subagent.expose_as_tool);
         assert!(subagent.description.contains("background"));
         assert!(subagent

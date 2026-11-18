@@ -695,16 +695,7 @@ impl ConfigurationSnapshot {
                 let models = caps
                     .chat_models
                     .iter()
-                    .map(|(id, model)| (format!("chat:{id}"), &model.base))
-                    .chain(
-                        caps.completion_models
-                            .iter()
-                            .map(|(id, model)| (format!("completion:{id}"), &model.base)),
-                    )
-                    .chain(std::iter::once((
-                        "embedding".into(),
-                        &caps.embedding_model.base,
-                    )));
+                    .map(|(id, model)| (format!("chat:{id}"), &model.base));
                 let models = models.map(|(id, base)| (id, json!({
                 "endpoint":base.endpoint, "style":base.endpoint_style,
                 "wire":base.wire_format, "key":base.api_key, "credential":base.credential,

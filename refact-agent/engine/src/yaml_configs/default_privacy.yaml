@@ -7,7 +7,7 @@
 # Each pattern is matched against the slash-normalized absolute path, workspace/worktree-relative paths, and basename.
 #
 # blocked patterns are always denied. Otherwise zones are ordered and the first matching zone applies.
-# Destinations are provider ids, MCP server names, subagent model providers, and completion providers.
+# Destinations are provider ids, MCP server names, and subagent model providers.
 
 privacy_rules:
   # Legacy lists remain supported and migrate into zones at load time.
@@ -25,7 +25,6 @@ privacy_rules:
   # send_to: [] denies every destination. send_to: ["*"] allows all current and future destinations.
   # on_shell_read is withhold, ask, or deny when syscall observation sees a guarded read.
   # If observation is unavailable, commands stay fail-open and heuristic attribution can miss indirect reads.
-  # Completion has its own destination column; a completion provider must be present in the cursor file's zone.
   # zones:
   #   - name: secrets
   #     patterns:

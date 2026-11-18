@@ -17,10 +17,10 @@ fun decisionEndpointIdentity(raw: String): String? = runCatching {
         "caps", "chat", "chats", "checkpoints-preview", "checkpoints-restore", "codegraph-status",
         "code-intel/overview", "code-intel/graph", "code-intel/communities", "code-intel/dead-code",
         "code-intel/health", "code-intel/git-risk", "code-intel/duplication", "code-intel/pr-blast",
-        "code-intel/security-scan", "code-completion", "code-lens", "customization", "docker-container-action",
+        "code-intel/security-scan", "code-lens", "customization", "docker-container-action",
         "docker-container-list", "files", "git", "git-commit", "graceful-shutdown", "integration-get",
         "integration-save", "integrations", "knowledge", "knowledge-graph", "links", "ping", "performance",
-        "bug-report", "rag-status", "task", "tasks", "tools", "trajectories", "vecdb-search", "voice", "worktrees")
+        "bug-report", "rag-status", "task", "tasks", "tools", "trajectories", "voice", "worktrees")
     val segments = (uri.rawPath ?: "").split('/')
     val cut = segments.indices.reversed().firstOrNull { i ->
         segments[i] == "v1" && (i == segments.lastIndex || segments[i + 1].isEmpty() ||

@@ -22,7 +22,7 @@ async fn index_status_and_settings_read_the_fixture() {
     assert!(out.is_array(), "{}", m.content.content_text_only());
     assert_eq!(out[0]["codegraph"]["state"], "error");
     assert!(!out.to_string().contains("abcdefghijklmnop"), "{out}");
-    assert_eq!(out[0]["vecdb"]["alive"], "turned_off");
+    assert!(out[0].get("vecdb").is_none());
     assert!(out[0]["file_index"].is_object());
     assert!(out[1].get("codegraph").is_none() && out[1]["file_index"].is_object());
     assert_eq!(out[2]["blocklist"], json!(["zone_a"]));

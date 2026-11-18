@@ -249,11 +249,7 @@ describe("Providers provider instances", () => {
           readonly: false,
           wire_format: "openai_chat_completions",
           chat_endpoint: "",
-          completion_endpoint: "",
-          embedding_endpoint: "",
           chat_models: [],
-          completion_models: [],
-          embedding_model: null,
         },
       }),
     ).toBe(true);

@@ -99,9 +99,6 @@ beforeEach(() => {
     data: {
       codegraph_alive: "working",
       codegraph: { state: "working" },
-      vecdb_alive: "true",
-      vecdb: { state: "done" },
-      vec_db_error: "",
     },
     isError: false,
   });

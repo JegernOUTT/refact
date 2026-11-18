@@ -1,4 +1,4 @@
-schema_version: 39
+schema_version: 40
 id: task_agent
 title: Task Agent
 description: Execute single task card
@@ -254,7 +254,6 @@ tools:
   - glob
   - search_pattern
   - search_symbol_definition
-  - search_semantic
   - knowledge
   - shell
   - apply_patch

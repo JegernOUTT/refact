@@ -99,6 +99,7 @@ pub mod trajectories;
 pub mod trajectory_archive;
 pub mod trajectory_index;
 pub mod trajectory_ops;
+pub mod trajectory_search;
 pub mod types;
 pub mod verifier;
 mod verifier_diff;

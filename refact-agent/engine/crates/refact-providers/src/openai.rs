@@ -144,16 +144,13 @@ available:
             readonly: false,
             wire_format,
             chat_endpoint,
-            completion_endpoint: "https://api.openai.com/v1/completions".to_string(),
-            embedding_endpoint: "https://api.openai.com/v1/embeddings".to_string(),
+
             api_key,
             auth_token: String::new(),
             tokenizer_api_key: String::new(),
             extra_headers,
             supports_cache_control: true,
             chat_models: Vec::new(),
-            completion_models: Vec::new(),
-            embedding_model: None,
         })
     }
 

@@ -160,7 +160,6 @@ pub const CC_TOOL_RENAMES: &[(&str, &str)] = &[
     // Codebase search / navigation
     ("add_workspace_folder", "add_workspace"),
     ("search_symbol_definition", "symbol_def"),
-    ("search_semantic", "semantic_search"),
     ("search_pattern", "regex_search"),
     // Orchestration
     ("subagent", "subagent"),

@@ -23,7 +23,6 @@ use crate::caps::CodeAssistantCaps;
 use crate::caps::providers::get_latest_provider_mtime;
 use crate::providers::{ProviderRegistry, load_providers_from_config};
 use crate::providers::quota::ProviderQuotaCache;
-use crate::completion_cache::CompletionCache;
 use crate::custom_error::ScratchError;
 use crate::exec::ExecRegistry;
 use crate::files_in_workspace::DocumentsState;
@@ -71,7 +70,7 @@ pub struct CommandLine {
         long,
         short = 'p',
         default_value = "0",
-        help = "Bind <host>:<port> to listen for HTTP requests, such as /v1/code-completion, /v1/chat, /v1/caps."
+        help = "Bind <host>:<port> to listen for HTTP requests, such as /v1/chat and /v1/caps."
     )]
     pub http_port: u16,
     #[arg(
@@ -119,27 +118,20 @@ pub struct CommandLine {
     #[arg(long, help = "Wait until AST is ready before responding requests.")]
     pub wait_ast: bool,
 
-    #[arg(
-        long,
-        help = "Use vector database. Give it LSP workspace folders or a jsonl, it also needs an embedding model."
-    )]
-    pub vecdb: bool,
-    #[arg(
-        long,
-        default_value = "15000",
-        help = "Maximum files count for VecDB index, to avoid OOM."
-    )]
-    pub vecdb_max_files: usize,
-    #[arg(long, default_value = "", help = "Set VecDB storage path manually.")]
-    pub vecdb_force_path: String,
-    #[arg(long, help = "Wait until VecDB is ready before responding requests.")]
-    pub wait_vecdb: bool,
+    #[arg(long = "vecdb", hide = true)]
+    pub legacy_vecdb: bool,
+    #[arg(long = "vecdb-max-files", default_value = "15000", hide = true)]
+    pub legacy_vecdb_max_files: usize,
+    #[arg(long = "vecdb-force-path", default_value = "", hide = true)]
+    pub legacy_vecdb_force_path: String,
+    #[arg(long = "wait-vecdb", hide = true)]
+    pub legacy_wait_vecdb: bool,
 
     #[arg(
         long,
         short = 'f',
         default_value = "",
-        help = "A path to jsonl file with {\"path\": ...} on each line, files will immediately go to VecDB and AST."
+        help = "A path to jsonl file with {\"path\": ...} on each line for workspace indexing."
     )]
     pub files_jsonl_path: String,
     #[arg(
@@ -389,8 +381,6 @@ pub struct GlobalContext {
     pub card_verifier_tasks: Arc<AMutex<tokio::task::JoinSet<()>>>,
     pub card_verifiers_shutting_down: AtomicBool,
     pub card_verifier_requests: StdMutex<HashMap<u64, crate::chat::verifier::VerifyCardRequest>>,
-    pub trajectory_vectorization_queue:
-        Arc<AMutex<crate::chat::trajectories::TrajectoryVectorizationQueue>>,
     pub cmdline: CommandLine,
     pub http_client: reqwest::Client,
     pub cache_dir: PathBuf,
@@ -398,9 +388,6 @@ pub struct GlobalContext {
     pub caps_state: Arc<ARwLock<CapsState>>,
     pub caps_config_probe: Arc<StdMutex<Option<CapsConfigProbe>>>,
     pub tokenizer_state: Arc<StdRwLock<TokenizerState>>,
-    pub completions_cache: Arc<StdRwLock<CompletionCache>>,
-    pub vec_db: Arc<AMutex<Option<Arc<dyn refact_core::vecdb_types::VecdbSearch>>>>,
-    pub vec_db_error: Arc<StdMutex<String>>,
     pub codegraph: Arc<AMutex<Option<Arc<crate::codegraph::CodeGraphService>>>>,
     pub codegraph_error: Arc<StdMutex<String>>,
     pub ask_shutdown_sender: Arc<StdMutex<std::sync::mpsc::Sender<String>>>,
@@ -448,6 +435,7 @@ pub struct GlobalContext {
     pub buddy: Arc<AMutex<Option<crate::buddy::actor::BuddyService>>>,
     pub operator_signal_projection:
         Arc<AMutex<refact_buddy_core::operator_events::OperatorSignalProjection>>,
+    pub(crate) buddy_sink_attribution: Arc<crate::buddy::attribution::SinkAttribution>,
     pub buddy_events_tx: Option<tokio::sync::broadcast::Sender<crate::buddy::events::BuddyEvent>>,
     pub user_activity: Arc<AMutex<crate::buddy::user_activity::UserActivityRing>>,
     pub agents: Arc<BackgroundAgentRegistry>,
@@ -509,9 +497,6 @@ impl GlobalContext {
                 documents_state: self.documents_state.clone(),
                 privacy_settings: self.privacy_settings.read().unwrap().clone(),
                 indexing_everywhere: self.indexing_everywhere.clone(),
-                completions_cache: self.completions_cache.clone(),
-                vec_db: self.vec_db.clone(),
-                vec_db_error: self.vec_db_error.clone(),
                 knowledge_index: self.knowledge_index.clone(),
                 at_commands_preview_cache: self.at_commands_preview_cache.clone(),
             },
@@ -989,7 +974,6 @@ pub async fn create_global_context(
         card_verifier_tasks: Arc::new(AMutex::new(tokio::task::JoinSet::new())),
         card_verifiers_shutting_down: AtomicBool::new(false),
         card_verifier_requests: StdMutex::new(HashMap::new()),
-        trajectory_vectorization_queue: Arc::new(AMutex::new(Default::default())),
         cmdline: cmdline.clone(),
         http_client: http_client.clone(),
         cache_dir,
@@ -1007,9 +991,6 @@ pub async fn create_global_context(
             map: HashMap::new(),
             download_locks: Arc::new(StdMutex::new(HashMap::new())),
         })),
-        completions_cache: Arc::new(StdRwLock::new(CompletionCache::new())),
-        vec_db: Arc::new(AMutex::new(None)),
-        vec_db_error: Arc::new(StdMutex::new(String::new())),
         codegraph: Arc::new(AMutex::new(None)),
         codegraph_error: Arc::new(StdMutex::new(String::new())),
         ask_shutdown_sender: Arc::new(StdMutex::new(ask_shutdown_sender)),
@@ -1060,6 +1041,7 @@ pub async fn create_global_context(
         tool_catalog_cache: Arc::new(ToolCatalogCache::default()),
         buddy: Arc::new(AMutex::new(None)),
         operator_signal_projection: Arc::new(AMutex::new(Default::default())),
+        buddy_sink_attribution: Default::default(),
         buddy_events_tx: Some(tokio::sync::broadcast::channel(256).0),
         user_activity: Arc::new(AMutex::new(user_activity)),
         agents,
@@ -1198,27 +1180,46 @@ pub mod tests {
         });
 
         let client = build_shared_http_client_builder().build().unwrap();
-        let model = refact_core::llm_types::BaseModelRecord {
-            id: "redirecting-provider".to_string(),
-            name: "test-model".to_string(),
-            endpoint: format!("http://{source_addr}/provider"),
-            api_key: "provider-secret".to_string(),
-            ..Default::default()
-        };
-        let error = refact_llm::forward_to_openai_style_endpoint(
-            &model,
-            "private prompt",
-            &client,
-            &refact_core::chat_types::SamplingParameters::default(),
-        )
-        .await
-        .unwrap_err();
-        assert!(error.contains("status=307"));
+        let response = client
+            .post(format!("http://{source_addr}/provider"))
+            .bearer_auth("provider-secret")
+            .body("private prompt")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::TEMPORARY_REDIRECT);
         source.await.unwrap();
         assert!(
             tokio::time::timeout(Duration::from_millis(100), target_listener.accept())
                 .await
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn legacy_vecdb_flags_are_accepted_and_hidden() {
+        use clap::{CommandFactory, Parser};
+
+        let cmd = CommandLine::try_parse_from([
+            "refact-lsp",
+            "--vecdb",
+            "--vecdb-max-files",
+            "17",
+            "--vecdb-force-path",
+            "/old/cache",
+            "--wait-vecdb",
+        ])
+        .unwrap();
+        assert!(cmd.legacy_vecdb);
+        assert_eq!(cmd.legacy_vecdb_max_files, 17);
+        assert_eq!(cmd.legacy_vecdb_force_path, "/old/cache");
+        assert!(cmd.legacy_wait_vecdb);
+        assert!(!CommandLine::command()
+            .render_long_help()
+            .to_string()
+            .contains("vecdb"));
+        assert!(
+            CommandLine::try_parse_from(["refact-lsp", "--vecdb-max-files", "invalid"]).is_err()
         );
     }
 
@@ -1360,10 +1361,10 @@ pub mod tests {
             ast_max_files: 0,
             ast_permanent: String::new(),
             wait_ast: false,
-            vecdb: false,
-            vecdb_max_files: 0,
-            vecdb_force_path: String::new(),
-            wait_vecdb: false,
+            legacy_vecdb: false,
+            legacy_vecdb_max_files: 0,
+            legacy_vecdb_force_path: String::new(),
+            legacy_wait_vecdb: false,
             files_jsonl_path: String::new(),
             workspace_folder: String::new(),
             allow_shared_workspace: true,
@@ -1397,7 +1398,6 @@ pub mod tests {
             card_verifier_tasks: Arc::new(AMutex::new(tokio::task::JoinSet::new())),
             card_verifiers_shutting_down: AtomicBool::new(false),
             card_verifier_requests: StdMutex::new(HashMap::new()),
-            trajectory_vectorization_queue: Arc::new(AMutex::new(Default::default())),
             cmdline,
             http_client,
             cache_dir,
@@ -1415,9 +1415,6 @@ pub mod tests {
                 map: HashMap::new(),
                 download_locks: Arc::new(StdMutex::new(HashMap::new())),
             })),
-            completions_cache: Arc::new(StdRwLock::new(CompletionCache::new())),
-            vec_db: Arc::new(AMutex::new(None)),
-            vec_db_error: Arc::new(StdMutex::new(String::new())),
             codegraph: Arc::new(AMutex::new(None)),
             codegraph_error: Arc::new(StdMutex::new(String::new())),
             ask_shutdown_sender: Arc::new(StdMutex::new(ask_shutdown_sender)),
@@ -1464,6 +1461,7 @@ pub mod tests {
             tool_catalog_cache: Arc::new(ToolCatalogCache::default()),
             buddy: Arc::new(AMutex::new(None)),
             operator_signal_projection: Arc::new(AMutex::new(Default::default())),
+            buddy_sink_attribution: Default::default(),
             buddy_events_tx: Some(tokio::sync::broadcast::channel(256).0),
             user_activity: Arc::new(AMutex::new(user_activity)),
             agents,

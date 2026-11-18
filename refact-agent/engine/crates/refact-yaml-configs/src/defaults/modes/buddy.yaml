@@ -1,4 +1,4 @@
-schema_version: 25
+schema_version: 26
 id: buddy
 title: Buddy
 description: Persistent project companion for setup, diagnostics, and knowledge management
@@ -88,7 +88,6 @@ tools:
   - glob
   - search_pattern
   - search_symbol_definition
-  - search_semantic
   - knowledge
   - create_knowledge
   - organization_list

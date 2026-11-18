@@ -24,7 +24,6 @@ import com.smallcloud.refactai.panes.RefactAIToolboxPaneFactory
 import com.smallcloud.refactai.utils.getLastUsedProject
 import java.awt.event.FocusEvent
 import java.awt.event.FocusListener
-import com.smallcloud.refactai.io.InferenceGlobalContext.Companion.instance as InferenceGlobalContext
 
 private var lastNotification: Notification? = null
 private var lastRegularNotification: Notification? = null
@@ -83,16 +82,6 @@ fun emitRegular(project: Project, editor: Editor) {
         notification.expire()
         showSettingsDialog(project, refactAIRootSettingsID)
     })
-
-    notification.addAction(NotificationAction.createSimple(
-        if (InferenceGlobalContext.useAutoCompletion) RefactAIBundle.message("notifications.pause") else RefactAIBundle.message(
-            "notifications.play"
-        )
-    ) {
-        InferenceGlobalContext.useAutoCompletion = !InferenceGlobalContext.useAutoCompletion
-        notification.expire()
-    })
-
 
     val chat = ToolWindowManager.getInstance(project).getToolWindow("Refact")
     if (chat != null) {

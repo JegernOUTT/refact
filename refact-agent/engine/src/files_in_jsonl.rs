@@ -24,8 +24,7 @@ enum JsonlFingerprint {
 pub async fn enqueue_all_docs_from_jsonl(
     gcx: Arc<GlobalContext>,
     paths: Vec<PathBuf>,
-    force: bool,
-    vecdb_only: bool,
+    memory_only: bool,
 ) {
     if paths.is_empty() {
         return;
@@ -40,16 +39,17 @@ pub async fn enqueue_all_docs_from_jsonl(
         jsonl_files.clear();
         jsonl_files.extend(paths);
     }
-    crate::indexing_routing::route_index_enqueue(gcx.clone(), &docs, force, vecdb_only).await;
+    if !memory_only {
+        crate::indexing_routing::route_index_enqueue(gcx.clone(), &docs).await;
+    }
 }
 
 pub async fn enqueue_all_docs_from_jsonl_but_read_first(
     gcx: Arc<GlobalContext>,
-    force: bool,
-    vecdb_only: bool,
+    memory_only: bool,
 ) {
     let paths = read_the_jsonl(gcx.clone()).await;
-    enqueue_all_docs_from_jsonl(gcx.clone(), paths, force, vecdb_only).await;
+    enqueue_all_docs_from_jsonl(gcx.clone(), paths, memory_only).await;
 }
 
 async fn parse_jsonl(jsonl_path: &String) -> Result<Vec<PathBuf>, String> {
@@ -148,11 +148,11 @@ async fn handle_jsonl_event_if_changed(
     match fingerprint {
         JsonlFingerprint::Missing => {
             info!("files_jsonl_path {:?} was removed", files_jsonl_path);
-            enqueue_all_docs_from_jsonl(gcx, vec![], false, false).await;
+            enqueue_all_docs_from_jsonl(gcx, vec![], false).await;
         }
         JsonlFingerprint::Content(_) => {
             info!("files_jsonl_path {:?} was modified", files_jsonl_path);
-            enqueue_all_docs_from_jsonl_but_read_first(gcx, false, false).await;
+            enqueue_all_docs_from_jsonl_but_read_first(gcx, false).await;
         }
     }
 }
@@ -161,7 +161,7 @@ pub async fn reload_if_jsonl_changes_background_task(gcx: Arc<GlobalContext>) {
     let (mut watcher, mut rx) = make_async_watcher().expect("Failed to make file watcher");
     let files_jsonl_path = gcx.cmdline.files_jsonl_path.clone();
     let mut last_fingerprint = jsonl_fingerprint(&files_jsonl_path).await;
-    enqueue_all_docs_from_jsonl_but_read_first(gcx.clone(), false, false).await;
+    enqueue_all_docs_from_jsonl_but_read_first(gcx.clone(), false).await;
     if watcher
         .watch(
             &PathBuf::from(files_jsonl_path.clone()),
@@ -210,6 +210,19 @@ mod tests {
 
     fn tracked_jsonl_files(gcx: &Arc<GlobalContext>) -> Vec<PathBuf> {
         gcx.documents_state.jsonl_files.lock().unwrap().clone()
+    }
+
+    #[tokio::test]
+    async fn memory_only_refresh_tracks_files_without_enqueueing_code() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let service = Arc::new(crate::codegraph::CodeGraphService::open_in_memory().unwrap());
+        *gcx.codegraph.lock().await = Some(service.clone());
+        let paths = vec![PathBuf::from("src/main.rs")];
+        enqueue_all_docs_from_jsonl(gcx.clone(), paths.clone(), true).await;
+        assert_eq!(tracked_jsonl_files(&gcx), paths);
+        assert!(service.drain_batch(10).is_empty());
+        enqueue_all_docs_from_jsonl(gcx, paths, false).await;
+        assert_eq!(service.drain_batch(10), vec!["src/main.rs"]);
     }
 
     #[tokio::test]

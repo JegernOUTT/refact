@@ -1,4 +1,4 @@
-schema_version: 3
+schema_version: 4
 id: my_custom_subagent
 title: My Custom Subagent
 description: Example of a user-defined subagent tool
@@ -56,7 +56,6 @@ tools:
   - cat
   - glob
   - search_pattern
-  - search_semantic
   - knowledge
 
 # Optional reusable agent profile. Referenced by `subagent(profile: "my_custom_subagent")`

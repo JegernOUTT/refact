@@ -248,13 +248,6 @@ fn tool_gating(tool: &Box<dyn Tool + Send>, availability: &ToolAvailability) -> 
             enablement: "enable code graph indexing",
         });
     }
-    if dependencies.iter().any(|dependency| dependency == "vecdb") && !availability.vecdb_on {
-        return Some(ToolGating {
-            capability: "vector database",
-            unavailable_reason: "which is not enabled on this engine",
-            enablement: "start it with --vecdb",
-        });
-    }
     if dependencies
         .iter()
         .any(|dependency| dependency == "thinking")
@@ -327,7 +320,6 @@ fn availability_build_count(config_dir: &PathBuf) -> usize {
 #[derive(Clone, Copy)]
 struct ToolAvailability {
     codegraph_on: bool,
-    vecdb_on: bool,
     is_there_a_thinking_model: bool,
     allow_knowledge: bool,
     allow_experimental: bool,
@@ -344,9 +336,6 @@ impl ToolAvailability {
                 .or_insert(0) += 1;
         }
 
-        let span = perf_diagnostics::span(PerfComponent::ToolAvailabilityVecdbWait, None, None);
-        let vecdb_on = gcx.vec_db.lock().await.is_some();
-        span.finish_tool(PerfOutcome::Success, 1, 1, None);
         let span = perf_diagnostics::span(PerfComponent::ToolAvailabilityCodegraphWait, None, None);
         let codegraph_on = gcx.codegraph.lock().await.is_some();
         span.finish_tool(PerfOutcome::Success, 1, 1, None);
@@ -362,7 +351,6 @@ impl ToolAvailability {
 
         Self {
             codegraph_on,
-            vecdb_on,
             is_there_a_thinking_model,
             allow_knowledge: true,
             allow_experimental: gcx.cmdline.experimental,
@@ -479,9 +467,6 @@ async fn get_builtin_tools(
             config_path: config_path.clone(),
         }),
         Box::new(crate::tools::tool_glob::ToolGlob {
-            config_path: config_path.clone(),
-        }),
-        Box::new(crate::tools::tool_search::ToolSearch {
             config_path: config_path.clone(),
         }),
         Box::new(crate::tools::tool_codegraph::ToolCodegraphOverview {
@@ -1240,7 +1225,6 @@ mod tests {
         // A registration ceiling, not a claim about any running engine's capabilities.
         ToolAvailability {
             codegraph_on: true,
-            vecdb_on: true,
             is_there_a_thinking_model: true,
             allow_knowledge: true,
             allow_experimental: true,
@@ -1395,65 +1379,64 @@ mod tests {
         let ceiling = contract_described_tools(gcx.clone(), &contract_availability()).await;
         for mode in embedded_contract_modes() {
             for codegraph_on in [false, true] {
-                for vecdb_on in [false, true] {
-                    for native_web in [false, true] {
-                        let availability = ToolAvailability {
-                            codegraph_on,
-                            vecdb_on,
-                            ..contract_availability()
-                        };
-                        // Expected entries are derived from actual registered dependencies,
-                        // not a second catalog copied from implementation module names.
-                        let expected = mode
-                            .tools
-                            .iter()
-                            .filter(|name| {
-                                ceiling.iter().any(|(_, desc, tool)| {
-                                    &desc.name == *name
-                                        && availability.allows(tool)
-                                        && tool.config().unwrap_or_default().enabled
-                                })
+                for native_web in [false, true] {
+                    let availability = ToolAvailability {
+                        codegraph_on,
+                        ..contract_availability()
+                    };
+                    // Expected entries are derived from actual registered dependencies,
+                    // not a second catalog copied from implementation module names.
+                    let expected = mode
+                        .tools
+                        .iter()
+                        .filter(|name| {
+                            ceiling.iter().any(|(_, desc, tool)| {
+                                &desc.name == *name
+                                    && availability.allows(tool)
+                                    && tool.config().unwrap_or_default().enabled
                             })
-                            .cloned()
-                            .collect::<Vec<_>>();
-                        let mut described =
-                            contract_described_tools(gcx.clone(), &availability).await;
-                        for (category, name) in [
-                            (ToolGroupCategory::Integration, "contract_integration_probe"),
-                            (ToolGroupCategory::MCP, "mcp_contract_probe"),
-                            (
-                                ToolGroupCategory::ConfigSubagent,
-                                "contract_config_subagent_probe",
-                            ),
-                        ] {
-                            let desc = builtin_desc(name);
-                            described.push((category, desc.clone(), Box::new(TestTool(desc))));
-                        }
-                        let actual = selected_names(select_and_order_mode_tools(
-                            described,
-                            &mode.tools,
-                            mode.allow_integrations,
-                            mode.allow_mcp,
-                            mode.allow_subagents,
-                            native_web,
-                            None,
-                        ));
-                        let mut expected = expected;
-                        let mut extras = Vec::new();
-                        for (allowed, name) in [
-                            (mode.allow_integrations, "contract_integration_probe"),
-                            (mode.allow_mcp, "mcp_contract_probe"),
-                            (mode.allow_subagents, "contract_config_subagent_probe"),
-                        ] {
-                            if allowed {
-                                extras.push(name.to_string());
-                            }
-                        }
-                        extras.sort();
-                        expected.extend(extras);
-                        assert_eq!(actual, expected,
-                            "{}: codegraph={codegraph_on}, vecdb={vecdb_on}, native_web={native_web}", mode.id);
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    let mut described = contract_described_tools(gcx.clone(), &availability).await;
+                    for (category, name) in [
+                        (ToolGroupCategory::Integration, "contract_integration_probe"),
+                        (ToolGroupCategory::MCP, "mcp_contract_probe"),
+                        (
+                            ToolGroupCategory::ConfigSubagent,
+                            "contract_config_subagent_probe",
+                        ),
+                    ] {
+                        let desc = builtin_desc(name);
+                        described.push((category, desc.clone(), Box::new(TestTool(desc))));
                     }
+                    let actual = selected_names(select_and_order_mode_tools(
+                        described,
+                        &mode.tools,
+                        mode.allow_integrations,
+                        mode.allow_mcp,
+                        mode.allow_subagents,
+                        native_web,
+                        None,
+                    ));
+                    let mut expected = expected;
+                    let mut extras = Vec::new();
+                    for (allowed, name) in [
+                        (mode.allow_integrations, "contract_integration_probe"),
+                        (mode.allow_mcp, "mcp_contract_probe"),
+                        (mode.allow_subagents, "contract_config_subagent_probe"),
+                    ] {
+                        if allowed {
+                            extras.push(name.to_string());
+                        }
+                    }
+                    extras.sort();
+                    expected.extend(extras);
+                    assert_eq!(
+                        actual, expected,
+                        "{}: codegraph={codegraph_on}, native_web={native_web}",
+                        mode.id
+                    );
                 }
             }
         }
@@ -1466,10 +1449,6 @@ mod tests {
         for availability in [
             ToolAvailability {
                 codegraph_on: false,
-                ..contract_availability()
-            },
-            ToolAvailability {
-                vecdb_on: false,
                 ..contract_availability()
             },
             ToolAvailability {
@@ -1492,7 +1471,7 @@ mod tests {
                 .flat_map(|group| group.tools)
                 .map(|tool| tool.tool_description().name)
                 .collect::<HashSet<_>>();
-            // Anchor the two indexed tool families independently of tool_gating,
+            // Anchor indexed tools independently of tool_gating,
             // so dropping their dependency metadata cannot make this a tautology.
             if !availability.codegraph_on {
                 for name in ["codegraph_overview", "search_symbol_definition"] {
@@ -1502,13 +1481,6 @@ mod tests {
                         Some("code graph index")
                     );
                 }
-            }
-            if !availability.vecdb_on {
-                assert!(!actual.contains("search_semantic"));
-                assert_eq!(
-                    gated.get("search_semantic").map(|gate| gate.capability),
-                    Some("vector database")
-                );
             }
             for (_, desc, tool) in &ceiling {
                 let reason = tool_gating(tool, &availability);
@@ -2303,86 +2275,6 @@ mod tests {
         );
     }
 
-    struct PromptContractVecdb;
-
-    #[async_trait::async_trait]
-    impl crate::vecdb::vdb_structs::VecdbSearch for PromptContractVecdb {
-        async fn vecdb_search(
-            &self,
-            query: String,
-            _top_n: usize,
-            _filter_mb: Option<String>,
-        ) -> Result<crate::vecdb::vdb_structs::SearchResult, String> {
-            Ok(crate::vecdb::vdb_structs::SearchResult {
-                query_text: query,
-                results: Vec::new(),
-            })
-        }
-
-        async fn get_status(&self) -> Result<crate::vecdb::vdb_structs::VecDbStatus, String> {
-            Ok(crate::vecdb::vdb_structs::VecDbStatus {
-                files_unprocessed: 0,
-                files_total: 0,
-                requests_made_since_start: 0,
-                vectors_made_since_start: 0,
-                db_size: 0,
-                db_cache_size: 0,
-                state: "done".to_string(),
-                queue_additions: false,
-                vecdb_max_files_hit: false,
-                vecdb_errors: Default::default(),
-                cache_writes_failed: 0,
-                vectors_missing_from_cache: 0,
-            })
-        }
-
-        async fn remove_file(&self, _file_path: &PathBuf) -> Result<(), String> {
-            Ok(())
-        }
-
-        async fn vectorizer_enqueue_files(
-            &self,
-            _documents: &[String],
-            _process_immediately: bool,
-            _roots: refact_core::memory_plane::MemoryPlaneRoots,
-        ) {
-        }
-
-        fn current_constants(&self) -> (crate::vecdb::vdb_structs::EmbeddingModelConfig, usize) {
-            (
-                crate::vecdb::vdb_structs::EmbeddingModelConfig {
-                    model_id: String::new(),
-                    endpoint: String::new(),
-                    endpoint_style: String::new(),
-                    embedding_endpoint_style: String::new(),
-                    api_key: String::new(),
-                    model_name: String::new(),
-                    embedding_size: 0,
-                    dimensions: None,
-                    query_prefix: String::new(),
-                    document_prefix: String::new(),
-                    rejection_threshold: 0.0,
-                    embedding_batch: 1,
-                    n_ctx: 0,
-                },
-                0,
-            )
-        }
-
-        async fn embed_query(&self, _query: &str) -> Result<Vec<f32>, String> {
-            Ok(Vec::new())
-        }
-
-        async fn vecdb_search_with_embedding(
-            &self,
-            _embedding: &Vec<f32>,
-            _top_n: usize,
-            _filter_mb: Option<String>,
-        ) -> Result<Vec<crate::vecdb::vdb_structs::VecdbRecord>, String> {
-            Ok(Vec::new())
-        }
-    }
-
     async fn task_prompt_contract_gcx() -> Arc<GlobalContext> {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         crate::yaml_configs::project_configs_bootstrap::global_configs_try_create_all(
@@ -2393,7 +2285,6 @@ mod tests {
         *gcx.codegraph.lock().await = Some(Arc::new(
             refact_codegraph::CodeGraphService::open_in_memory().unwrap(),
         ));
-        *gcx.vec_db.lock().await = Some(Arc::new(PromptContractVecdb));
         gcx
     }
 

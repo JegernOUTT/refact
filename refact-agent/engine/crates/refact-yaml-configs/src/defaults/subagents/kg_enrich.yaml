@@ -1,4 +1,4 @@
-schema_version: 2
+schema_version: 3
 id: kg_enrich
 title: Knowledge Graph Enrich
 description: Enrich knowledge graph entries with metadata
@@ -31,7 +31,7 @@ messages:
 
     Return a JSON object with:
     - title: a concise title for this knowledge (max 80 chars)
-    - tags: array of 6-12 precise, lowercase tags for semantic search and KG linking
+    - tags: array of 6-12 precise, lowercase tags for lexical retrieval and KG linking
     - filenames: array of file paths this knowledge relates to (only from candidates)
     - kind: one of "code", "decision", "domain", "process" (based on content)
     - links: array of related doc IDs (only from candidates)

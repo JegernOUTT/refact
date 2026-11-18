@@ -128,10 +128,6 @@ pub const ORDINARY: &[(&str, &str)] = &[
         "knowledge items in automatic context",
     ),
     (
-        "auto_enrichment_trajectory_top_n",
-        "past chats in automatic context",
-    ),
-    (
         "trajectory_watcher_self_write_enabled",
         "whether the watcher reacts to its own writes",
     ),
@@ -166,10 +162,6 @@ pub const ORDINARY: &[(&str, &str)] = &[
     (
         "codegraph_exec_flow_max_nodes",
         "nodes of the execution flow report",
-    ),
-    (
-        "vecdb_trajectory_split_bytes",
-        "chunk size of indexed chats",
     ),
     ("cat_max_input_paths", "paths per cat call"),
     ("cat_max_lines", "lines per cat call"),
@@ -377,10 +369,6 @@ pub const ORDINARY: &[(&str, &str)] = &[
     (
         "tool_catalog_snapshots_enabled",
         "restart only, so refused anyway; tool list caching",
-    ),
-    (
-        "vecdb_path_coalescing_enabled",
-        "restart only, so refused anyway; index batching",
     ),
 ];
 

@@ -1358,6 +1358,18 @@ describe("removed review tool history", () => {
   );
 });
 
+describe("removed semantic search tool history", () => {
+  it.each(["search_semantic", "t_search_semantic", "t_semantic_search"])(
+    "%s historical messages fall back to the generic renderer",
+    (name) => {
+      renderToolContent(name, "performed search, results below", {
+        args: { queries: "frog", scope: "workspace" },
+      });
+      expect(screen.getByTestId("generic-tool")).toBeInTheDocument();
+    },
+  );
+});
+
 describe("App family routing", () => {
   it("routes all ten families and t aliases before generic fallback", () => {
     for (const name of [

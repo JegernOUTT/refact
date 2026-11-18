@@ -1,8 +1,6 @@
 package com.smallcloud.refactai.listeners
 
 import com.intellij.codeInsight.hint.HintManagerImpl.ActionToIgnore
-import com.intellij.codeInsight.inline.completion.InlineCompletion
-import com.intellij.codeInsight.inline.completion.session.InlineCompletionContext
 import com.intellij.openapi.actionSystem.DataContext
 import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.editor.Caret
@@ -14,22 +12,20 @@ import com.smallcloud.refactai.modes.ModeProvider
 
 const val ACTION_ID_ = "TabPressedAction"
 
-class TabPressedAction : EditorAction(InsertInlineCompletionHandler()), ActionToIgnore {
+fun isRefactDiffActive(editor: Editor): Boolean =
+    ModeProvider.findModeProvider(editor)?.modeInActiveState() == true
+
+class TabPressedAction : EditorAction(ApproveDiffHandler()), ActionToIgnore {
     val ACTION_ID = ACTION_ID_
 
     init {
         this.templatePresentation.icon = Resources.Icons.LOGO_RED_16x16
     }
 
-    class InsertInlineCompletionHandler : EditorWriteActionHandler() {
+    class ApproveDiffHandler : EditorWriteActionHandler() {
         override fun executeWriteAction(editor: Editor, caret: Caret?, dataContext: DataContext) {
             Logger.getInstance("RefactTabPressedAction").debug("executeWriteAction")
-            val provider = ModeProvider.getOrCreateModeProvider(editor)
-            if (provider.isInCompletionMode()) {
-                InlineCompletion.getHandlerOrNull(editor)?.insert()
-            } else {
-                provider.onTabPressed(editor, caret, dataContext)
-            }
+            ModeProvider.getOrCreateModeProvider(editor).onTabPressed(editor, caret, dataContext)
         }
 
         override fun isEnabledForCaret(
@@ -37,12 +33,7 @@ class TabPressedAction : EditorAction(InsertInlineCompletionHandler()), ActionTo
             caret: Caret,
             dataContext: DataContext
         ): Boolean {
-            val provider = ModeProvider.getOrCreateModeProvider(editor)
-            if (provider.isInCompletionMode()) {
-                val ctx = InlineCompletionContext.getOrNull(editor) ?: return false
-                return ctx.state.elements.isNotEmpty()
-            }
-            return provider.modeInActiveState()
+            return isRefactDiffActive(editor)
         }
     }
 }

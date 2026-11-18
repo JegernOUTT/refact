@@ -4,15 +4,12 @@ use std::fmt;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
-use refact_core::llm_types::{
-    CompletionEndpointStyle, EmbeddingEndpointStyle, EmbeddingModelRecord, HasBaseModelRecord,
-    WireFormat, default_true,
-};
+use refact_core::llm_types::{HasBaseModelRecord, WireFormat, default_true};
 use refact_core::provider_types::{
     CredentialSpec, extra_headers_mapping_to_hash_map, parse_extra_headers_value,
 };
 
-use super::model_records::{ChatModelRecord, CompletionModelRecord, DefaultModels, normalize_string};
+use super::model_records::{ChatModelRecord, DefaultModels, normalize_string};
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct CapsProvider {
@@ -23,8 +20,6 @@ pub struct CapsProvider {
     #[serde(default = "default_true")]
     pub enabled: bool,
     #[serde(default = "default_true")]
-    pub supports_completion: bool,
-    #[serde(default = "default_true")]
     pub supports_cache_control: bool,
 
     #[serde(default)]
@@ -34,16 +29,7 @@ pub struct CapsProvider {
     pub endpoint_style: String,
 
     #[serde(default)]
-    pub completion_endpoint_style: String,
-    #[serde(default)]
-    pub embedding_endpoint_style: String,
-
-    #[serde(default)]
-    pub completion_endpoint: String,
-    #[serde(default)]
     pub chat_endpoint: String,
-    #[serde(default)]
-    pub embedding_endpoint: String,
 
     #[serde(default)]
     pub api_key: String,
@@ -57,24 +43,11 @@ pub struct CapsProvider {
     pub extra_headers: HashMap<String, String>,
 
     #[serde(default)]
-    pub code_completion_n_ctx: usize,
-
-    #[serde(default)]
-    pub completion_models: IndexMap<String, CompletionModelRecord>,
-    #[serde(default)]
     pub chat_models: IndexMap<String, ChatModelRecord>,
-    #[serde(default)]
-    pub embedding_model: EmbeddingModelRecord,
 
     #[serde(default)]
     pub models_dict_patch: IndexMap<String, serde_json::Value>,
 
-    #[serde(
-        default,
-        alias = "code_completion_default_model",
-        alias = "completion_model"
-    )]
-    pub completion_default_model: String,
     #[serde(default, alias = "code_chat_default_model", alias = "chat_model")]
     pub chat_default_model: String,
     #[serde(default)]
@@ -105,7 +78,6 @@ impl CapsProvider {
 
     pub fn defaults(&self) -> DefaultModels {
         DefaultModels {
-            completion_default_model: self.completion_default_model.clone(),
             chat_default_model: self.chat_default_model.clone(),
             chat_model_2: self.chat_model_2.clone(),
             task_planner_agent_model: self.task_planner_agent_model.clone(),
@@ -118,7 +90,6 @@ impl CapsProvider {
     pub fn apply_override(&mut self, value: serde_yaml::Value) -> Result<(), String> {
         set_field_if_exists::<String>(&mut self.base_provider, "base_provider", &value)?;
         set_field_if_exists::<bool>(&mut self.enabled, "enabled", &value)?;
-        set_field_if_exists::<bool>(&mut self.supports_completion, "supports_completion", &value)?;
         set_field_if_exists::<bool>(
             &mut self.supports_cache_control,
             "supports_cache_control",
@@ -126,43 +97,13 @@ impl CapsProvider {
         )?;
         set_field_if_exists::<WireFormat>(&mut self.wire_format, "wire_format", &value)?;
         set_field_if_exists::<String>(&mut self.endpoint_style, "endpoint_style", &value)?;
-        set_field_if_exists::<String>(
-            &mut self.completion_endpoint_style,
-            "completion_endpoint_style",
-            &value,
-        )?;
-        set_field_if_exists::<String>(
-            &mut self.embedding_endpoint_style,
-            "embedding_endpoint_style",
-            &value,
-        )?;
-        set_field_if_exists::<String>(
-            &mut self.completion_endpoint,
-            "completion_endpoint",
-            &value,
-        )?;
         set_field_if_exists::<String>(&mut self.chat_endpoint, "chat_endpoint", &value)?;
-        set_field_if_exists::<String>(&mut self.embedding_endpoint, "embedding_endpoint", &value)?;
         set_field_if_exists::<String>(&mut self.api_key, "api_key", &value)?;
         set_field_if_exists::<Option<CredentialSpec>>(&mut self.credential, "credential", &value)?;
         set_field_if_exists::<String>(&mut self.tokenizer_api_key, "tokenizer_api_key", &value)?;
-        set_field_if_exists::<usize>(
-            &mut self.code_completion_n_ctx,
-            "code_completion_n_ctx",
-            &value,
-        )?;
         if let Some(extra_headers) = value.get("extra_headers") {
             let headers = parse_extra_headers_value(extra_headers)?;
             self.extra_headers = extra_headers_mapping_to_hash_map(None, &headers);
-        }
-        set_field_if_exists::<EmbeddingModelRecord>(
-            &mut self.embedding_model,
-            "embedding_model",
-            &value,
-        )?;
-        if value.get("embedding_model").is_some() {
-            self.embedding_model.base.removable = true;
-            self.embedding_model.base.user_configured = true;
         }
 
         if value.get("enabled_models").is_some() {
@@ -176,12 +117,6 @@ impl CapsProvider {
             &value,
             &self.running_models,
         )?;
-        extend_model_collection::<CompletionModelRecord>(
-            &mut self.completion_models,
-            "completion_models",
-            &value,
-            &self.running_models,
-        )?;
         extend_collection::<IndexMap<String, serde_json::Value>>(
             &mut self.models_dict_patch,
             "models_dict_patch",
@@ -190,9 +125,6 @@ impl CapsProvider {
 
         match serde_yaml::from_value::<DefaultModels>(value) {
             Ok(dm) => {
-                if !dm.completion_default_model.is_empty() {
-                    self.completion_default_model = dm.completion_default_model;
-                }
                 if !dm.chat_default_model.is_empty() {
                     self.chat_default_model = dm.chat_default_model;
                 }
@@ -217,22 +149,6 @@ impl CapsProvider {
 
         self.validate_credential_config()
     }
-
-    pub fn effective_completion_endpoint_style(&self) -> Result<CompletionEndpointStyle, String> {
-        let style = self.completion_endpoint_style.trim();
-        if style.is_empty() {
-            return Ok(CompletionEndpointStyle::OpenaiCompletions);
-        }
-        CompletionEndpointStyle::from_config(style, "completion_endpoint_style")
-    }
-
-    pub fn effective_embedding_endpoint_style(&self) -> Result<EmbeddingEndpointStyle, String> {
-        let style = self.embedding_endpoint_style.trim();
-        if !style.is_empty() {
-            return EmbeddingEndpointStyle::from_config(style, "embedding_endpoint_style");
-        }
-        EmbeddingEndpointStyle::from_config(&self.endpoint_style, "embedding_endpoint_style")
-    }
 }
 
 impl Default for CapsProvider {
@@ -241,25 +157,16 @@ impl Default for CapsProvider {
             name: String::new(),
             base_provider: String::new(),
             enabled: default_true(),
-            supports_completion: default_true(),
             supports_cache_control: default_true(),
             wire_format: WireFormat::default(),
             endpoint_style: default_endpoint_style(),
-            completion_endpoint_style: String::new(),
-            embedding_endpoint_style: String::new(),
-            completion_endpoint: String::new(),
             chat_endpoint: String::new(),
-            embedding_endpoint: String::new(),
             api_key: String::new(),
             credential: None,
             tokenizer_api_key: String::new(),
             extra_headers: HashMap::new(),
-            code_completion_n_ctx: 0,
-            completion_models: IndexMap::new(),
             chat_models: IndexMap::new(),
-            embedding_model: EmbeddingModelRecord::default(),
             models_dict_patch: IndexMap::new(),
-            completion_default_model: String::new(),
             chat_default_model: String::new(),
             chat_model_2: String::new(),
             task_planner_agent_model: String::new(),
@@ -277,15 +184,10 @@ impl fmt::Debug for CapsProvider {
             .field("name", &self.name)
             .field("base_provider", &self.base_provider)
             .field("enabled", &self.enabled)
-            .field("supports_completion", &self.supports_completion)
             .field("supports_cache_control", &self.supports_cache_control)
             .field("wire_format", &self.wire_format)
             .field("endpoint_style", &self.endpoint_style)
-            .field("completion_endpoint_style", &self.completion_endpoint_style)
-            .field("embedding_endpoint_style", &self.embedding_endpoint_style)
-            .field("completion_endpoint", &self.completion_endpoint)
             .field("chat_endpoint", &self.chat_endpoint)
-            .field("embedding_endpoint", &self.embedding_endpoint)
             .field("api_key", &redacted_secret(&self.api_key))
             .field(
                 "tokenizer_api_key",
@@ -295,12 +197,8 @@ impl fmt::Debug for CapsProvider {
                 "extra_headers",
                 &redacted_extra_headers(&self.extra_headers),
             )
-            .field("code_completion_n_ctx", &self.code_completion_n_ctx)
-            .field("completion_models", &self.completion_models)
             .field("chat_models", &self.chat_models)
-            .field("embedding_model", &self.embedding_model)
             .field("models_dict_patch", &self.models_dict_patch)
-            .field("completion_default_model", &self.completion_default_model)
             .field("chat_default_model", &self.chat_default_model)
             .field("chat_model_2", &self.chat_model_2)
             .field("task_planner_agent_model", &self.task_planner_agent_model)
@@ -378,16 +276,6 @@ pub fn default_endpoint_style() -> String {
     "openai".to_string()
 }
 
-#[derive(Deserialize)]
-pub struct CompletionPresets {
-    pub completion_models: IndexMap<String, CompletionModelRecord>,
-}
-
-#[derive(Deserialize)]
-pub struct EmbeddingPresets {
-    pub embedding_models: IndexMap<String, EmbeddingModelRecord>,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -397,22 +285,17 @@ mod tests {
         let mut provider = CapsProvider {
             base_provider: "template".to_string(),
             enabled: true,
-            supports_completion: true,
             supports_cache_control: true,
             wire_format: WireFormat::OpenaiChatCompletions,
             endpoint_style: "openai".to_string(),
-            completion_endpoint: "old-completion".to_string(),
             chat_endpoint: "old-chat".to_string(),
-            embedding_endpoint: "old-embedding".to_string(),
             api_key: "old-key".to_string(),
             tokenizer_api_key: "old-tokenizer".to_string(),
-            code_completion_n_ctx: 1024,
             running_models: vec!["template-model".to_string()],
             models_dict_patch: IndexMap::from([(
                 "template-model".to_string(),
                 serde_json::json!({"n_ctx": 10}),
             )]),
-            completion_default_model: "old-completion-model".to_string(),
             chat_default_model: "old-chat-model".to_string(),
             ..Default::default()
         };
@@ -468,31 +351,18 @@ chat_buddy_model: buddy-default
 
         assert_eq!(provider.base_provider, "openai");
         assert!(!provider.enabled);
-        assert!(!provider.supports_completion);
         assert!(!provider.supports_cache_control);
         assert_eq!(provider.wire_format, WireFormat::AnthropicMessages);
         assert_eq!(provider.endpoint_style, "anthropic");
-        assert_eq!(
-            provider.completion_endpoint_style,
-            "openai_chat_completions"
-        );
-        assert_eq!(provider.embedding_endpoint_style, "ollama_native");
-        assert_eq!(provider.completion_endpoint, "new-completion");
         assert_eq!(provider.chat_endpoint, "new-chat");
-        assert_eq!(provider.embedding_endpoint, "new-embedding");
         assert_eq!(provider.api_key, "new-key");
         assert_eq!(provider.tokenizer_api_key, "new-tokenizer");
-        assert_eq!(provider.code_completion_n_ctx, 2048);
         assert_eq!(
             provider.extra_headers.get("X-Test").map(String::as_str),
             Some("value")
         );
-        assert_eq!(provider.embedding_model.base.name, "embed");
-        assert!(provider.embedding_model.base.removable);
-        assert!(provider.embedding_model.base.user_configured);
         assert_eq!(provider.running_models, vec!["enabled-one", "running-two"]);
         assert!(provider.chat_models.contains_key("custom-chat"));
-        assert!(provider.completion_models.contains_key("custom-completion"));
         assert_eq!(
             provider.models_dict_patch["template-model"],
             serde_json::json!({"n_ctx": 50})
@@ -501,7 +371,6 @@ chat_buddy_model: buddy-default
             provider.models_dict_patch["custom-chat"],
             serde_json::json!({"supports_tools": true})
         );
-        assert_eq!(provider.completion_default_model, "completion-default");
         assert_eq!(provider.chat_default_model, "chat-default");
         assert_eq!(provider.chat_model_2, "chat-2-default");
         assert_eq!(provider.task_planner_agent_model, "task-agent-default");
@@ -511,55 +380,44 @@ chat_buddy_model: buddy-default
     }
 
     #[test]
-    fn capability_endpoint_styles_serialize_and_validate_separate_axes() {
-        let provider: CapsProvider = serde_yaml::from_str(
+    fn obsolete_provider_keys_are_ignored_without_weakening_chat_validation() {
+        let obsolete: serde_yaml::Value = serde_yaml::from_str(
             r#"
-completion_endpoint_style: openai_chat_completions
-embedding_endpoint_style: ollama_native
+supports_completion: not-a-boolean
+completion_endpoint: [ignored]
+completion_endpoint_style: invalid
+completion_models: ignored
+completion_model: [ignored]
+completion_default_model: [ignored]
+code_completion_n_ctx: ignored
+embedding_endpoint: [ignored]
+embedding_endpoint_style: invalid
+embedding_model: [ignored]
 "#,
         )
         .unwrap();
-
-        assert_eq!(
-            provider.effective_completion_endpoint_style().unwrap(),
-            CompletionEndpointStyle::OpenaiChatCompletions
-        );
-        assert_eq!(
-            provider.effective_embedding_endpoint_style().unwrap(),
-            EmbeddingEndpointStyle::OllamaNative
-        );
-
-        let value = serde_yaml::to_value(&provider).unwrap();
-        assert_eq!(
-            value
-                .get("completion_endpoint_style")
-                .and_then(|v| v.as_str()),
-            Some("openai_chat_completions")
-        );
-        assert_eq!(
-            value
-                .get("embedding_endpoint_style")
-                .and_then(|v| v.as_str()),
-            Some("ollama_native")
-        );
-    }
-
-    #[test]
-    fn unsupported_future_endpoint_styles_are_recognized_but_not_supported() {
-        let provider: CapsProvider = serde_yaml::from_str(
-            r#"
-completion_endpoint_style: openai_responses
-embedding_endpoint_style: cohere_v2
-"#,
-        )
-        .unwrap();
-
-        let completion_style = provider.effective_completion_endpoint_style().unwrap();
-        let embedding_style = provider.effective_embedding_endpoint_style().unwrap();
-        assert_eq!(completion_style, CompletionEndpointStyle::OpenaiResponses);
-        assert_eq!(embedding_style, EmbeddingEndpointStyle::CohereV2);
-        assert!(!completion_style.is_supported());
-        assert!(!embedding_style.is_supported());
+        let direct: CapsProvider = serde_yaml::from_value(obsolete.clone()).unwrap();
+        let mut overridden = CapsProvider::default();
+        overridden.apply_override(obsolete).unwrap();
+        for provider in [direct, overridden] {
+            assert!(provider.chat_models.is_empty());
+            assert!(provider.running_models.is_empty());
+            let value = serde_json::to_value(provider).unwrap();
+            for key in [
+                "supports_completion",
+                "completion_endpoint",
+                "completion_models",
+                "completion_default_model",
+                "embedding_endpoint",
+                "embedding_model",
+            ] {
+                assert!(value.get(key).is_none(), "{key}");
+            }
+        }
+        assert!(serde_yaml::from_str::<CapsProvider>("chat_models: invalid").is_err());
+        assert!(CapsProvider::default()
+            .apply_override(serde_yaml::from_str("chat_models: invalid").unwrap())
+            .is_err());
     }
 
     #[test]

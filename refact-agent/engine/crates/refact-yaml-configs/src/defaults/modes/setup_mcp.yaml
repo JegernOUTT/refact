@@ -1,4 +1,4 @@
-schema_version: 27
+schema_version: 28
 id: setup_mcp
 title: Setup MCP
 description: Discover and configure suitable MCP servers for the project
@@ -192,7 +192,6 @@ tools:
   - glob
   - search_pattern
   - search_symbol_definition
-  - search_semantic
   - web
   - web_search
   - shell

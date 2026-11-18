@@ -150,32 +150,6 @@ fn check_default_model(
     }
 }
 
-fn check_optional_default_model(
-    facts: &mut Vec<BuddyFact>,
-    field_name: &str,
-    model_id: &str,
-    payload_field: &str,
-    available_models: &[String],
-    now: DateTime<Utc>,
-) {
-    if model_id.is_empty()
-        || available_models
-            .iter()
-            .any(|available| available == model_id)
-    {
-        return;
-    }
-
-    facts.push(BuddyFact {
-        kind: BuddyFactKind::BrokenModelReference,
-        key: format!("provider:broken_ref:{}:{}", field_name, model_id),
-        source: "provider_health",
-        payload: serde_json::json!({ "field": payload_field, "model_id": model_id }),
-        seen_at: now,
-        confidence: 0.9,
-    });
-}
-
 fn check_default_model_once(
     facts: &mut Vec<BuddyFact>,
     seen_broken_models: &mut HashSet<(String, String)>,
@@ -208,7 +182,6 @@ fn check_default_model_once(
 pub fn detect_provider_health_facts(
     defaults: &DefaultModels,
     chat_models: &[String],
-    completion_models: &[String],
     now: DateTime<Utc>,
 ) -> Vec<BuddyFact> {
     let mut facts = vec![];
@@ -256,14 +229,6 @@ pub fn detect_provider_health_facts(
             now,
         );
     }
-    check_optional_default_model(
-        &mut facts,
-        "completion_default_model",
-        defaults.completion_default_model.as_str(),
-        "completion_model",
-        completion_models,
-        now,
-    );
     facts
 }
 
@@ -282,7 +247,7 @@ impl BuddyObserver for ProviderHealthObserver {
     }
 
     async fn observe(&self, gcx: AppState, ctx: &ObserverContext) -> Vec<BuddyFact> {
-        let (defaults, chat_models, completion_models) = {
+        let (defaults, chat_models) = {
             let caps_state = gcx.model.caps.read().await;
             let caps = match &caps_state.caps {
                 Some(c) => c.clone(),
@@ -291,11 +256,9 @@ impl BuddyObserver for ProviderHealthObserver {
             (
                 caps.defaults.clone(),
                 caps.chat_models.keys().cloned().collect::<Vec<_>>(),
-                caps.completion_models.keys().cloned().collect::<Vec<_>>(),
             )
         };
-        let mut facts =
-            detect_provider_health_facts(&defaults, &chat_models, &completion_models, ctx.now);
+        let mut facts = detect_provider_health_facts(&defaults, &chat_models, ctx.now);
         let rate_limit_fact = {
             let mut buddy = gcx.buddy.buddy.lock().await;
             buddy.as_mut().and_then(|service| {

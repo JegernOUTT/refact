@@ -3180,19 +3180,28 @@ pub async fn report_error_persisted_with_model(
     chat_id: Option<&str>,
     model_id: Option<&str>,
 ) {
-    let buddy_arc = gcx.buddy.buddy.clone();
-    let mut lock = buddy_arc.lock().await;
-    if let Some(svc) = lock.as_mut() {
-        svc.report_error_with_model(error_type, error_msg, source, chat_id, model_id);
-    }
+    gcx.buddy_event_sink
+        .report_error_with_model(error_type, error_msg, source, chat_id, model_id)
+        .await;
 }
 
-pub async fn latest_project_root(gcx: AppState) -> Result<std::path::PathBuf, String> {
-    crate::files_correction::get_project_dirs(gcx.gcx.clone())
-        .await
-        .into_iter()
-        .next()
-        .ok_or_else(|| "no project root".to_string())
+pub async fn buddy_project_root(gcx: AppState) -> Result<std::path::PathBuf, String> {
+    use super::operator_runtime::BuddyRootScope;
+    match super::operator_runtime::buddy_root_scope(&gcx).await {
+        BuddyRootScope::Bound(root) => Ok(root),
+        BuddyRootScope::Detached(_) => {
+            Err("Buddy's project is no longer open in this workspace".to_string())
+        }
+        BuddyRootScope::NoWorkspace => Err("no project root".to_string()),
+        BuddyRootScope::NoService => {
+            let mut roots = crate::files_correction::get_project_dirs(gcx.gcx.clone()).await;
+            match roots.len() {
+                0 => Err("no project root".to_string()),
+                1 => Ok(roots.remove(0)),
+                _ => Err("buddy service not initialized".to_string()),
+            }
+        }
+    }
 }
 
 pub async fn load_diagnostics_for_service(
@@ -3214,7 +3223,7 @@ pub async fn resolve_diagnostic(
     collected_at: Option<&str>,
     fallback: Option<super::diagnostics::DiagnosticContext>,
 ) -> Result<super::diagnostics::DiagnosticContext, String> {
-    let project_root = latest_project_root(gcx.clone()).await?;
+    let project_root = buddy_project_root(gcx.clone()).await?;
     let buddy_arc = gcx.buddy.buddy.clone();
     let lock = buddy_arc.lock().await;
     let svc = lock

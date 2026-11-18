@@ -330,6 +330,19 @@ pub async fn refresh_knowledge_index_path(
     path: &Path,
     is_remove: bool,
 ) -> bool {
+    let refreshed = refresh_knowledge_index_path_inner(gcx.clone(), path, is_remove).await;
+    if refreshed {
+        gcx.knowledge_generation
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+    refreshed
+}
+
+async fn refresh_knowledge_index_path_inner(
+    gcx: Arc<GlobalContext>,
+    path: &Path,
+    is_remove: bool,
+) -> bool {
     if path
         .components()
         .any(|component| component == Component::ParentDir)
@@ -713,6 +726,92 @@ mod tests {
 
         tokio::fs::remove_file(&path).await.unwrap();
         assert!(refresh_knowledge_index_path(gcx.clone(), &path, true).await);
+        assert!(gcx
+            .knowledge_index
+            .lock()
+            .await
+            .card_for_path(&path)
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn refresh_publishes_generation_after_index_transitions_and_rejects_foreign_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dunce::simplified(&std::fs::canonicalize(dir.path()).unwrap()).to_path_buf();
+        let path = root.join(KNOWLEDGE_FOLDER_NAME).join("note.md");
+        tokio::fs::create_dir_all(path.parent().unwrap())
+            .await
+            .unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![root.clone()];
+        let generation = || {
+            gcx.knowledge_generation
+                .load(std::sync::atomic::Ordering::SeqCst)
+        };
+        let initial = generation();
+        assert!(!refresh_knowledge_index_path(gcx.clone(), &root.join("outside.md"), false).await);
+        assert_eq!(generation(), initial);
+
+        tokio::fs::write(&path, "---\ntitle: Active\n---\nfirstneedle")
+            .await
+            .unwrap();
+        assert!(refresh_knowledge_index_path(gcx.clone(), &path, false).await);
+        assert_eq!(generation(), initial + 1);
+        assert_eq!(
+            gcx.knowledge_index
+                .lock()
+                .await
+                .search("firstneedle", &KnowledgeSearchFilters::default(), 1)
+                .len(),
+            1
+        );
+
+        tokio::fs::write(&path, "---\ntitle: Active\n---\nsecondneedle")
+            .await
+            .unwrap();
+        assert!(refresh_knowledge_index_path(gcx.clone(), &path, false).await);
+        assert_eq!(generation(), initial + 2);
+        {
+            let index = gcx.knowledge_index.lock().await;
+            assert!(index
+                .search("firstneedle", &KnowledgeSearchFilters::default(), 1)
+                .is_empty());
+            assert_eq!(
+                index
+                    .search("secondneedle", &KnowledgeSearchFilters::default(), 1)
+                    .len(),
+                1
+            );
+        }
+        tokio::fs::write(
+            &path,
+            "---\ntitle: Active\nstatus: archived\n---\nsecondneedle",
+        )
+        .await
+        .unwrap();
+        assert!(refresh_knowledge_index_path(gcx.clone(), &path, false).await);
+        assert_eq!(generation(), initial + 3);
+        assert!(gcx
+            .knowledge_index
+            .lock()
+            .await
+            .card_for_path(&path)
+            .is_none());
+
+        tokio::fs::write(&path, "---\ntitle: Active\n---\nthirdneedle")
+            .await
+            .unwrap();
+        assert!(refresh_knowledge_index_path(gcx.clone(), &path, false).await);
+        assert_eq!(generation(), initial + 4);
+        assert!(gcx
+            .knowledge_index
+            .lock()
+            .await
+            .card_for_path(&path)
+            .is_some());
+        tokio::fs::remove_file(&path).await.unwrap();
+        assert!(refresh_knowledge_index_path(gcx.clone(), &path, true).await);
+        assert_eq!(generation(), initial + 5);
         assert!(gcx
             .knowledge_index
             .lock()

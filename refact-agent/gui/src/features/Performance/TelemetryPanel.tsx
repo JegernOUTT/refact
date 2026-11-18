@@ -140,13 +140,13 @@ export function TelemetryPanel({
     }),
     [components],
   );
-  const amplification = telemetry.rollups?.index_watcher_vecdb_amplification;
+  const amplification = telemetry.rollups?.index_watcher_amplification;
   const watcherRows = amplification?.aggregate
     ? [
         {
           ...amplification.aggregate,
-          id: "watcher-vecdb-aggregate",
-          label: "Watcher / VecDB aggregate",
+          id: "watcher-index-aggregate",
+          label: "Watcher / index aggregate",
         },
       ]
     : [];
@@ -177,20 +177,20 @@ export function TelemetryPanel({
           rows={groups.trajectory}
         />
       </StatSection>
-      <StatSection icon={Database} title="Watcher / VecDB">
+      <StatSection icon={Database} title="Watcher / index">
         <AggregateTable
-          caption="Watcher and VecDB telemetry"
-          emptyMessage="No watcher or VecDB samples yet."
+          caption="Watcher and index telemetry"
+          emptyMessage="No watcher or index samples yet."
           rows={watcherRows}
         />
         {amplification ? (
           <Surface className={styles.amplification} variant="surface-1">
             <dl>
               <div>
-                <dt>Index operations / commit</dt>
+                <dt>Index reads / listing call</dt>
                 <dd>
                   {formatRatio(
-                    amplification.trajectory_index_operations_per_commit,
+                    amplification.trajectory_index_reads_per_listing_call,
                   )}
                 </dd>
               </div>
@@ -201,11 +201,13 @@ export function TelemetryPanel({
                 </dd>
               </div>
               <div>
-                <dt>VecDB searches / enrichment attempt</dt>
+                <dt>Listing calls by caller</dt>
                 <dd>
-                  {formatRatio(
-                    amplification.vecdb_searches_per_enrichment_attempt,
-                  )}
+                  {amplification.calls_by_caller?.length
+                    ? amplification.calls_by_caller
+                        .map(([caller, count]) => `${caller}: ${count}`)
+                        .join(" · ")
+                    : "—"}
                 </dd>
               </div>
             </dl>

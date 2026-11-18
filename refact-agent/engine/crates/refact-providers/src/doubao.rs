@@ -144,16 +144,13 @@ impl DoubaoProvider {
             readonly: false,
             wire_format: WireFormat::OpenaiChatCompletions,
             chat_endpoint: self.chat_endpoint()?,
-            completion_endpoint: String::new(),
-            embedding_endpoint: String::new(),
+
             api_key,
             auth_token: String::new(),
             tokenizer_api_key: String::new(),
             extra_headers: HashMap::new(),
             supports_cache_control: true,
             chat_models: Vec::new(),
-            completion_models: Vec::new(),
-            embedding_model: None,
         })
     }
 }

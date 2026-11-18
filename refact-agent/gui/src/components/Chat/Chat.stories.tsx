@@ -69,7 +69,7 @@ export const IDE: Story = {
       host: "ide",
       lspPort: 8001,
       themeProps: {},
-      features: { vecdb: true },
+      features: {},
     },
   },
 
@@ -87,9 +87,7 @@ export const Knowledge: Story = {
       host: "ide",
       lspPort: 8001,
       themeProps: {},
-      features: {
-        vecdb: true,
-      },
+      features: {},
     },
   },
   parameters: {

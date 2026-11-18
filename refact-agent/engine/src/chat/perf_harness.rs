@@ -1,14 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use refact_core::memory_plane::MemoryPlaneRoots;
-use refact_core::vecdb_types::{
-    EmbeddingModelConfig, SearchResult, VecDbStatus, VecdbRecord, VecdbSearch, VecdbSearchScope,
-};
 use serde::{Deserialize, Serialize};
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 use tokio::runtime::Builder;
@@ -350,7 +346,6 @@ pub struct FullSoakSubsystemFlags {
     pub trajectory_index_coordinator: bool,
     pub trajectory_watcher: bool,
     pub codegraph: bool,
-    pub vecdb_local_backend: bool,
     pub buddy: bool,
     pub agent_monitor: bool,
     pub goal_monitor: bool,
@@ -358,7 +353,6 @@ pub struct FullSoakSubsystemFlags {
     pub exec_registry: bool,
     pub session_cleanup: bool,
     pub exec_registry_entries: u64,
-    pub vecdb_disclosure: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -367,7 +361,6 @@ pub struct FullSoakRolloutSwitches {
     pub trajectory_index_coordinator_enabled: bool,
     pub trajectory_watcher_self_write_enabled: bool,
     pub tool_catalog_snapshots_enabled: bool,
-    pub vecdb_path_coalescing_enabled: bool,
 }
 
 impl FullSoakRolloutSwitches {
@@ -376,7 +369,6 @@ impl FullSoakRolloutSwitches {
             && !self.trajectory_index_coordinator_enabled
             && !self.trajectory_watcher_self_write_enabled
             && !self.tool_catalog_snapshots_enabled
-            && !self.vecdb_path_coalescing_enabled
     }
 
     fn as_all_enabled(&self) -> bool {
@@ -384,7 +376,6 @@ impl FullSoakRolloutSwitches {
             && self.trajectory_index_coordinator_enabled
             && self.trajectory_watcher_self_write_enabled
             && self.tool_catalog_snapshots_enabled
-            && self.vecdb_path_coalescing_enabled
     }
 }
 
@@ -406,11 +397,6 @@ pub struct FullSoakCounters {
     pub index_bytes_written: u64,
     pub watcher_suppressions: u64,
     pub watcher_replays: u64,
-    pub vecdb_enqueues: u64,
-    pub vecdb_coalesced_paths: u64,
-    pub vecdb_enqueue_requests: u64,
-    pub vecdb_pending_unique_paths: u64,
-    pub vecdb_processed_paths: u64,
     pub catalog_builds: u64,
     pub catalog_pool_builds: u64,
     pub monitor_scans: u64,
@@ -430,14 +416,6 @@ pub struct FullSoakProcessMetrics {
     pub rss_delta_bytes: Option<i64>,
     pub read_bytes_delta: Option<u64>,
     pub write_bytes_delta: Option<u64>,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Serialize)]
-pub struct FullSoakVecdbMetrics {
-    pub enqueue_requests: u64,
-    pub pending_unique_paths: u64,
-    pub processed_paths: u64,
-    pub amplification_ratio: f64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -473,7 +451,6 @@ pub struct FullSoakVariantBenchmarkReport {
     pub sse_serialize_latency: LatencySummary,
     pub sse_emit_latency: LatencySummary,
     pub process_samples: Vec<FullSoakProcessMetrics>,
-    pub vecdb_deferred_queue: FullSoakVecdbMetrics,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -1003,22 +980,12 @@ pub enum AutoEnrichmentQueryMode {
     Distinct,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AutoEnrichmentVecdbMode {
-    Warm,
-    Cold,
-    Empty,
-    Unavailable,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct AutoEnrichmentWorkload {
     pub chat_count: usize,
     pub root_count: usize,
     pub knowledge_file_count: usize,
     pub query_mode: AutoEnrichmentQueryMode,
-    pub vecdb_mode: AutoEnrichmentVecdbMode,
     pub history_message_count: usize,
     pub privacy_exclusion_count: usize,
 }
@@ -1033,12 +1000,7 @@ pub struct AutoEnrichmentStageReport {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct AutoEnrichmentRepeatedWork {
     pub attempts: u64,
-    pub scoped_searches: u64,
-    pub fallback_files_read: u64,
-    pub embedding_retries: u64,
-    pub cache_hits: u64,
-    pub cache_misses: u64,
-    pub cache_coalesced: u64,
+    pub lexical_files_read: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -1053,7 +1015,6 @@ pub struct AutoEnrichmentWorkloadReport {
     pub injected_char_count: u64,
     pub injected_estimated_tokens: u64,
     pub privacy_exclusion_violations: u64,
-    pub max_concurrent_search: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -1062,163 +1023,10 @@ pub struct AutoEnrichmentBenchmarkReport {
     pub workloads: Vec<AutoEnrichmentWorkloadReport>,
 }
 
-#[derive(Default)]
-struct AutoEnrichmentVecdb {
-    records: Vec<VecdbRecord>,
-    delay: std::time::Duration,
-    active_searches: AtomicUsize,
-    max_concurrent_searches: AtomicUsize,
-}
-
-impl AutoEnrichmentVecdb {
-    fn enter_search(&self) -> AutoEnrichmentSearchGuard<'_> {
-        let active = self.active_searches.fetch_add(1, Ordering::SeqCst) + 1;
-        let mut observed = self.max_concurrent_searches.load(Ordering::SeqCst);
-        while active > observed {
-            match self.max_concurrent_searches.compare_exchange(
-                observed,
-                active,
-                Ordering::SeqCst,
-                Ordering::SeqCst,
-            ) {
-                Ok(_) => break,
-                Err(current) => observed = current,
-            }
-        }
-        AutoEnrichmentSearchGuard {
-            vecdb: self,
-        }
-    }
-}
-
-struct AutoEnrichmentSearchGuard<'a> {
-    vecdb: &'a AutoEnrichmentVecdb,
-}
-
-impl Drop for AutoEnrichmentSearchGuard<'_> {
-    fn drop(&mut self) {
-        self.vecdb.active_searches.fetch_sub(1, Ordering::SeqCst);
-    }
-}
-
-#[async_trait]
-impl VecdbSearch for AutoEnrichmentVecdb {
-    async fn vecdb_search(
-        &self,
-        query: String,
-        _top_n: usize,
-        _filter_mb: Option<String>,
-    ) -> Result<SearchResult, String> {
-        Ok(SearchResult {
-            query_text: query,
-            results: Vec::new(),
-        })
-    }
-
-    async fn get_status(&self) -> Result<VecDbStatus, String> {
-        Ok(VecDbStatus {
-            files_unprocessed: 0,
-            files_total: self.records.len(),
-            requests_made_since_start: 0,
-            vectors_made_since_start: 0,
-            db_size: 0,
-            db_cache_size: 0,
-            state: "local_auto_enrichment_fixture".to_string(),
-            queue_additions: false,
-            vecdb_max_files_hit: false,
-            vecdb_errors: Default::default(),
-            cache_writes_failed: 0,
-            vectors_missing_from_cache: 0,
-        })
-    }
-
-    async fn remove_file(&self, _file_path: &PathBuf) -> Result<(), String> {
-        Ok(())
-    }
-
-    async fn vectorizer_enqueue_files(
-        &self,
-        _documents: &[String],
-        _process_immediately: bool,
-        _roots: MemoryPlaneRoots,
-    ) {
-    }
-
-    fn current_constants(&self) -> (EmbeddingModelConfig, usize) {
-        (
-            EmbeddingModelConfig {
-                model_id: "local-auto-enrichment".to_string(),
-                endpoint: String::new(),
-                endpoint_style: String::new(),
-                embedding_endpoint_style: String::new(),
-                api_key: String::new(),
-                model_name: "local-auto-enrichment".to_string(),
-                embedding_size: 3,
-                dimensions: Some(3),
-                query_prefix: String::new(),
-                document_prefix: String::new(),
-                rejection_threshold: 0.0,
-                embedding_batch: 1,
-                n_ctx: 0,
-            },
-            0,
-        )
-    }
-
-    async fn embed_query(&self, _query: &str) -> Result<Vec<f32>, String> {
-        let _guard = self.enter_search();
-        if !self.delay.is_zero() {
-            tokio::time::sleep(self.delay).await;
-        }
-        Ok(vec![0.1, 0.2, 0.3])
-    }
-
-    async fn vecdb_search_with_embedding(
-        &self,
-        _embedding: &Vec<f32>,
-        _top_n: usize,
-        _filter_mb: Option<String>,
-    ) -> Result<Vec<VecdbRecord>, String> {
-        let _guard = self.enter_search();
-        if !self.delay.is_zero() {
-            tokio::time::sleep(self.delay).await;
-        }
-        Ok(self.records.clone())
-    }
-
-    async fn vecdb_search_scopes_with_embedding(
-        &self,
-        _embedding: &Vec<f32>,
-        scopes: &[VecdbSearchScope],
-    ) -> Result<Vec<Vec<VecdbRecord>>, String> {
-        let _guard = self.enter_search();
-        if !self.delay.is_zero() {
-            tokio::time::sleep(self.delay).await;
-        }
-        Ok(scopes
-            .iter()
-            .map(|scope| {
-                self.records
-                    .iter()
-                    .filter(|record| {
-                        record
-                            .file_path
-                            .to_string_lossy()
-                            .starts_with(&scope.path_prefix)
-                    })
-                    .take(scope.top_n)
-                    .cloned()
-                    .collect()
-            })
-            .collect())
-    }
-}
-
 struct AutoEnrichmentFixture {
     _temp_dir: Arc<tempfile::TempDir>,
     gcx: SharedGlobalContext,
     excluded_paths: HashSet<PathBuf>,
-    vecdb: Option<Arc<AutoEnrichmentVecdb>>,
 }
 
 impl AutoEnrichmentFixture {
@@ -1244,7 +1052,6 @@ impl AutoEnrichmentFixture {
             .lock()
             .map_err(|_| "enrichment workspace folders lock poisoned".to_string())? = roots.clone();
 
-        let mut records = Vec::with_capacity(workload.knowledge_file_count);
         let mut excluded_paths = HashSet::new();
         for file_index in 0..workload.knowledge_file_count {
             let root = &roots[file_index % roots.len()];
@@ -1271,44 +1078,14 @@ impl AutoEnrichmentFixture {
             tokio::fs::write(&path, content)
                 .await
                 .map_err(|error| format!("failed to write enrichment memory: {error}"))?;
-            records.push(VecdbRecord {
-                vector: None,
-                file_path: path,
-                start_line: 1,
-                end_line: 1,
-                distance: 0.1,
-                usefulness: 95.0,
-            });
         }
 
-        let vecdb = match workload.vecdb_mode {
-            AutoEnrichmentVecdbMode::Unavailable => None,
-            AutoEnrichmentVecdbMode::Warm => Some(Arc::new(AutoEnrichmentVecdb {
-                records,
-                delay: std::time::Duration::ZERO,
-                ..Default::default()
-            })),
-            AutoEnrichmentVecdbMode::Cold => Some(Arc::new(AutoEnrichmentVecdb {
-                records,
-                delay: std::time::Duration::from_millis(1),
-                ..Default::default()
-            })),
-            AutoEnrichmentVecdbMode::Empty => Some(Arc::new(AutoEnrichmentVecdb {
-                records: Vec::new(),
-                delay: std::time::Duration::from_millis(1),
-                ..Default::default()
-            })),
-        };
-        *gcx.vec_db.lock().await = vecdb.clone().map(|backend| backend as Arc<dyn VecdbSearch>);
-        if matches!(workload.vecdb_mode, AutoEnrichmentVecdbMode::Unavailable) {
-            let index = crate::knowledge_index::build_knowledge_index(gcx.clone()).await;
-            *gcx.knowledge_index.lock().await = index;
-        }
+        let index = crate::knowledge_index::build_knowledge_index(gcx.clone()).await;
+        *gcx.knowledge_index.lock().await = index;
         Ok(Self {
             _temp_dir: temp_dir,
             gcx,
             excluded_paths,
-            vecdb,
         })
     }
 }
@@ -1331,7 +1108,6 @@ pub fn run_auto_enrichment_ci_fixture() -> Result<AutoEnrichmentWorkloadReport, 
             root_count: 2,
             knowledge_file_count: 10,
             query_mode: AutoEnrichmentQueryMode::Repeated,
-            vecdb_mode: AutoEnrichmentVecdbMode::Cold,
             history_message_count: 8,
             privacy_exclusion_count: 1,
         }))
@@ -1344,7 +1120,6 @@ async fn run_auto_enrichment_benchmark_async() -> Result<AutoEnrichmentBenchmark
             root_count: 1,
             knowledge_file_count: 0,
             query_mode: AutoEnrichmentQueryMode::Repeated,
-            vecdb_mode: AutoEnrichmentVecdbMode::Unavailable,
             history_message_count: 1,
             privacy_exclusion_count: 0,
         },
@@ -1353,7 +1128,6 @@ async fn run_auto_enrichment_benchmark_async() -> Result<AutoEnrichmentBenchmark
             root_count: 1,
             knowledge_file_count: 10,
             query_mode: AutoEnrichmentQueryMode::Repeated,
-            vecdb_mode: AutoEnrichmentVecdbMode::Warm,
             history_message_count: 8,
             privacy_exclusion_count: 1,
         },
@@ -1362,7 +1136,6 @@ async fn run_auto_enrichment_benchmark_async() -> Result<AutoEnrichmentBenchmark
             root_count: 2,
             knowledge_file_count: 10,
             query_mode: AutoEnrichmentQueryMode::Distinct,
-            vecdb_mode: AutoEnrichmentVecdbMode::Cold,
             history_message_count: 16,
             privacy_exclusion_count: 1,
         },
@@ -1371,7 +1144,6 @@ async fn run_auto_enrichment_benchmark_async() -> Result<AutoEnrichmentBenchmark
             root_count: 2,
             knowledge_file_count: 10,
             query_mode: AutoEnrichmentQueryMode::Repeated,
-            vecdb_mode: AutoEnrichmentVecdbMode::Cold,
             history_message_count: 32,
             privacy_exclusion_count: 1,
         },
@@ -1380,7 +1152,6 @@ async fn run_auto_enrichment_benchmark_async() -> Result<AutoEnrichmentBenchmark
             root_count: 8,
             knowledge_file_count: 1_000,
             query_mode: AutoEnrichmentQueryMode::Distinct,
-            vecdb_mode: AutoEnrichmentVecdbMode::Unavailable,
             history_message_count: 64,
             privacy_exclusion_count: 1,
         },
@@ -1389,7 +1160,6 @@ async fn run_auto_enrichment_benchmark_async() -> Result<AutoEnrichmentBenchmark
             root_count: 8,
             knowledge_file_count: 1_000,
             query_mode: AutoEnrichmentQueryMode::Repeated,
-            vecdb_mode: AutoEnrichmentVecdbMode::Empty,
             history_message_count: 64,
             privacy_exclusion_count: 1,
         },
@@ -1398,7 +1168,6 @@ async fn run_auto_enrichment_benchmark_async() -> Result<AutoEnrichmentBenchmark
             root_count: 1,
             knowledge_file_count: 10_000,
             query_mode: AutoEnrichmentQueryMode::Repeated,
-            vecdb_mode: AutoEnrichmentVecdbMode::Unavailable,
             history_message_count: 8,
             privacy_exclusion_count: 1,
         },
@@ -1505,21 +1274,7 @@ async fn run_auto_enrichment_workload(
         .collect::<Vec<_>>();
     let repeated_work = AutoEnrichmentRepeatedWork {
         attempts: event_count(&events, PerfComponent::EnrichmentAttempt),
-        scoped_searches: event_item_count(&events, PerfComponent::EnrichmentScopedSearch),
-        fallback_files_read: event_item_count(&events, PerfComponent::EnrichmentFallback),
-        embedding_retries: 0,
-        cache_hits: events
-            .iter()
-            .filter(|event| event.component == PerfComponent::EnrichmentCacheHit.as_str())
-            .count() as u64,
-        cache_misses: events
-            .iter()
-            .filter(|event| event.component == PerfComponent::EnrichmentCacheMiss.as_str())
-            .count() as u64,
-        cache_coalesced: events
-            .iter()
-            .filter(|event| event.component == PerfComponent::EnrichmentCacheCoalesced.as_str())
-            .count() as u64,
+        lexical_files_read: event_item_count(&events, PerfComponent::EnrichmentLexical),
     };
     let injected_file_count = events
         .iter()
@@ -1550,11 +1305,6 @@ async fn run_auto_enrichment_workload(
         injected_char_count,
         injected_estimated_tokens,
         privacy_exclusion_violations,
-        max_concurrent_search: fixture
-            .vecdb
-            .as_ref()
-            .map(|backend| backend.max_concurrent_searches.load(Ordering::SeqCst))
-            .unwrap_or(0),
     })
 }
 
@@ -2009,7 +1759,6 @@ pub fn validate_auto_enrichment_report_json(json: &str) -> Result<(), String> {
             "injected_char_count",
             "injected_estimated_tokens",
             "privacy_exclusion_violations",
-            "max_concurrent_search",
         ] {
             if workload.get(key).is_none() {
                 return Err(format!("enrichment workload is missing {key}"));
@@ -2205,7 +1954,6 @@ pub fn validate_full_soak_report_json(json: &str) -> Result<(), String> {
                 "sse_serialize_latency",
                 "sse_emit_latency",
                 "process_samples",
-                "vecdb_deferred_queue",
             ] {
                 if variant.get(key).is_none() {
                     return Err(format!("full soak variant is missing {key}"));
@@ -2220,7 +1968,6 @@ pub fn validate_full_soak_report_json(json: &str) -> Result<(), String> {
                 "trajectory_index_coordinator_enabled",
                 "trajectory_watcher_self_write_enabled",
                 "tool_catalog_snapshots_enabled",
-                "vecdb_path_coalescing_enabled",
             ] {
                 if rollout_switches.get(key).is_none() {
                     return Err(format!("full soak rollout switch is missing {key}"));
@@ -2237,7 +1984,6 @@ pub fn validate_full_soak_report_json(json: &str) -> Result<(), String> {
                 "trajectory_index_coordinator",
                 "trajectory_watcher",
                 "codegraph",
-                "vecdb_local_backend",
                 "buddy",
                 "agent_monitor",
                 "goal_monitor",
@@ -2245,7 +1991,6 @@ pub fn validate_full_soak_report_json(json: &str) -> Result<(), String> {
                 "exec_registry",
                 "exec_registry_entries",
                 "session_cleanup",
-                "vecdb_disclosure",
             ] {
                 if subsystems.get(key).is_none() {
                     return Err(format!("full soak subsystem disclosure is missing {key}"));
@@ -2339,7 +2084,6 @@ pub fn workload_matrix_is_complete(workloads: &[ConcurrentChatWorkload]) -> bool
 struct FullSoakFixture {
     base: BenchmarkFixture,
     background_tasks: crate::background_tasks::BackgroundTasksHolder,
-    vecdb: Arc<FullSoakVecdb>,
 }
 
 impl FullSoakFixture {
@@ -2364,8 +2108,6 @@ impl FullSoakFixture {
             })?,
         );
         *base.gcx.codegraph.lock().await = Some(service);
-        let vecdb = Arc::new(FullSoakVecdb::default());
-        *base.gcx.vec_db.lock().await = Some(vecdb.clone());
         crate::chat::start_session_cleanup_task(base.app.clone());
         crate::chat::start_trajectory_watcher(base.gcx.clone());
         let background_tasks =
@@ -2373,139 +2115,12 @@ impl FullSoakFixture {
         Ok(Self {
             base,
             background_tasks,
-            vecdb,
         })
     }
 
     async fn shutdown(mut self) {
         self.base.gcx.shutdown_flag.store(true, Ordering::SeqCst);
         self.background_tasks.abort().await;
-    }
-}
-
-#[derive(Default)]
-struct FullSoakVecdb {
-    deferred_queue: StdMutex<Option<refact_vecdb::vdb_thread::VecdbDeferredQueueProbe>>,
-}
-
-impl FullSoakVecdb {
-    fn begin_sample(&self, coalescing_enabled: bool) -> Result<(), String> {
-        let mut probe = self
-            .deferred_queue
-            .lock()
-            .map_err(|_| "full soak VecDB probe lock poisoned".to_string())?;
-        *probe = Some(refact_vecdb::vdb_thread::VecdbDeferredQueueProbe::new(
-            coalescing_enabled,
-        ));
-        Ok(())
-    }
-
-    fn drain_deferred(&self) -> Result<(), String> {
-        let mut probe = self
-            .deferred_queue
-            .lock()
-            .map_err(|_| "full soak VecDB probe lock poisoned".to_string())?;
-        if let Some(probe) = probe.as_mut() {
-            probe.drain_after_cooldown();
-        }
-        Ok(())
-    }
-
-    fn metrics(&self) -> refact_vecdb::vdb_thread::VecdbDeferredQueueMetrics {
-        self.deferred_queue
-            .lock()
-            .ok()
-            .and_then(|probe| probe.as_ref().map(|probe| probe.metrics()))
-            .unwrap_or(refact_vecdb::vdb_thread::VecdbDeferredQueueMetrics {
-                enqueue_requests: 0,
-                pending_unique_paths: 0,
-                processed_paths: 0,
-            })
-    }
-}
-
-#[async_trait]
-impl VecdbSearch for FullSoakVecdb {
-    async fn vecdb_search(
-        &self,
-        query: String,
-        _top_n: usize,
-        _filter_mb: Option<String>,
-    ) -> Result<SearchResult, String> {
-        Ok(SearchResult {
-            query_text: query,
-            results: Vec::new(),
-        })
-    }
-
-    async fn get_status(&self) -> Result<VecDbStatus, String> {
-        Ok(VecDbStatus {
-            files_unprocessed: 0,
-            files_total: self.metrics().processed_paths as usize,
-            requests_made_since_start: 0,
-            vectors_made_since_start: 0,
-            db_size: 0,
-            db_cache_size: 0,
-            state: "local_fixture".to_string(),
-            queue_additions: true,
-            vecdb_max_files_hit: false,
-            vecdb_errors: Default::default(),
-            cache_writes_failed: 0,
-            vectors_missing_from_cache: 0,
-        })
-    }
-
-    async fn remove_file(&self, _file_path: &PathBuf) -> Result<(), String> {
-        Ok(())
-    }
-
-    async fn vectorizer_enqueue_files(
-        &self,
-        documents: &[String],
-        process_immediately: bool,
-        _roots: MemoryPlaneRoots,
-    ) {
-        if !process_immediately {
-            if let Ok(mut probe) = self.deferred_queue.lock() {
-                if let Some(probe) = probe.as_mut() {
-                    probe.enqueue_deferred_paths(documents);
-                }
-            }
-        }
-    }
-
-    fn current_constants(&self) -> (EmbeddingModelConfig, usize) {
-        (
-            EmbeddingModelConfig {
-                model_id: "full-soak-local".to_string(),
-                endpoint: String::new(),
-                endpoint_style: String::new(),
-                embedding_endpoint_style: String::new(),
-                api_key: String::new(),
-                model_name: "full-soak-local".to_string(),
-                embedding_size: 0,
-                dimensions: None,
-                query_prefix: String::new(),
-                document_prefix: String::new(),
-                rejection_threshold: 0.0,
-                embedding_batch: 1,
-                n_ctx: 0,
-            },
-            0,
-        )
-    }
-
-    async fn embed_query(&self, _query: &str) -> Result<Vec<f32>, String> {
-        Ok(Vec::new())
-    }
-
-    async fn vecdb_search_with_embedding(
-        &self,
-        _embedding: &Vec<f32>,
-        _top_n: usize,
-        _filter_mb: Option<String>,
-    ) -> Result<Vec<VecdbRecord>, String> {
-        Ok(Vec::new())
     }
 }
 
@@ -2520,7 +2135,6 @@ impl FullSoakEnvGuard {
             crate::chat::trajectory_index::TRAJECTORY_INDEX_COORDINATOR_ENV,
             crate::chat::trajectories::TRAJECTORY_WATCHER_SELF_WRITE_ENV,
             TOOL_CATALOG_SNAPSHOTS_ENV,
-            refact_vecdb::vdb_thread::VECDB_PATH_COALESCING_ENV,
         ]
         .into_iter()
         .map(|key| (key, std::env::var_os(key)))
@@ -2641,9 +2255,6 @@ async fn run_full_soak_sample(
     let _env = FullSoakEnvGuard::set(optimized);
     let _writer = TrajectoryWriterRolloutGuard::set(optimized);
     let fixture = FullSoakFixture::new(TOOL_POOL_DESCRIPTOR_COUNT as usize).await?;
-    fixture
-        .vecdb
-        .begin_sample(refact_vecdb::vdb_thread::vecdb_path_coalescing_rollout_enabled())?;
     let sink = Arc::new(MemoryPerfSink::new());
     let recorder = Arc::new(PerfRecorder::with_salt(
         Arc::new(BenchmarkClock::default()),
@@ -2735,7 +2346,6 @@ async fn run_full_soak_sample(
         )
         .await;
         let required_flush = elapsed_us(required_started);
-        enqueue_repeated_vecdb_paths(&fixture, &session).await?;
         let catalog = fixture
             .base
             .app
@@ -2796,7 +2406,6 @@ async fn run_full_soak_sample(
         .trajectory_index_coordinator
         .flush_all()
         .await?;
-    fixture.vecdb.drain_deferred()?;
     tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     let index_after = filesystem_snapshot(&fixture.base.workspace).await?;
     let (_, index_bytes_written) = filesystem_delta(&index_before, &index_after);
@@ -2805,7 +2414,6 @@ async fn run_full_soak_sample(
     while trajectory_rx.try_recv().is_ok() {
         trajectory_events += 1;
     }
-    let vecdb_metrics = fixture.vecdb.metrics();
     let mut counters = FullSoakCounters {
         stream_deltas: u64::from(workload.chat_count),
         tool_calls: u64::from(workload.chat_count),
@@ -2817,11 +2425,6 @@ async fn run_full_soak_sample(
         trajectory_files,
         index_writes: event_count(&sink.events(), PerfComponent::TrajectoryIndexWrite),
         index_bytes_written,
-        vecdb_enqueues: vecdb_metrics.enqueue_requests,
-        vecdb_coalesced_paths: vecdb_metrics.pending_unique_paths as u64,
-        vecdb_enqueue_requests: vecdb_metrics.enqueue_requests,
-        vecdb_pending_unique_paths: vecdb_metrics.pending_unique_paths as u64,
-        vecdb_processed_paths: vecdb_metrics.processed_paths,
         catalog_builds: event_count(&sink.events(), PerfComponent::ToolCatalogBuild),
         catalog_pool_builds: event_count(&sink.events(), PerfComponent::ToolMutableVectorBuild),
         monitor_scans: 3,
@@ -2910,7 +2513,6 @@ async fn run_full_soak_sample(
             crate::chat::trajectory_index::trajectory_index_coordinator_rollout_enabled(),
         trajectory_watcher: true,
         codegraph: fixture.base.gcx.codegraph.lock().await.is_some(),
-        vecdb_local_backend: true,
         buddy: fixture.base.gcx.buddy.lock().await.is_some(),
         agent_monitor: true,
         goal_monitor: true,
@@ -2918,9 +2520,6 @@ async fn run_full_soak_sample(
         exec_registry: true,
         session_cleanup: true,
         exec_registry_entries: u64::from(!exec_snapshot.meta.process_id.0.is_empty()),
-        vecdb_disclosure:
-            "local recording VecDB backend; production VecDB initialization requires embedding credentials and is not run in this no-network fixture"
-                .to_string(),
     };
     let sample = FullSoakSample {
         rollout_switches: FullSoakRolloutSwitches {
@@ -2932,8 +2531,6 @@ async fn run_full_soak_sample(
                 crate::chat::trajectories::trajectory_watcher_self_write_rollout_enabled(),
             tool_catalog_snapshots_enabled: crate::app_state::tool_catalog_snapshot_rollout_enabled(
             ),
-            vecdb_path_coalescing_enabled:
-                refact_vecdb::vdb_thread::vecdb_path_coalescing_rollout_enabled(),
         },
         subsystems,
         counters,
@@ -2967,31 +2564,6 @@ async fn run_full_soak_sample(
     Ok(sample)
 }
 
-async fn enqueue_repeated_vecdb_paths(
-    fixture: &FullSoakFixture,
-    session: &Arc<AMutex<ChatSession>>,
-) -> Result<(), String> {
-    let chat_id = session.lock().await.chat_id.clone();
-    let path = find_trajectory_path(fixture.base.gcx.clone(), &chat_id)
-        .await
-        .ok_or_else(|| "full soak trajectory path was unavailable for VecDB fixture".to_string())?
-        .to_string_lossy()
-        .into_owned();
-    let roots = crate::indexing_routing::memory_plane_roots(fixture.base.gcx.clone()).await;
-    let vecdb = fixture
-        .base
-        .gcx
-        .vec_db
-        .lock()
-        .await
-        .clone()
-        .ok_or_else(|| "full soak VecDB fixture was unavailable".to_string())?;
-    vecdb
-        .vectorizer_enqueue_files(&[path.clone(), path], false, roots)
-        .await;
-    Ok(())
-}
-
 fn aggregate_full_soak_variant(
     variant: &str,
     samples: &[FullSoakSample],
@@ -3018,11 +2590,6 @@ fn aggregate_full_soak_variant(
             total.index_bytes_written += sample.counters.index_bytes_written;
             total.watcher_suppressions += sample.counters.watcher_suppressions;
             total.watcher_replays += sample.counters.watcher_replays;
-            total.vecdb_enqueues += sample.counters.vecdb_enqueues;
-            total.vecdb_coalesced_paths += sample.counters.vecdb_coalesced_paths;
-            total.vecdb_enqueue_requests += sample.counters.vecdb_enqueue_requests;
-            total.vecdb_pending_unique_paths += sample.counters.vecdb_pending_unique_paths;
-            total.vecdb_processed_paths += sample.counters.vecdb_processed_paths;
             total.catalog_builds += sample.counters.catalog_builds;
             total.catalog_pool_builds += sample.counters.catalog_pool_builds;
             total.monitor_scans += sample.counters.monitor_scans;
@@ -3061,16 +2628,6 @@ fn aggregate_full_soak_variant(
         .zip(accounted_us.iter())
         .map(|(total, accounted)| total.saturating_sub(*accounted))
         .collect::<Vec<_>>();
-    let vecdb_deferred_queue = FullSoakVecdbMetrics {
-        enqueue_requests: counters.vecdb_enqueue_requests,
-        pending_unique_paths: counters.vecdb_pending_unique_paths,
-        processed_paths: counters.vecdb_processed_paths,
-        amplification_ratio: if counters.vecdb_pending_unique_paths == 0 {
-            0.0
-        } else {
-            counters.vecdb_processed_paths as f64 / counters.vecdb_pending_unique_paths as f64
-        },
-    };
     Ok(FullSoakVariantBenchmarkReport {
         variant: variant.to_string(),
         rollout_switches: first.rollout_switches.clone(),
@@ -3115,7 +2672,6 @@ fn aggregate_full_soak_variant(
             .iter()
             .map(|sample| sample.process.clone())
             .collect(),
-        vecdb_deferred_queue,
     })
 }
 
@@ -3127,7 +2683,6 @@ fn assert_full_soak_invariants(
         || !subsystems.queue_processors
         || !subsystems.trajectory_watcher
         || !subsystems.codegraph
-        || !subsystems.vecdb_local_backend
         || !subsystems.buddy
         || !subsystems.scheduler
         || !subsystems.exec_registry
@@ -3139,9 +2694,6 @@ fn assert_full_soak_invariants(
         || counters.tool_calls == 0
         || counters.trajectory_files == 0
         || counters.sse_events == 0
-        || counters.vecdb_enqueues == 0
-        || counters.vecdb_enqueue_requests <= counters.vecdb_pending_unique_paths
-        || counters.vecdb_processed_paths == 0
         || counters.exec_registry_entries == 0
         || counters.errors != 0
     {
@@ -4443,7 +3995,7 @@ mod tests {
         not(feature = "perf-tests"),
         ignore = "performance benchmark; run with --features perf-tests"
     )]
-    fn auto_enrichment_fixture_measures_real_fanout_lock_contention_and_privacy() {
+    fn auto_enrichment_fixture_measures_real_fanout_and_privacy() {
         let report = run_auto_enrichment_ci_fixture().expect("auto enrichment fixture runs");
         eprintln!(
             "{}",
@@ -4453,25 +4005,10 @@ mod tests {
         assert_eq!(report.workload.chat_count, 10);
         assert_eq!(report.privacy_exclusion_violations, 0);
         assert_eq!(report.repeated_work.attempts, 10);
-        assert!(report.repeated_work.scoped_searches <= 1);
-        assert!(report.repeated_work.cache_misses <= 1);
-        assert!(
-            report.repeated_work.cache_hits + report.repeated_work.cache_coalesced >= 9,
-            "{:#?}",
-            report.repeated_work
-        );
         assert!(report.inserted_contexts > 0);
         assert!(report.injected_file_count > 0);
         assert!(report.injected_char_count > 0);
         assert!(report.injected_estimated_tokens > 0);
-        assert!(report.max_concurrent_search >= 1);
-        assert!(
-            report.max_concurrent_search <= crate::memories::MAX_CONCURRENT_ENRICHMENT_SEARCHES
-        );
-        assert!(report
-            .stages
-            .iter()
-            .any(|stage| stage.stage == "enrichment.vecdb_lock_wait"));
     }
 
     #[test]
@@ -4480,7 +4017,7 @@ mod tests {
         not(feature = "perf-tests"),
         ignore = "performance benchmark; run with --features perf-tests"
     )]
-    fn auto_enrichment_ten_thousand_file_fallback_reads_no_corpus_files() {
+    fn auto_enrichment_ten_thousand_file_lexical_reads_no_corpus_files() {
         let report = benchmark_runtime_builder()
             .enable_all()
             .build()
@@ -4490,17 +4027,16 @@ mod tests {
                 root_count: 1,
                 knowledge_file_count: 10_000,
                 query_mode: AutoEnrichmentQueryMode::Repeated,
-                vecdb_mode: AutoEnrichmentVecdbMode::Unavailable,
                 history_message_count: 4,
                 privacy_exclusion_count: 1,
             }))
-            .expect("fallback fixture runs");
+            .expect("lexical runs");
         eprintln!(
             "{}",
-            serde_json::to_string_pretty(&report).expect("fallback report serializes")
+            serde_json::to_string_pretty(&report).expect("lexical serializes")
         );
 
-        assert_eq!(report.repeated_work.fallback_files_read, 0);
+        assert_eq!(report.repeated_work.lexical_files_read, 0);
         assert_eq!(report.privacy_exclusion_violations, 0);
         assert!(report.inserted_contexts > 0);
     }
@@ -4660,10 +4196,6 @@ mod tests {
             .expect("legacy full soak invariants");
         assert_full_soak_invariants(&report.variants[1].counters, &report.variants[1].subsystems)
             .expect("optimized full soak invariants");
-        assert!(report.variants[0]
-            .subsystems
-            .vecdb_disclosure
-            .contains("local recording VecDB backend"));
         for variant in &report.variants {
             assert_eq!(
                 variant.tool_call_end_to_end_latency.sample_count,
@@ -4683,16 +4215,6 @@ mod tests {
             assert!(process.rss_peak_bytes.is_some());
             assert!(process.read_bytes_delta.is_some());
             assert!(process.write_bytes_delta.is_some());
-            assert!(
-                variant.counters.vecdb_enqueue_requests
-                    > variant.counters.vecdb_pending_unique_paths
-            );
-            assert!(variant.counters.vecdb_processed_paths > 0);
-            assert_eq!(
-                variant.vecdb_deferred_queue.enqueue_requests,
-                variant.counters.vecdb_enqueue_requests
-            );
-            assert!(variant.vecdb_deferred_queue.amplification_ratio >= 1.0);
         }
     }
 }

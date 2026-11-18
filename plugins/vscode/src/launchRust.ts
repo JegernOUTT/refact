@@ -898,26 +898,6 @@ export class RustBinaryBlob {
         });
     }
 
-    async rag_status() {
-        try {
-            let resp = await this.fetch_project_proxy("/v1/rag-status", {
-                method: "GET",
-                redirect: "follow",
-                cache: "no-cache",
-                referrer: "no-referrer",
-            }, { timeout: 5000 });
-            if (resp.status !== 200) {
-                console.log(["rag status http status", resp.status]);
-                return Promise.reject("rag status bad status");
-            }
-            let rag_status = await resp.json();
-            return rag_status;
-        } catch (e) {
-            console.log(["rag status error:", e]);
-        }
-        return false;
-    }
-
     async fetch_toolbox_config(): Promise<ToolboxConfig> {
         const response = await this.fetch_project_proxy("/v1/customization", { method: "GET" }, { timeout: 5000 });
 
@@ -1037,10 +1017,8 @@ export class RustBinaryBlob {
         const config = vscode.workspace.getConfiguration();
         return {
             ast: config.get<boolean>("refactai.ast") ?? true,
-            vecdb: config.get<boolean>("refactai.vecdb") ?? true,
             codegraph: config.get<boolean>("refactai.codegraph") ?? true,
             ast_max_files: config.get<number>("refactai.astFileLimit") ?? 35000,
-            vecdb_max_files: config.get<number>("refactai.vecdbFileLimit") ?? 15000,
             codegraph_max_files: config.get<number>("refactai.codegraphFileLimit") ?? 35000,
         };
     }

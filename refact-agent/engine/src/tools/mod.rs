@@ -81,7 +81,6 @@ mod tool_regex_search;
 pub(crate) mod tool_review;
 mod tool_rm;
 pub(crate) mod tool_schedule;
-mod tool_search;
 mod tool_search_trajectories;
 mod tool_set_goal;
 mod tool_set_trajectory_label;

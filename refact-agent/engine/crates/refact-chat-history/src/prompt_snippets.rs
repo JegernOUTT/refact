@@ -34,7 +34,6 @@ pub const AGENT_EXPLORATION_INSTRUCTIONS: &str = r#"2. **Delegate exploration to
 - `glob()` - find files by path pattern
 - `search_symbol_definition()` - trace code flow
 - `search_pattern()` - regex search inside file contents
-- `search_semantic()` - conceptual/similarity matches
 - `web()`, `web_search()` - external documentation
 - `knowledge()` - search project knowledge base
 - `search_trajectories()` - find relevant past conversations

@@ -11,9 +11,8 @@ use crate::global_context::SharedGlobalContext;
 pub struct RagStatus {
     pub ast: Option<AstStatus>,
     pub ast_alive: String,
-    pub vecdb: Option<crate::vecdb::vdb_structs::VecDbStatus>,
-    pub vecdb_alive: String,
-    pub vec_db_error: String,
+    #[serde(flatten)]
+    pub legacy_vecdb: LegacyVecdbStatus,
     pub codegraph: Option<crate::codegraph::cg_status::CodeGraphStatus>,
     pub codegraph_alive: String,
     pub codegraph_error: String,
@@ -21,53 +20,24 @@ pub struct RagStatus {
 
 const LEGACY_AST_ALIVE: &str = "turned_off";
 
-fn vecdb_rag_status_fields(
-    vecdb_requested: bool,
-    stored_vec_db_error: String,
-    status_result: std::result::Result<Option<crate::vecdb::vdb_structs::VecDbStatus>, String>,
-) -> (
-    Option<crate::vecdb::vdb_structs::VecDbStatus>,
-    String,
-    String,
-) {
-    match status_result {
-        Ok(Some(status)) => {
-            let alive = if !stored_vec_db_error.is_empty() {
-                "error"
-            } else if status.state == "starting" {
-                "starting"
-            } else {
-                "working"
-            };
-            (Some(status), alive.to_string(), stored_vec_db_error)
-        }
-        Ok(None) if !vecdb_requested => (None, "turned_off".to_string(), String::new()),
-        Ok(None) if !stored_vec_db_error.is_empty() => {
-            (None, "error".to_string(), stored_vec_db_error)
-        }
-        Ok(None) => (None, "starting".to_string(), stored_vec_db_error),
-        Err(err) => {
-            let vec_db_error = if stored_vec_db_error.is_empty() {
-                err
-            } else {
-                stored_vec_db_error
-            };
-            (None, "error".to_string(), vec_db_error)
+#[derive(Serialize, Deserialize, Debug)]
+pub struct LegacyVecdbStatus {
+    pub vecdb: Option<()>,
+    pub vecdb_alive: String,
+    pub vec_db_error: String,
+}
+
+impl Default for LegacyVecdbStatus {
+    fn default() -> Self {
+        Self {
+            vecdb: None,
+            vecdb_alive: "turned_off".into(),
+            vec_db_error: String::new(),
         }
     }
 }
 
 pub async fn get_rag_status(gcx: SharedGlobalContext) -> RagStatus {
-    let vecdb_requested = gcx.cmdline.vecdb;
-    let vec_db_module = gcx.vec_db.clone();
-    let stored_vec_db_error = gcx.vec_db_error.lock().unwrap().clone();
-
-    let (maybe_vecdb_status, vecdb_message, vec_db_error) = vecdb_rag_status_fields(
-        vecdb_requested,
-        stored_vec_db_error,
-        crate::vecdb::vdb_highlev::get_status(vec_db_module).await,
-    );
-
     let codegraph_status = crate::codegraph::cg_status::get_codegraph_status(gcx.clone()).await;
     let codegraph_error = codegraph_status.error.clone();
     let codegraph_message = codegraph_status.state.clone();
@@ -75,9 +45,7 @@ pub async fn get_rag_status(gcx: SharedGlobalContext) -> RagStatus {
     RagStatus {
         ast: None,
         ast_alive: LEGACY_AST_ALIVE.to_string(),
-        vecdb: maybe_vecdb_status,
-        vecdb_alive: vecdb_message,
-        vec_db_error,
+        legacy_vecdb: LegacyVecdbStatus::default(),
         codegraph: Some(codegraph_status),
         codegraph_alive: codegraph_message,
         codegraph_error,
@@ -143,5 +111,23 @@ pub async fn handle_v1_rag_status(
 #[cfg(test)]
 mod tests {
 
-    use crate::vecdb::vdb_structs::VecDbStatus;
+    use super::*;
+
+    #[test]
+    fn rag_status_preserves_flat_legacy_client_fields() {
+        let status = RagStatus {
+            ast: None,
+            ast_alive: LEGACY_AST_ALIVE.into(),
+            legacy_vecdb: LegacyVecdbStatus::default(),
+            codegraph: None,
+            codegraph_alive: "turned_off".into(),
+            codegraph_error: String::new(),
+        };
+        let json = serde_json::to_value(status).unwrap();
+        assert_eq!(json["vecdb"], serde_json::Value::Null);
+        assert_eq!(json["vecdb_alive"], "turned_off");
+        assert_eq!(json["vec_db_error"], "");
+        assert!(json.get("legacy_vecdb").is_none());
+        assert_eq!(json["codegraph_alive"], "turned_off");
+    }
 }

@@ -35,9 +35,6 @@ export function effectiveLspPortForStatus(port: number, status: RefactBackendCon
     return backendReadyForStatus(status) && Number.isFinite(port) && port > 0 ? port : 0;
 }
 
-export function shouldReadCapsForCompletion(haveCaps: boolean, status: RefactBackendConnectionStatus): boolean {
-    return !haveCaps && backendReadyForStatus(status);
-}
 
 export function backendStatusLabel(status: RefactBackendConnectionStatus): string {
     switch (status) {

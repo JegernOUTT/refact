@@ -18,12 +18,8 @@ use crate::daemon::supervisor::{WorkerInfo, WorkspaceBusyInfo};
 pub struct ProjectSettings {
     #[serde(default = "default_true")]
     pub ast: bool,
-    #[serde(default = "default_true")]
-    pub vecdb: bool,
     #[serde(default = "default_ast_max_files")]
     pub ast_max_files: usize,
-    #[serde(default = "default_vecdb_max_files")]
-    pub vecdb_max_files: usize,
 }
 
 fn default_true() -> bool {
@@ -32,18 +28,38 @@ fn default_true() -> bool {
 fn default_ast_max_files() -> usize {
     50000
 }
-fn default_vecdb_max_files() -> usize {
-    15000
-}
 
 impl Default for ProjectSettings {
     fn default() -> Self {
         Self {
             ast: true,
-            vecdb: true,
             ast_max_files: 50000,
-            vecdb_max_files: 15000,
         }
+    }
+}
+
+#[cfg(test)]
+mod legacy_settings_tests {
+    use super::*;
+
+    #[test]
+    fn vecdb_open_project_settings_are_accepted_but_not_persisted() {
+        let settings: ProjectSettings = serde_json::from_value(json!({
+            "ast": false,
+            "ast_max_files": 17,
+            "vecdb": true,
+            "vecdb_max_files": 999,
+        }))
+        .unwrap();
+        assert!(!settings.ast);
+        assert_eq!(settings.ast_max_files, 17);
+        assert_eq!(
+            serde_json::to_value(settings).unwrap(),
+            json!({
+                "ast": false,
+                "ast_max_files": 17,
+            })
+        );
     }
 }
 
@@ -768,9 +784,7 @@ mod tests {
 
         let settings = ProjectSettings {
             ast: false,
-            vecdb: false,
             ast_max_files: 1,
-            vecdb_max_files: 2,
         };
         assert!(reg.open_with_settings(root, Some(settings)).await.is_err());
         assert_eq!(reg.list(), original);

@@ -89,7 +89,6 @@ private fun getBinPrefix(): String {
 object Resources {
     val binPrefix: String = getBinPrefix()
 
-    const val defaultCodeCompletionUrlSuffix: String = "v1/code-completion"
     val version: String = getVersion()
     val observedVersion: String? = resolvedPluginVersion
     const val client: String = "jetbrains"

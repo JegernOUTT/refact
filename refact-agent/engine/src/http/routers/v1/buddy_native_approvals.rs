@@ -132,16 +132,40 @@ pub async fn handle_current_approvals(
         .map(|(id, session)| (id.clone(), session.clone()))
         .collect();
     loaded.sort_by(|a, b| a.0.cmp(&b.0));
-    let mut truncated = loaded.len() > 200;
-    loaded.truncate(200);
+    let filter = crate::buddy::attribution::BuddyRootFilter::new(
+        app.gcx.clone(),
+        std::path::Path::new(&root),
+    )
+    .await;
+    let mut truncated = false;
+    let mut scanned = 0usize;
     let mut sessions = Vec::new();
     for (chat_id, session) in loaded {
-        let session = session.try_lock().map_err(|_| {
+        use super::buddy_decisions::NativeRow;
+        let session = match super::buddy_decisions::next_native_row(
+            &app,
+            &filter,
+            &chat_id,
+            &session,
+            scanned,
+            200,
+            std::time::Duration::ZERO,
+        )
+        .await
+        .map_err(|_| {
             ScratchError::new(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "Native approvals are busy; refresh status".into(),
             )
-        })?;
+        })? {
+            NativeRow::Take(session) => session,
+            NativeRow::Skip => continue,
+            NativeRow::More => {
+                truncated = true;
+                break;
+            }
+        };
+        scanned += 1;
         if session.closed {
             continue;
         }
@@ -487,6 +511,61 @@ mod tests {
                 integr_config_path: None,
             });
         session
+    }
+
+    #[tokio::test]
+    async fn multi_root_approvals_exclude_foreign_sessions() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("own");
+        let foreign = temp.path().join("foreign");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&foreign).unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+            temp.path().join("cache"),
+            temp.path().join("config"),
+        )
+        .await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() =
+            vec![root.clone(), foreign.clone()];
+        let app = AppState::from_gcx(gcx).await;
+        let (tx, _) = tokio::sync::broadcast::channel(16);
+        *app.buddy.buddy.lock().await = Some(crate::buddy::actor::BuddyService::new(
+            root.clone(),
+            crate::buddy::state::default_buddy_state(),
+            crate::buddy::settings::BuddySettings::default(),
+            vec![],
+            crate::buddy::runtime_queue::RuntimeQueue::new(),
+            tx,
+            None,
+        ));
+        for (id, source) in [("own", root), ("foreign", foreign)] {
+            let mut session = paused();
+            session.chat_id = id.into();
+            session.work_project_root = Some(source);
+            session.pending_browser_message = Some(crate::chat::types::PendingBrowserMessage {
+                pending_message_id: format!("{id}-browser"),
+                content: serde_json::json!("message"),
+                attachments: vec![],
+                client_message_id: None,
+                checkpoints: vec![],
+                context_files: vec![],
+                suppress_auto_enrichment: false,
+                skill_activation_name: None,
+                skill_context_msg: None,
+            });
+            app.chat.sessions.write().await.insert(
+                id.into(),
+                std::sync::Arc::new(tokio::sync::Mutex::new(session)),
+            );
+        }
+        let snapshot = handle_current_approvals(State(app)).await.unwrap().0;
+        assert_eq!(snapshot.sessions.len(), 1);
+        assert_eq!(snapshot.sessions[0].chat_id, "own");
+        assert_eq!(snapshot.sessions[0].tools.len(), 1);
+        assert_eq!(
+            snapshot.sessions[0].browser_request_id.as_deref(),
+            Some("own-browser")
+        );
     }
 
     #[test]

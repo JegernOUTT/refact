@@ -1,8 +1,6 @@
 import os
 import socket
 
-from typing import Optional, Dict, Tuple
-
 import pylspclient
 
 from dataclasses import dataclass
@@ -42,29 +40,6 @@ class LSPCall:
             raise NotImplemented(f"language {language} is not implemented for LSPCall.load_document")
         uri = os.path.join(self._connect_options.root_uri, file_name)
         self._lsp_client.didOpen(pylspclient.lsp_structs.TextDocumentItem(uri, languageId, version, text=text))
-
-    def get_completions(
-            self,
-            file_name,
-            pos: Tuple[int, int],
-            params: Optional[Dict] = None,
-            multiline: bool = False
-    ):
-        if not params:
-            params = {
-                "max_new_tokens": 20,
-                "temperature": 0.1
-            }
-
-        uri = os.path.join(self._connect_options.root_uri, file_name)
-        cc = self._lsp_client.lsp_endpoint.call_method(
-            "refact/getCompletions",
-            textDocument=pylspclient.lsp_structs.TextDocumentIdentifier(uri),
-            position=pylspclient.lsp_structs.Position(pos[0], pos[1]),
-            parameters=params,
-            multiline=multiline,
-        )
-        return cc
 
     def connect(self):
         self._connect2lsp(self._connect_options)

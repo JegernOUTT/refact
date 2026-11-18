@@ -1,6 +1,5 @@
 wire_format: anthropic_messages
 chat_endpoint: https://api.anthropic.com/v1/messages
-supports_completion: false
 supports_cache_control: true
 
 api_key: sk-ant-...

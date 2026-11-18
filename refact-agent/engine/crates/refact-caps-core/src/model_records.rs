@@ -124,67 +124,11 @@ impl HasBaseModelRecord for ChatModelRecord {
     }
 }
 
-#[derive(Debug, Serialize, Clone, Deserialize)]
-pub struct CompletionModelRecord {
-    #[serde(flatten)]
-    pub base: BaseModelRecord,
-
-    #[serde(default = "default_completion_scratchpad")]
-    pub scratchpad: String,
-    #[serde(default = "default_completion_scratchpad_patch")]
-    pub scratchpad_patch: serde_json::Value,
-
-    #[serde(default)]
-    pub model_family: Option<CompletionModelFamily>,
-}
-
-impl Default for CompletionModelRecord {
-    fn default() -> Self {
-        Self {
-            base: default_base_model_record(),
-            scratchpad: default_completion_scratchpad(),
-            scratchpad_patch: default_completion_scratchpad_patch(),
-            model_family: None,
-        }
-    }
-}
-
 fn default_base_model_record() -> BaseModelRecord {
     BaseModelRecord {
         enabled: default_true(),
         supports_cache_control: default_true(),
         ..Default::default()
-    }
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CompletionModelFamily {
-    #[serde(rename = "qwen2.5-coder-base")]
-    Qwen2_5CoderBase,
-    #[serde(rename = "starcoder")]
-    Starcoder,
-    #[serde(rename = "deepseek-coder")]
-    DeepseekCoder,
-}
-
-pub fn default_completion_scratchpad() -> String {
-    "FIM-PSM".to_string()
-}
-
-pub fn default_completion_scratchpad_patch() -> serde_json::Value {
-    serde_json::json!({
-        "context_format": "chat",
-        "rag_ratio": 0.5
-    })
-}
-
-impl HasBaseModelRecord for CompletionModelRecord {
-    fn base(&self) -> &BaseModelRecord {
-        &self.base
-    }
-
-    fn base_mut(&mut self) -> &mut BaseModelRecord {
-        &mut self.base
     }
 }
 
@@ -215,12 +159,6 @@ pub fn normalize_string<'de, D: serde::Deserializer<'de>>(
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq, Eq)]
 pub struct DefaultModels {
-    #[serde(
-        default,
-        alias = "code_completion_default_model",
-        alias = "completion_model"
-    )]
-    pub completion_default_model: String,
     #[serde(default, alias = "code_chat_default_model", alias = "chat_model")]
     pub chat_default_model: String,
     #[serde(default)]
@@ -251,10 +189,6 @@ impl DefaultModels {
     }
 
     pub fn apply_override(&mut self, other: &DefaultModels, provider_name: Option<&str>) {
-        if !other.completion_default_model.is_empty() {
-            self.completion_default_model =
-                Self::qualify_model(&other.completion_default_model, provider_name);
-        }
         if !other.chat_default_model.is_empty() {
             self.chat_default_model = Self::qualify_model(&other.chat_default_model, provider_name);
         }
@@ -323,36 +257,6 @@ mod tests {
         assert_eq!(
             adaptive.reasoning_type_string().as_deref(),
             Some("anthropic_effort")
-        );
-    }
-
-    #[test]
-    fn completion_endpoint_style_is_independent_from_scratchpad_style() {
-        let completion: CompletionModelRecord = serde_json::from_value(serde_json::json!({
-            "completion_endpoint_style": "openai_chat_completions",
-            "scratchpad": "FIM-SPM",
-            "scratchpad_patch": {"context_format": "plain"}
-        }))
-        .unwrap();
-
-        assert_eq!(
-            completion.base.completion_endpoint_style,
-            "openai_chat_completions"
-        );
-        assert_eq!(completion.scratchpad, "FIM-SPM");
-        assert_eq!(
-            completion
-                .scratchpad_patch
-                .get("context_format")
-                .and_then(|v| v.as_str()),
-            Some("plain")
-        );
-        assert_eq!(
-            completion
-                .base
-                .effective_completion_endpoint_style()
-                .unwrap(),
-            refact_core::llm_types::CompletionEndpointStyle::OpenaiChatCompletions
         );
     }
 }

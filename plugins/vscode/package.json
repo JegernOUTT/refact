@@ -1,7 +1,7 @@
 {
 	"name": "codify",
 	"displayName": "Refact – Open-Source AI Agent, Code Generator & Chat for JavaScript, Python, TypeScript, Java, PHP, Go, and more.",
-	"description": "Refact.ai is the #1 free open-source AI Agent on the SWE-bench verified leaderboard. It autonomously handles software engineering tasks end to end. It understands large and complex codebases, adapts to your workflow, and connects with the tools developers actually use (including MCP). It tracks your cursor to provide instant help and transparently shows every step the Agent takes. As your AI copilot, it handles code generation, testing, review, refactoring, and more.",
+	"description": "Refact.ai is the #1 free open-source AI Agent on the SWE-bench verified leaderboard. It autonomously handles software engineering tasks end to end. It understands large and complex codebases, adapts to your workflow, and connects with the tools developers actually use (including MCP). It transparently shows every step the Agent takes. As your AI copilot, it handles code generation, testing, review, refactoring, and more.",
 	"publisher": "smallcloud",
 	"icon": "logo-small.png",
 	"galleryBanner": {
@@ -66,13 +66,10 @@
 		"refact",
 		"refact.ai",
 		"refactoring",
-		"copilot",
-		"tabnine",
 		"javascript",
 		"python",
 		"typescript",
 		"php",
-		"autocomplete",
 		"ruby",
 		"java",
 		"go",
@@ -99,7 +96,6 @@
 		"swift",
 		"objective-c",
 		"ai",
-		"method completion",
 		"intellicode",
 		"intellisense",
 		"snippets",
@@ -109,14 +105,12 @@
 		"jupyter",
 		"chat",
 		"chatgpt",
-		"code completion",
 		"documentation",
 		"refactor",
 		"llm",
 		"test",
 		"security",
 		"coding",
-		"copilot",
 		"cursor"
 	],
 	"activationEvents": [
@@ -140,18 +134,6 @@
 					"default": false,
 					"order": 3
 				},
-				"refactai.completionMaxTokens": {
-					"type": "number",
-					"markdownDescription": "Maximum number of tokens to generate for code completion. Leave 0 if not sure.",
-					"default": 0,
-					"order": 3
-				},
-				"refactai.codeCompletionModel": {
-					"type": "string",
-					"description": "Which model to use, for example \"starcoder2/3b\". Leave blank if not sure.",
-					"default": "",
-					"order": 4
-				},
 				"refactai.codeLens": {
 					"type": "boolean",
 					"description": "Enable inline annotations that provide chat actions directly within the code editor.",
@@ -165,15 +147,9 @@
 					"default": false,
 					"order": 6
 				},
-				"refactai.pauseCompletion": {
-					"type": "boolean",
-					"description": "Pause automatic code suggestions. Manual activation still works.",
-					"default": false,
-					"order": 7
-				},
 				"refactai.ast": {
 					"type": "boolean",
-					"markdownDescription": "Enable context-aware code completion and chat. This adds definition() and references() functions for chat models, plus @definition and @references commands for adding context manually.",
+					"markdownDescription": "Enable context-aware chat. This adds definition() and references() functions for chat models, plus @definition and @references commands for adding context manually.",
 					"default": true,
 					"order": 8
 				},
@@ -194,18 +170,6 @@
 					"description": "Limit the number of files for CodeGraph to process, to avoid memory issues. Increase if you have a large project and sufficient memory.",
 					"default": 35000,
 					"order": 11
-				},
-				"refactai.vecdb": {
-					"type": "boolean",
-					"markdownDescription": "Enable vector database. This adds semantic search over your codebase and the @workspace command for adding context manually.",
-					"default": true,
-					"order": 12
-				},
-				"refactai.vecdbFileLimit": {
-					"type": "number",
-					"description": "Limit the number of files for VecDB to process. Increase if you have a lot of files.",
-					"default": 15000,
-					"order": 13
 				},
 				"refactai.xDebug": {
 					"type": "number|undefined",
@@ -279,11 +243,6 @@
 				"category": "Refact.ai"
 			},
 			{
-				"command": "refactaicmd.completionManual",
-				"title": "Manual Completion Trigger",
-				"category": "Refact.ai"
-			},
-			{
 				"command": "refactaicmd.callChat",
 				"title": "Chat",
 				"key": "F1",
@@ -325,10 +284,6 @@
 			]
 		},
 		"keybindings": [
-			{
-				"command": "refactaicmd.completionManual",
-				"key": "alt+space"
-			},
 			{
 				"command": "refactaicmd.esc",
 				"key": "escape",

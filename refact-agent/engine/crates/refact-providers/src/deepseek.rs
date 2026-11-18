@@ -104,16 +104,13 @@ available:
             readonly: false,
             wire_format: self.default_wire_format(),
             chat_endpoint: "https://api.deepseek.com/chat/completions".to_string(),
-            completion_endpoint: "https://api.deepseek.com/completions".to_string(),
-            embedding_endpoint: String::new(),
+
             api_key,
             auth_token: String::new(),
             tokenizer_api_key: String::new(),
             extra_headers: HashMap::new(),
             supports_cache_control: true,
             chat_models: Vec::new(),
-            completion_models: Vec::new(),
-            embedding_model: None,
         })
     }
 

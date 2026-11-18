@@ -46,11 +46,7 @@ fn identity(root: &str, chat_id: &str, created_at: &str, kind: &str, request: &s
 pub async fn handle_current_attention(
     State(app): State<AppState>,
 ) -> Result<axum::Json<AttentionSnapshot>, ScratchError> {
-    let root = crate::buddy::companion::project_root(app.gcx.clone())
-        .await
-        .map_err(|error| ScratchError::new(hyper::StatusCode::SERVICE_UNAVAILABLE, error))?
-        .to_string_lossy()
-        .into_owned();
+    let root = super::buddy_decisions::decision_root(&app).await?;
     let mut loaded: Vec<_> = app
         .chat
         .sessions
@@ -65,21 +61,30 @@ pub async fn handle_current_attention(
     let agents = app.agents.list_all().await;
     let mut rows = Vec::new();
     let mut busy_chat_ids = Vec::new();
+    let filter = crate::buddy::attribution::BuddyRootFilter::new(
+        app.gcx.clone(),
+        std::path::Path::new(&root),
+    )
+    .await;
     for (chat_id, session) in loaded {
-        let Ok(session) = session.try_lock() else {
-            busy_chat_ids.push(chat_id);
-            continue;
+        use crate::buddy::attribution::SessionClaim;
+        let session = match filter
+            .claim(
+                &app.chat.sessions,
+                &chat_id,
+                &session,
+                std::time::Duration::ZERO,
+            )
+            .await
+        {
+            SessionClaim::Own(session) => session,
+            SessionClaim::NotOwn => continue,
+            SessionClaim::Busy => {
+                busy_chat_ids.push(chat_id);
+                continue;
+            }
         };
         if session.closed {
-            continue;
-        }
-        let Some(project) = crate::coordination::scope::session_source_root(&session) else {
-            busy_chat_ids.push(chat_id);
-            continue;
-        };
-        if crate::coordination::roots::project_identity(&project)
-            != crate::coordination::roots::project_identity(std::path::Path::new(&root))
-        {
             continue;
         }
         let created = session.created_at.to_string();
@@ -263,15 +268,11 @@ pub async fn handle_current_attention(
     for agent in &agents {
         if !agent.status.is_terminal() && !loaded_ids.contains(&agent.parent_chat_id) {
             match app.agent_executions.saved_scope(&agent.agent_id) {
-                Some(scope)
-                    if crate::coordination::roots::project_identity(&scope)
-                        == crate::coordination::roots::project_identity(std::path::Path::new(
-                            &root,
-                        )) =>
-                {
-                    parents.insert(agent.parent_chat_id.clone());
+                Some(scope) => {
+                    if filter.attributes(Some(&scope)).await {
+                        parents.insert(agent.parent_chat_id.clone());
+                    }
                 }
-                Some(_) => {}
                 None => busy_chat_ids.push(agent.parent_chat_id.clone()),
             }
         }

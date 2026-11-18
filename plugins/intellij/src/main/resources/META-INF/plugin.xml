@@ -12,7 +12,7 @@
 </p>
 <p>
     Configure at least one provider in Provider Setup, choose default models, then use in-IDE chat,
-    code completion, AI toolbox actions, and autonomous agent workflows directly from JetBrains IDEs.
+    AI toolbox actions, and autonomous agent workflows directly from JetBrains IDEs.
 </p>
 <ul>
     <li>Connect BYOK providers such as OpenAI, Anthropic, Gemini, DeepSeek, OpenRouter, Groq, and xAI.</li>
@@ -26,7 +26,7 @@
 
     <change-notes><![CDATA[
 <ul>
-    <li>More efficient and faster code suggestion system</li>
+    <li>Removed inline code completion and the vector database (VecDB); chat context uses AST and CodeGraph</li>
     <li>Enhanced performance for large codebases and extended AI sessions</li>
     <li>New "Xperimental" settings section to access features in Beta</li>
     <li>Stability & UI/UX improvements</li>
@@ -64,8 +64,8 @@
         <errorHandler implementation="com.smallcloud.refactai.PluginErrorReportSubmitter"/>
 
         <actionPromoter implementation="com.smallcloud.refactai.listeners.AcceptActionsPromoter"/>
+        <actionPromoter implementation="com.smallcloud.refactai.listeners.CancelActionsPromoter"/>
         <actionPromoter implementation="com.smallcloud.refactai.panes.sharedchat.ChatPaneInvokeActionPromoter"/>
-        <inline.completion.provider implementation="com.smallcloud.refactai.codecompletion.RefactAICompletionProvider" order="first"/>
         <toolWindow id="Refact" anchor="right"
                     canCloseContents="true"
                     factoryClass="com.smallcloud.refactai.panes.RefactAIToolboxPaneFactory"/>
@@ -86,20 +86,16 @@
                 class="com.smallcloud.refactai.lsp.NativeHostReleaseAction"
                 text="Refact: Install or Reconcile Exact Host Release"
                 description="Confirm an issuing-user grant and schedule a verified local plugin package for manual restart"/>
-        <!-- overrides="true" replaces the platform action in place; it already sits in
-             the InlineCompletion group (LangActions.xml), so no add-to-group here —
-             re-adding it trips "Cannot add an action twice" since 2026.2. -->
         <action class="com.smallcloud.refactai.listeners.TabPressedAction"
-                id="InsertInlineCompletionAction"
-                text="Accept Inline Completion"
-                overrides="true"
-                description="Refact AI Accept Inline Completion">
+                id="TabPressedAction"
+                text="Approve Refact Diff"
+                description="Refact AI: approve the diff preview shown in the editor">
             <keyboard-shortcut first-keystroke="TAB" keymap="$default"/>
         </action>
         <action class="com.smallcloud.refactai.listeners.CancelPressedAction"
                 id="CancelPressedAction"
-                text="Cancel Inline Completion"
-                description="Refact AI Cancel Inline Completion">
+                text="Reject Refact Diff"
+                description="Refact AI: reject the diff preview shown in the editor">
             <keyboard-shortcut first-keystroke="ESCAPE" keymap="$default"/>
         </action><!--        For display shortcut on the pane, action must be with mask "Activate${id.filterNot { it.isWhitespace() }}ToolWindow"-->
         <action id="ActivateRefactChatToolWindow"

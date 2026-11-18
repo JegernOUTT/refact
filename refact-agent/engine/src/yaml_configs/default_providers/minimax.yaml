@@ -1,6 +1,5 @@
 wire_format: anthropic_messages
 chat_endpoint: https://api.minimax.io/anthropic/v1/messages
-supports_completion: false
 supports_cache_control: false
 
 api_key: "$MINIMAX_API_KEY"

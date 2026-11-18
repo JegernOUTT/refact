@@ -525,11 +525,16 @@ impl std::ops::DerefMut for SessionStoreWrite<'_> {
 
 impl Drop for SessionStoreWrite<'_> {
     fn drop(&mut self) {
-        for session in self.0.values() {
+        for (id, session) in self.0.iter() {
             if let Ok(mut session) = session.try_lock() {
                 session.work_catalog_publisher = Arc::downgrade(&self.1);
+                self.1.record_source_root(
+                    id,
+                    crate::coordination::scope::session_source_root(&session),
+                );
             }
         }
+        self.1.retain_source_roots(|id| self.0.contains_key(id));
         self.1.invalidate();
     }
 }
@@ -1243,6 +1248,10 @@ impl ChatSession {
         if signature != self.work_catalog_signature {
             self.work_catalog_signature = signature;
             if let Some(publisher) = self.work_catalog_publisher.upgrade() {
+                publisher.record_source_root(
+                    &self.chat_id,
+                    crate::coordination::scope::session_source_root(self),
+                );
                 publisher.publish(&self.chat_id);
             }
         }

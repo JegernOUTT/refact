@@ -1641,16 +1641,13 @@ available:
             readonly: false,
             wire_format: self.default_wire_format(),
             chat_endpoint: format!("{base}/v1/chat/completions"),
-            completion_endpoint: format!("{base}/v1/completions"),
-            embedding_endpoint: format!("{base}/v1/embeddings"),
+
             api_key: self.bearer_from_static(),
             auth_token: String::new(),
             tokenizer_api_key: String::new(),
             extra_headers: self.extra_headers.clone(),
             supports_cache_control: self.supports_cache_control,
             chat_models: Vec::new(),
-            completion_models: Vec::new(),
-            embedding_model: None,
         })
     }
 
@@ -2039,11 +2036,6 @@ mod tests {
             runtime.chat_endpoint,
             "http://host:4000/v1/chat/completions"
         );
-        assert_eq!(
-            runtime.completion_endpoint,
-            "http://host:4000/v1/completions"
-        );
-        assert_eq!(runtime.embedding_endpoint, "http://host:4000/v1/embeddings");
     }
 
     #[test]

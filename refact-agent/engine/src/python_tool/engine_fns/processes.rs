@@ -15,7 +15,6 @@ const READ_ONLY_TOOLS: &[&str] = &[
     "tree",
     "glob",
     "search_pattern",
-    "search_semantic",
     "search_symbol_definition",
     "search_trajectories",
     "knowledge",

@@ -1,4 +1,4 @@
-import { useCallback, useMemo, type FC } from "react";
+import { useMemo, type FC } from "react";
 import classNames from "classnames";
 import { MoreVertical } from "lucide-react";
 
@@ -22,8 +22,6 @@ import type { ModelType } from "../../../../services/refact";
 import type { UiModel } from "./utils/groupModelsWithPricing";
 
 import styles from "./ModelCard.module.css";
-import { useAppSelector, useEventsBusForIDE } from "../../../../hooks";
-import { selectHost } from "../../../../features/Config/configSlice";
 
 export type ModelCardProps = {
   model: UiModel;
@@ -59,14 +57,6 @@ export const ModelCard: FC<ModelCardProps> = ({
     providerName,
   });
 
-  const { setCodeCompletionModel } = useEventsBusForIDE();
-  const host = useAppSelector(selectHost);
-
-  const handleSetCompletionModelForIDE = useCallback(() => {
-    const formattedModelName = `${providerName}/${model.name}`;
-    setCodeCompletionModel(formattedModelName);
-  }, [model, providerName, setCodeCompletionModel]);
-
   const dropdownOptions = useMemo(() => {
     const shouldOptionsBeDisabled = isReadonlyProvider || isSavingModel;
     return [
@@ -90,26 +80,18 @@ export const ModelCard: FC<ModelCardProps> = ({
         onClick: () => void handleRemoveModel({ model }),
         visible: removable,
       },
-      {
-        label: "Use as completion model in IDE",
-        onClick: handleSetCompletionModelForIDE,
-        visible: modelType === "completion" && host !== "web",
-      },
     ];
   }, [
     isReadonlyProvider,
     isSavingModel,
-    host,
     enabled,
     removable,
     user_configured,
     model,
-    modelType,
     openDialogSafely,
     handleToggleModelEnabledState,
     handleResetModel,
     handleRemoveModel,
-    handleSetCompletionModelForIDE,
   ]);
 
   const visibleDropdownOptions = useMemo(() => {

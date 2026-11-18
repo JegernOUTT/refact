@@ -1,4 +1,4 @@
-schema_version: 35
+schema_version: 36
 id: design
 title: Design
 description: Evidence-driven UI implementation using the live design system and browser measurements
@@ -114,7 +114,6 @@ tools:
   - glob
   - search_pattern
   - search_symbol_definition
-  - search_semantic
   - apply_patch
   - create_textdoc
   - update_textdoc

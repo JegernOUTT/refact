@@ -24,8 +24,6 @@ async function seededStore() {
       { providerName: "claude_code" },
       {
         chat_models: [],
-        completion_models: [],
-        embedding_model: null,
       },
     ),
   );

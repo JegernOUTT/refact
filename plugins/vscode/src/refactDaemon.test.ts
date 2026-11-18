@@ -65,7 +65,6 @@ import {
 import {
     backendConfigForStatus,
     effectiveLspPortForStatus,
-    shouldReadCapsForCompletion,
     WorkspaceRequiredError,
 } from "./backendStatus";
 import {
@@ -254,9 +253,6 @@ function runBackendStatusTests() {
     });
     assert.strictEqual(effectiveLspPortForStatus(8001, "connecting"), 0);
     assert.strictEqual(effectiveLspPortForStatus(8001, "ready"), 8001);
-    assert.strictEqual(shouldReadCapsForCompletion(false, "connecting"), false);
-    assert.strictEqual(shouldReadCapsForCompletion(false, "ready"), true);
-    assert.strictEqual(shouldReadCapsForCompletion(true, "ready"), false);
 }
 
 function runLaunchRustLifecycleTests() {

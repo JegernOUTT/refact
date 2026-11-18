@@ -361,88 +361,6 @@ async function json_result<T>(response: fetchH2.Response, url: string): Promise<
 }
 
 
-export function fetch_code_completion(
-    cancelToken: vscode.CancellationToken,
-    sources: { [key: string]: string },
-    multiline: boolean,
-    cursor_file: string,
-    cursor_line: number,
-    cursor_character: number,
-    max_new_tokens: number,
-    no_cache: boolean,
-    temperature: number,
-    // api_fields: estate.ApiFields,
-): Promise<fetchH2.Response>
-{
-    const endpoint = "/v1/code-completion";
-    let url = rust_url(endpoint);
-    if (!url) {
-        console.log(["fetch_code_completion: No rust binary working"]);
-        return Promise.reject("No rust binary working");
-    }
-    let model_name = vscode.workspace.getConfiguration().get<string>("refactai.codeCompletionModel") || "";
-    let client_version = vscode.extensions.getExtension("smallcloud.codify")!.packageJSON.version;
-    // api_fields.scope = "code-completion";
-    // api_fields.url = url;
-    // api_fields.model = model;
-    // api_fields.sources = sources;
-    // api_fields.intent = "";
-    // api_fields.function = "completion";
-    // api_fields.cursor_file = cursor_file;
-    // api_fields.cursor_pos0 = -1;
-    // api_fields.cursor_pos1 = -1;
-    // api_fields.ts_req = Date.now();
-    let use_ast = vscode.workspace.getConfiguration().get<boolean>("refactai.ast");
-
-    const post = JSON.stringify({
-        "model": model_name,
-        "inputs": {
-            "sources": sources,
-            "cursor": {
-                "file": cursor_file,
-                "line": cursor_line,
-                "character": cursor_character,
-            },
-            "multiline": multiline,
-        },
-        "parameters": {
-            "temperature": temperature,
-            "max_new_tokens": max_new_tokens,
-        },
-        "no_cache": no_cache,
-        "use_ast": use_ast,
-        "client": `vscode-${client_version}`,
-    });
-    const headers = {
-        "Content-Type": "application/json",
-    };
-    const requestInit: ProjectProxyRequestInit = {
-        method: "POST",
-        headers: headers,
-        body: post,
-        redirect: "follow",
-        cache: "no-cache",
-        referrer: "no-referrer",
-    };
-    let init: Partial<fetchH2.FetchInit> = {
-        timeout: 20*1000,
-    };
-    if (cancelToken) {
-        let abort = new fetchH2.AbortController();
-        cancelToken.onCancellationRequested(async () => {
-            console.log(["API fetch cancelled"]);
-            abort.abort();
-
-            global.side_panel?.chat?.handleStreamEnd();
-
-            await fetchH2.disconnectAll();
-        });
-        init.signal = abort.signal;
-    }
-    return fetch_project_proxy(endpoint, requestInit, init);
-}
-
-
 export function fetch_chat_promise(
     cancelToken: vscode.CancellationToken,
     scope: string,
@@ -614,18 +532,6 @@ export interface RagStatus {
         ast_max_files_hit: boolean;
     } | null;
     ast_alive: string | null;
-    vecdb: {
-        files_unprocessed: number;
-        files_total: number;
-        requests_made_since_start: number;
-        vectors_made_since_start: number;
-        db_size: number;
-        db_cache_size: number;
-        state: string;
-        vecdb_max_files_hit: boolean;
-    } | null;
-    vecdb_alive: string | null;
-    vec_db_error: string;
     codegraph: CodeGraphStatus | null;
     codegraph_alive: string | null;
     codegraph_error: string;
@@ -687,12 +593,6 @@ export function maybe_show_rag_status(statusbar: statusBar.StatusBarMenu = globa
                 return;
             }
 
-            if (res.vecdb && res.vecdb.vecdb_max_files_hit) {
-                statusbar.vecdb_status_limit_reached();
-                ragstat_timeout = setTimeout(() => maybe_show_rag_status(statusbar), 5000);
-                return;
-            }
-
             if (res.codegraph && codegraph_max_files_hit(res.codegraph)) {
                 statusbar.codegraph_status_limit_reached();
                 ragstat_timeout = setTimeout(() => maybe_show_rag_status(statusbar), 5000);
@@ -700,27 +600,18 @@ export function maybe_show_rag_status(statusbar: statusBar.StatusBarMenu = globa
             }
 
             statusbar.ast_limit_hit = false;
-            statusbar.vecdb_limit_hit = false;
             statusbar.codegraph_limit_hit = false;
-            statusbar.vecdb_warning = res.vec_db_error;
             statusbar.codegraph_warning = res.codegraph_error || res.codegraph?.error || "";
-
-            if (res.vec_db_error !== '') {
-                statusbar.vecdb_error(res.vec_db_error);
-            }
 
             if (statusbar.codegraph_warning !== '') {
                 statusbar.codegraph_error(statusbar.codegraph_warning);
             }
 
             if ((res.ast && ["starting", "parsing", "indexing"].includes(res.ast.state)) ||
-                (res.vecdb && ["starting", "parsing", "cooldown"].includes(res.vecdb.state)) ||
                 (res.codegraph && ["indexing"].includes(res.codegraph.state)))
             {
-                // console.log("ast or vecdb is still indexing");
                 ragstat_timeout = setTimeout(() => maybe_show_rag_status(statusbar), 700);
             } else {
-                // console.log("ast and vecdb status complete, slowdown poll");
                 statusbar.statusbar_spinner(false);
                 ragstat_timeout = setTimeout(() => maybe_show_rag_status(statusbar), 5000);
             }

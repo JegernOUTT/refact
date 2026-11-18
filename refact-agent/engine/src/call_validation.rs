@@ -1,52 +1,17 @@
 use serde::{Deserialize, Serialize};
 use std::hash::Hash;
 use axum::http::StatusCode;
-use ropey::Rope;
 
 use crate::custom_error::ScratchError;
 use crate::llm::params::CacheControl;
 use crate::worktrees::types::WorktreeMeta;
 
 pub use refact_core::chat_types::{
-    Checkpoint, CodeCompletionInputs, CodeCompletionPost, ContextEnum, ContextFile, ChatContent,
-    ChatMessage, ChatToolCall, ChatToolFunction, ChatUsage, CursorPosition, MeteringUsd,
-    MultimodalElement, OutputFilter, PostprocessSettings, ReasoningEffort, SamplingParameters,
-    SearchResult, deserialize_path, format_search_results, serialize_path, normalize_mode_id,
-    canonical_mode_id,
+    Checkpoint, ContextEnum, ContextFile, ChatContent, ChatMessage, ChatToolCall, ChatToolFunction,
+    ChatUsage, MeteringUsd, MultimodalElement, OutputFilter, PostprocessSettings, ReasoningEffort,
+    SamplingParameters, SearchResult, deserialize_path, format_search_results, serialize_path,
+    normalize_mode_id, canonical_mode_id,
 };
-
-pub fn code_completion_post_validate(
-    code_completion_post: &CodeCompletionPost,
-) -> axum::response::Result<(), ScratchError> {
-    let pos = &code_completion_post.inputs.cursor;
-    let Some(source) = code_completion_post
-        .inputs
-        .sources
-        .get(&code_completion_post.inputs.cursor.file)
-    else {
-        return Err(ScratchError::new(
-            StatusCode::BAD_REQUEST,
-            "Invalid post: cursor in a file that is not a source".to_string(),
-        ));
-    };
-    let text = Rope::from_str(source);
-    let line_number = pos.line as usize;
-    if line_number >= text.len_lines() {
-        return Err(ScratchError::new(
-            StatusCode::BAD_REQUEST,
-            "Invalid post: line number exceeds lines in file".to_string(),
-        ));
-    }
-    let line = text.line(line_number);
-    let col = pos.character as usize;
-    if col > line.len_chars() {
-        return Err(ScratchError::new(
-            StatusCode::BAD_REQUEST,
-            "Invalid post: char number exceeds chars in line".to_string(),
-        ));
-    }
-    Ok(())
-}
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -169,128 +134,7 @@ pub struct DiffChunk {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
     use super::*;
-
-    #[test]
-    fn test_valid_post1() {
-        let post = CodeCompletionPost {
-            inputs: CodeCompletionInputs {
-                sources: HashMap::from_iter([(
-                    "hello.py".to_string(),
-                    "def hello_world():".to_string(),
-                )]),
-                cursor: CursorPosition {
-                    file: "hello.py".to_string(),
-                    line: 0,
-                    character: 18,
-                },
-                multiline: true,
-            },
-            parameters: SamplingParameters {
-                max_new_tokens: 20,
-                temperature: Some(0.1),
-                ..Default::default()
-            },
-            model: "".to_string(),
-            stream: false,
-            no_cache: false,
-            use_ast: true,
-            use_vecdb: true,
-            rag_tokens_n: 0,
-        };
-        assert!(code_completion_post_validate(&post).is_ok());
-    }
-
-    #[test]
-    fn test_valid_post2() {
-        let post = CodeCompletionPost {
-            inputs: CodeCompletionInputs {
-                sources: HashMap::from_iter([(
-                    "hello.py".to_string(),
-                    "你好世界Ωßåß🤖".to_string(),
-                )]),
-                cursor: CursorPosition {
-                    file: "hello.py".to_string(),
-                    line: 0,
-                    character: 10,
-                },
-                multiline: true,
-            },
-            parameters: SamplingParameters {
-                max_new_tokens: 20,
-                temperature: Some(0.1),
-                ..Default::default()
-            },
-            model: "".to_string(),
-            stream: false,
-            no_cache: false,
-            use_ast: true,
-            use_vecdb: true,
-            rag_tokens_n: 0,
-        };
-        assert!(code_completion_post_validate(&post).is_ok());
-    }
-
-    #[test]
-    fn test_invalid_post_incorrect_line() {
-        let post = CodeCompletionPost {
-            inputs: CodeCompletionInputs {
-                sources: HashMap::from_iter([(
-                    "hello.py".to_string(),
-                    "def hello_world():".to_string(),
-                )]),
-                cursor: CursorPosition {
-                    file: "hello.py".to_string(),
-                    line: 2,
-                    character: 18,
-                },
-                multiline: true,
-            },
-            parameters: SamplingParameters {
-                max_new_tokens: 20,
-                temperature: Some(0.1),
-                ..Default::default()
-            },
-            model: "".to_string(),
-            stream: false,
-            no_cache: false,
-            use_ast: true,
-            use_vecdb: true,
-            rag_tokens_n: 0,
-        };
-        assert!(code_completion_post_validate(&post).is_err());
-    }
-
-    #[test]
-    fn test_invalid_post_incorrect_col() {
-        let post = CodeCompletionPost {
-            inputs: CodeCompletionInputs {
-                sources: HashMap::from_iter([(
-                    "hello.py".to_string(),
-                    "def hello_world():".to_string(),
-                )]),
-                cursor: CursorPosition {
-                    file: "hello.py".to_string(),
-                    line: 0,
-                    character: 80,
-                },
-                multiline: true,
-            },
-            parameters: SamplingParameters {
-                max_new_tokens: 20,
-                temperature: Some(0.1),
-                ..Default::default()
-            },
-            model: "".to_string(),
-            stream: false,
-            no_cache: false,
-            use_ast: true,
-            use_vecdb: true,
-            rag_tokens_n: 0,
-        };
-        assert!(code_completion_post_validate(&post).is_err());
-    }
 
     fn make_tool_fn(arguments: &str) -> ChatToolFunction {
         ChatToolFunction {

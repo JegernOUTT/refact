@@ -3,8 +3,6 @@ package com.smallcloud.refactai.io
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.util.messages.MessageBus
-import com.smallcloud.refactai.struct.SMCRequest
-import com.smallcloud.refactai.struct.SMCRequestBody
 import com.smallcloud.refactai.settings.AppSettingsState.Companion.instance as AppSettingsState
 
 class InferenceGlobalContext : Disposable {
@@ -67,33 +65,6 @@ class InferenceGlobalContext : Disposable {
             AppSettingsState.stagingVersion = newStr
         }
 
-    var lastAutoModel: String? = null
-        set(newModel) {
-            if (newModel == field) return
-            field = newModel
-            messageBus
-                    .syncPublisher(InferenceGlobalContextChangedNotifier.TOPIC)
-                    .lastAutoModelChanged(newModel)
-        }
-
-    var model: String?
-        get() = AppSettingsState.model
-        set(newModel) {
-            if (newModel == model) return
-            messageBus
-                    .syncPublisher(InferenceGlobalContextChangedNotifier.TOPIC)
-                    .modelChanged(newModel)
-        }
-
-    var useAutoCompletion: Boolean
-        get() = AppSettingsState.useAutoCompletion
-        set(newValue) {
-            if (newValue == useAutoCompletion) return
-            messageBus
-                    .syncPublisher(InferenceGlobalContextChangedNotifier.TOPIC)
-                    .useAutoCompletionModeChanged(newValue)
-        }
-
     var astIsEnabled: Boolean
         get() = AppSettingsState.astIsEnabled
         set(newValue) {
@@ -110,24 +81,6 @@ class InferenceGlobalContext : Disposable {
             messageBus
                   .syncPublisher(InferenceGlobalContextChangedNotifier.TOPIC)
                   .astFileLimitChanged(newValue)
-        }
-
-    var vecdbIsEnabled: Boolean
-        get() = AppSettingsState.vecdbIsEnabled
-        set(newValue) {
-            if (newValue == vecdbIsEnabled) return
-            messageBus
-                .syncPublisher(InferenceGlobalContextChangedNotifier.TOPIC)
-                .vecdbFlagChanged(newValue)
-        }
-
-    var vecdbFileLimit: Int
-        get() { return AppSettingsState.vecdbFileLimit }
-        set(newValue) {
-            if (newValue == vecdbFileLimit) return
-            messageBus
-                .syncPublisher(InferenceGlobalContextChangedNotifier.TOPIC)
-                .vecdbFileLimitChanged(newValue)
         }
 
     var codegraphIsEnabled: Boolean
@@ -155,15 +108,6 @@ class InferenceGlobalContext : Disposable {
             messageBus
                .syncPublisher(InferenceGlobalContextChangedNotifier.TOPIC)
                .insecureSSLChanged(newValue)
-        }
-
-    var completionMaxTokens: Int
-        get() { return AppSettingsState.completionMaxTokens }
-        set(newValue) {
-            if (newValue == completionMaxTokens) return
-            messageBus
-              .syncPublisher(InferenceGlobalContextChangedNotifier.TOPIC)
-              .completionMaxTokensChanged(newValue)
         }
 
     var experimentalLspFlagEnabled: Boolean
@@ -203,10 +147,6 @@ class InferenceGlobalContext : Disposable {
                 .syncPublisher(InferenceGlobalContextChangedNotifier.TOPIC)
                 .xDebugLSPPortChanged(newValue)
         }
-
-    fun makeRequest(requestData: SMCRequestBody): SMCRequest? {
-        return SMCRequest(requestData)
-    }
 
     override fun dispose() {}
 

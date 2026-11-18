@@ -876,7 +876,7 @@ async fn remap_context_file_for_execution_scope_impl(
                         check_file_privacy_for_send(gcx.clone(), &worktree_path).await?;
                     }
                     let notice = format!(
-                        "⚠️ AST/VecDB result was mapped from source checkout to active worktree: {} -> {}",
+                        "⚠️ Indexed result was mapped from source checkout to active worktree: {} -> {}",
                         normalized_path.display(),
                         worktree_path.display()
                     );
@@ -979,93 +979,10 @@ mod worktree_scope_read_tools {
 
     use crate::tools::tools_description::Tool;
     use crate::worktrees::types::WorktreeMeta;
-    use async_trait::async_trait;
     use serde_json::Value;
     use std::collections::HashMap;
     use std::fs;
     use tokio::sync::Mutex as AMutex;
-
-    struct MockVecdb {
-        records: Vec<crate::vecdb::vdb_structs::VecdbRecord>,
-    }
-
-    #[async_trait]
-    impl crate::vecdb::vdb_structs::VecdbSearch for MockVecdb {
-        async fn vecdb_search(
-            &self,
-            query: String,
-            _top_n: usize,
-            _filter_mb: Option<String>,
-        ) -> Result<crate::vecdb::vdb_structs::SearchResult, String> {
-            Ok(crate::vecdb::vdb_structs::SearchResult {
-                query_text: query,
-                results: self.records.clone(),
-            })
-        }
-
-        async fn get_status(&self) -> Result<crate::vecdb::vdb_structs::VecDbStatus, String> {
-            Ok(crate::vecdb::vdb_structs::VecDbStatus {
-                files_unprocessed: 0,
-                files_total: self.records.len(),
-                requests_made_since_start: 0,
-                vectors_made_since_start: 0,
-                db_size: 0,
-                db_cache_size: 0,
-                state: "done".to_string(),
-                queue_additions: false,
-                vecdb_max_files_hit: false,
-                vecdb_errors: Default::default(),
-                cache_writes_failed: 0,
-                vectors_missing_from_cache: 0,
-            })
-        }
-
-        async fn remove_file(&self, _file_path: &PathBuf) -> Result<(), String> {
-            Ok(())
-        }
-
-        async fn vectorizer_enqueue_files(
-            &self,
-            _documents: &[String],
-            _process_immediately: bool,
-            _roots: refact_core::memory_plane::MemoryPlaneRoots,
-        ) {
-        }
-
-        fn current_constants(&self) -> (crate::vecdb::vdb_structs::EmbeddingModelConfig, usize) {
-            (
-                crate::vecdb::vdb_structs::EmbeddingModelConfig {
-                    model_id: String::new(),
-                    endpoint: String::new(),
-                    endpoint_style: String::new(),
-                    embedding_endpoint_style: String::new(),
-                    api_key: String::new(),
-                    model_name: String::new(),
-                    embedding_size: 0,
-                    dimensions: None,
-                    query_prefix: String::new(),
-                    document_prefix: String::new(),
-                    rejection_threshold: 0.0,
-                    embedding_batch: 1,
-                    n_ctx: 0,
-                },
-                0,
-            )
-        }
-
-        async fn embed_query(&self, _query: &str) -> Result<Vec<f32>, String> {
-            Ok(vec![])
-        }
-
-        async fn vecdb_search_with_embedding(
-            &self,
-            _embedding: &Vec<f32>,
-            _top_n: usize,
-            _filter_mb: Option<String>,
-        ) -> Result<Vec<crate::vecdb::vdb_structs::VecdbRecord>, String> {
-            Ok(self.records.clone())
-        }
-    }
 
     struct Fixture {
         _temp: tempfile::TempDir,
@@ -1197,26 +1114,6 @@ mod worktree_scope_read_tools {
         make_gcx_with_privacy(fixture, vec![], blocked).await
     }
 
-    async fn install_mock_vecdb(gcx: Arc<GlobalContext>, records: Vec<(&PathBuf, &str)>) {
-        let records = records
-            .into_iter()
-            .enumerate()
-            .map(
-                |(idx, (path, _label))| crate::vecdb::vdb_structs::VecdbRecord {
-                    vector: None,
-                    file_path: path.clone(),
-                    start_line: 0,
-                    end_line: 0,
-                    distance: idx as f32,
-                    usefulness: 100.0 - idx as f32,
-                },
-            )
-            .collect();
-        *gcx.vec_db.lock().await = Some(Arc::new(MockVecdb {
-            records,
-        }));
-    }
-
     async fn make_ccx(
         gcx: Arc<GlobalContext>,
         worktree: WorktreeMeta,
@@ -1282,13 +1179,6 @@ mod worktree_scope_read_tools {
 
     fn cat_args(path: String) -> HashMap<String, Value> {
         HashMap::from_iter([("paths".to_string(), Value::String(path))])
-    }
-
-    fn semantic_args(query: &str) -> HashMap<String, Value> {
-        HashMap::from_iter([
-            ("queries".to_string(), Value::String(query.to_string())),
-            ("scope".to_string(), Value::String("workspace".to_string())),
-        ])
     }
 
     #[tokio::test]
@@ -1562,108 +1452,6 @@ mod worktree_scope_read_tools {
         assert!(text.contains("new_name.rs"), "{text}");
         assert!(!text.contains("old_name.rs"), "{text}");
         assert!(!text.contains(&norm(fixture.source.clone())), "{text}");
-    }
-
-    #[tokio::test]
-    async fn worktree_scope_read_tools_semantic_search_drops_source_only_stale_results() {
-        let fixture = make_fixture();
-        let gcx = make_gcx(&fixture, vec![]).await;
-        install_mock_vecdb(
-            gcx.clone(),
-            vec![
-                (&fixture.source.join("src/lib.rs"), "indexed"),
-                (&fixture.source.join("src/source_only.rs"), "source-only"),
-                (&fixture.source.join("src/deleted_stale.rs"), "deleted"),
-                (&fixture.source.join("src/old_name.rs"), "renamed-old"),
-            ],
-        )
-        .await;
-        let ccx = make_ccx(gcx, fixture.worktree.clone()).await;
-        let mut tool = crate::tools::tool_search::ToolSearch {
-            config_path: String::new(),
-        };
-        let tool_call_id = "semantic-call".to_string();
-
-        let (_corrections, results) = tool
-            .tool_execute(ccx, &tool_call_id, &semantic_args("version"))
-            .await
-            .unwrap();
-        let names = context_file_names(&results);
-        let text = tool_text(&results);
-
-        let expected = norm(fixture.root.join("src/lib.rs"));
-        assert!(
-            names.iter().any(|path| path == &expected),
-            "expected {expected} in {names:?}"
-        );
-        assert!(!names.iter().any(|path| path.contains("source_only.rs")));
-        assert!(!names.iter().any(|path| path.contains("deleted_stale.rs")));
-        assert!(!names.iter().any(|path| path.contains("old_name.rs")));
-        assert!(!text.contains("source_only.rs"), "{text}");
-        assert!(!text.contains("deleted_stale.rs"), "{text}");
-        assert!(!text.contains("old_name.rs"), "{text}");
-    }
-
-    #[tokio::test]
-    async fn worktree_scope_read_tools_semantic_search_adds_worktree_only_fallback() {
-        let fixture = make_fixture();
-        let gcx = make_gcx(&fixture, vec![]).await;
-        install_mock_vecdb(gcx.clone(), vec![]).await;
-        let ccx = make_ccx(gcx, fixture.worktree.clone()).await;
-        let mut tool = crate::tools::tool_search::ToolSearch {
-            config_path: String::new(),
-        };
-        let tool_call_id = "semantic-call".to_string();
-
-        let (_corrections, results) = tool
-            .tool_execute(ccx, &tool_call_id, &semantic_args("only_worktree"))
-            .await
-            .unwrap();
-        let names = context_file_names(&results);
-        let text = tool_text(&results);
-
-        let expected = norm(fixture.root.join("src/worktree_only.rs"));
-        assert!(
-            names.iter().any(|path| path == &expected),
-            "expected {expected} in {names:?}"
-        );
-        assert!(
-            text.contains("Direct worktree filesystem fallback"),
-            "{text}"
-        );
-        assert!(!text.contains("source_only.rs"), "{text}");
-    }
-
-    #[tokio::test]
-    async fn worktree_scope_read_tools_semantic_search_renamed_file_new_name_found() {
-        let fixture = make_fixture();
-        let gcx = make_gcx(&fixture, vec![]).await;
-        install_mock_vecdb(
-            gcx.clone(),
-            vec![(&fixture.source.join("src/old_name.rs"), "old")],
-        )
-        .await;
-        let ccx = make_ccx(gcx, fixture.worktree.clone()).await;
-        let mut tool = crate::tools::tool_search::ToolSearch {
-            config_path: String::new(),
-        };
-        let tool_call_id = "semantic-call".to_string();
-
-        let (_corrections, results) = tool
-            .tool_execute(ccx, &tool_call_id, &semantic_args("renamed_marker"))
-            .await
-            .unwrap();
-        let names = context_file_names(&results);
-        let text = tool_text(&results);
-
-        let expected = norm(fixture.root.join("src/new_name.rs"));
-        assert!(
-            names.iter().any(|path| path == &expected),
-            "expected {expected} in {names:?}"
-        );
-        assert!(!names.iter().any(|path| path.contains("old_name.rs")));
-        assert!(text.contains("new_name.rs"), "{text}");
-        assert!(!text.contains("old_name.rs"), "{text}");
     }
 
     #[tokio::test]

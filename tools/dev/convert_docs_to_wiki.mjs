@@ -28,7 +28,6 @@ const explicitMap = new Map([
   ["scheduler.md", "Scheduler.md"],
   ["processes.md", "Processes-and-PTY.md"],
   ["features/ai-chat.md", "AI-Chat.md"],
-  ["features/code-completion.md", "Code-Completion.md"],
   ["features/context.md", "Context.md"],
   ["features/ai-toolbox.md", "AI-Toolbox.md"],
   ["features/agent-integrations.md", "Agent-Integrations.md"],

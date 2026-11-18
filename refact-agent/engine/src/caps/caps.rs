@@ -34,14 +34,10 @@ fn resolve_image_token_mode(configured: ImageTokenMode, wire_format: WireFormat)
     }
 }
 
-pub use refact_core::llm_types::{
-    BaseModelRecord, EmbeddingModelRecord, HasBaseModelRecord, WireFormat, default_embedding_batch,
-    default_rejection_threshold, default_true,
-};
+pub use refact_core::llm_types::{BaseModelRecord, HasBaseModelRecord, WireFormat, default_true};
 
 pub use refact_caps_core::model_records::{
-    CapsMetadata, ChatModelRecord, CompletionModelFamily, CompletionModelRecord, DefaultModels,
-    default_chat_scratchpad, default_completion_scratchpad, default_completion_scratchpad_patch,
+    CapsMetadata, ChatModelRecord, DefaultModels, default_chat_scratchpad,
     default_hf_tokenizer_template, normalize_string,
 };
 
@@ -325,8 +321,6 @@ fn build_chat_model_record(
                 .map(str::to_string),
             endpoint,
             endpoint_style,
-            completion_endpoint_style: String::new(),
-            embedding_endpoint_style: String::new(),
             wire_format: effective_wire_format,
             api_key: runtime_api_key.to_string(),
             credential: runtime_credential.cloned(),
@@ -582,25 +576,6 @@ pub async fn populate_chat_models_from_providers(
     // Chat default model slots are intentionally not auto-filled. The Default Models UI can
     // leave each slot unset, and tools that require a model type report a setup error instead
     // of silently falling back to another model type.
-
-    if !caps.completion_models.is_empty() {
-        let need_new_default = caps.defaults.completion_default_model.is_empty()
-            || !caps
-                .completion_models
-                .contains_key(&caps.defaults.completion_default_model);
-
-        if need_new_default {
-            let mut candidates: Vec<&String> = caps.completion_models.keys().collect();
-            candidates.sort();
-            if let Some(first_model_id) = candidates.first() {
-                info!(
-                    "Auto-selecting default completion model: {}",
-                    first_model_id
-                );
-                caps.defaults.completion_default_model = (*first_model_id).clone();
-            }
-        }
-    }
 }
 
 fn resolve_user_default_chat_model(
@@ -662,113 +637,6 @@ fn apply_user_default_chat_model(
     }
 }
 
-fn resolve_user_default_completion_model(
-    model: &str,
-    completion_models: &IndexMap<String, Arc<CompletionModelRecord>>,
-) -> Option<String> {
-    if model.is_empty() {
-        return None;
-    }
-    if completion_models.contains_key(model) {
-        return Some(model.to_string());
-    }
-    if !model.contains('/') {
-        for key in completion_models.keys() {
-            if let Some(name) = key.split('/').last() {
-                if name == model {
-                    return Some(key.clone());
-                }
-            }
-        }
-    }
-    None
-}
-
-fn apply_user_default_completion_model(
-    target: &mut String,
-    model: Option<&str>,
-    completion_models: &IndexMap<String, Arc<CompletionModelRecord>>,
-) {
-    let Some(model) = model else {
-        return;
-    };
-
-    let model = model.trim();
-    if model.is_empty() {
-        target.clear();
-        return;
-    }
-
-    if is_legacy_refact_model(model) {
-        warn!(
-            "Legacy Refact Cloud completion default '{}' was reset to none",
-            model
-        );
-        target.clear();
-        return;
-    }
-
-    match resolve_user_default_completion_model(model, completion_models) {
-        Some(resolved) => *target = resolved,
-        None => {
-            warn!(
-                "User default completion model '{}' not found in available models; keeping configured value for setup diagnostics",
-                model
-            );
-            *target = model.to_string();
-        }
-    }
-}
-
-fn resolve_user_default_embedding_model(
-    model: &str,
-    embedding_models: &[EmbeddingModelRecord],
-) -> Option<EmbeddingModelRecord> {
-    if model.is_empty() {
-        return None;
-    }
-
-    let mut matches: Vec<&EmbeddingModelRecord> = embedding_models
-        .iter()
-        .filter(|record| record.base.id == model || record.base.name == model)
-        .collect();
-    matches.sort_by(|a, b| a.base.id.cmp(&b.base.id));
-    matches.first().map(|record| (*record).clone())
-}
-
-fn apply_user_default_embedding_model(
-    target: &mut EmbeddingModelRecord,
-    model: Option<&str>,
-    embedding_models: &[EmbeddingModelRecord],
-) {
-    let Some(model) = model else {
-        return;
-    };
-
-    let model = model.trim();
-    if model.is_empty() {
-        *target = EmbeddingModelRecord::default();
-        return;
-    }
-
-    if is_legacy_refact_model(model) {
-        warn!(
-            "Legacy Refact Cloud embedding default '{}' was reset to none",
-            model
-        );
-        *target = EmbeddingModelRecord::default();
-        return;
-    }
-
-    match resolve_user_default_embedding_model(model, embedding_models) {
-        Some(resolved) => *target = resolved,
-        None => warn!(
-            "User default embedding model '{}' not found in available models; keeping configured embedding model for setup diagnostics",
-            model
-        ),
-    }
-}
-
 fn clear_legacy_refact_chat_defaults(caps: &mut CodeAssistantCaps) {
     let defaults = &mut caps.defaults;
     clear_legacy_refact_chat_default("chat", &mut defaults.chat_default_model);
@@ -801,53 +669,7 @@ fn remove_legacy_refact_models_from_caps(caps: &mut CodeAssistantCaps) {
         keep
     });
 
-    caps.completion_models.retain(|model_id, _| {
-        let keep = !is_legacy_refact_model(model_id);
-        if !keep {
-            warn!(
-                "Legacy Refact Cloud completion model '{}' was removed from caps",
-                model_id
-            );
-        }
-        keep
-    });
-
-    if is_legacy_refact_model(&caps.embedding_model.base.id)
-        || is_legacy_refact_model(&caps.embedding_model.base.name)
-    {
-        warn!(
-            "Legacy Refact Cloud embedding model '{}' was reset to none",
-            caps.embedding_model.base.id
-        );
-        caps.embedding_model = EmbeddingModelRecord::default();
-    }
-
     clear_legacy_refact_chat_defaults(caps);
-
-    if is_legacy_refact_model(&caps.defaults.completion_default_model)
-        || (!caps.defaults.completion_default_model.is_empty()
-            && !caps
-                .completion_models
-                .contains_key(&caps.defaults.completion_default_model))
-    {
-        warn!(
-            "Completion default model '{}' was reset to none because it is no longer available",
-            caps.defaults.completion_default_model
-        );
-        caps.defaults.completion_default_model.clear();
-    }
-
-    if caps.defaults.completion_default_model.is_empty() && !caps.completion_models.is_empty() {
-        let mut candidates: Vec<&String> = caps.completion_models.keys().collect();
-        candidates.sort();
-        if let Some(first_model_id) = candidates.first() {
-            info!(
-                "Auto-selecting default completion model after legacy cleanup: {}",
-                first_model_id
-            );
-            caps.defaults.completion_default_model = (*first_model_id).clone();
-        }
-    }
 }
 
 async fn take_models_dev_startup_refresh_flag(gcx: Arc<GlobalContext>) -> bool {
@@ -928,8 +750,6 @@ pub async fn load_caps(
     // The new system (populate_chat_models_from_providers) is the sole source of truth for
     // chat models — it respects enabled_models selection. Legacy running_models from YAML
     // templates would otherwise bypass model selection, showing all template models.
-    // Only chat_models are cleared; completion_models and embedding_model are preserved
-    // since the new system doesn't handle those yet.
     {
         let registry = gcx.providers.read().await;
         for p in &mut providers {
@@ -939,7 +759,7 @@ pub async fn load_caps(
         }
     }
 
-    let embedding_models = add_models_to_caps(&mut caps, providers);
+    add_models_to_caps(&mut caps, providers);
     populate_chat_models_from_providers(&mut caps, gcx.clone()).await;
     apply_model_caps_to_all_chat_models(&mut caps);
     remove_legacy_refact_models_from_caps(&mut caps);
@@ -1001,16 +821,6 @@ pub async fn load_caps(
                 "thinking",
                 &caps.chat_models,
             );
-            apply_user_default_completion_model(
-                &mut caps.defaults.completion_default_model,
-                user_defaults.completion_model.as_deref(),
-                &caps.completion_models,
-            );
-            apply_user_default_embedding_model(
-                &mut caps.embedding_model,
-                user_defaults.embedding_model.as_deref(),
-                &embedding_models,
-            );
             caps.user_defaults = user_defaults;
         }
         Err(e) => {
@@ -1037,8 +847,6 @@ fn validate_default_models(caps: &CodeAssistantCaps) -> Result<(), String> {
     validate_default_chat_model(caps, "thinking", &caps.defaults.chat_thinking_model);
     validate_default_chat_model(caps, "buddy", &caps.defaults.chat_buddy_model);
     validate_default_chat_model(caps, "light", &caps.defaults.chat_light_model);
-    validate_default_completion_model(caps, &caps.defaults.completion_default_model);
-    validate_default_embedding_model(caps);
     Ok(())
 }
 
@@ -1050,29 +858,6 @@ fn validate_default_chat_model(caps: &CodeAssistantCaps, label: &str, model: &st
         warn!(
             "Default {} model '{}' is not in chat_models and not found in model capabilities registry",
             label, model
-        );
-    }
-}
-
-fn validate_default_completion_model(caps: &CodeAssistantCaps, model: &str) {
-    if model.is_empty() || caps.completion_models.contains_key(model) {
-        return;
-    }
-    warn!(
-        "Default completion model '{}' is not in completion_models",
-        model
-    );
-}
-
-fn validate_default_embedding_model(caps: &CodeAssistantCaps) {
-    let model = caps.embedding_model.base.id.as_str();
-    if model.is_empty() {
-        return;
-    }
-    if is_legacy_refact_model(model) || is_legacy_refact_model(&caps.embedding_model.base.name) {
-        warn!(
-            "Default embedding model '{}' is legacy or unavailable",
-            model
         );
     }
 }
@@ -1297,23 +1082,9 @@ fn apply_registry_caps_to_chat_model(record: &mut ChatModelRecord, caps: &ModelC
     record.base.supports_web_search = caps.supports_web_search;
 }
 
-pub fn resolve_completion_model<'a>(
-    caps: Arc<CodeAssistantCaps>,
-    requested_model_id: &str,
-) -> Result<Arc<CompletionModelRecord>, String> {
-    let model_id = if !requested_model_id.is_empty() {
-        requested_model_id
-    } else {
-        &caps.defaults.completion_default_model
-    };
-
-    resolve_model(&caps.completion_models, model_id)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use indexmap::IndexMap;
     use crate::providers::custom::CustomProvider;
     use crate::providers::traits::{ProviderRuntime, ProviderTrait};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1644,66 +1415,6 @@ mod tests {
 
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Model"));
-    }
-
-    #[test]
-    fn user_completion_default_resolves_provider_qualified_and_bare_models() {
-        let mut completion_models = IndexMap::new();
-        completion_models.insert(
-            "openai/starcoder".to_string(),
-            Arc::new(CompletionModelRecord {
-                base: BaseModelRecord {
-                    id: "openai/starcoder".to_string(),
-                    name: "starcoder".to_string(),
-                    ..Default::default()
-                },
-                ..Default::default()
-            }),
-        );
-
-        let mut target = String::new();
-        apply_user_default_completion_model(&mut target, Some("starcoder"), &completion_models);
-        assert_eq!(target, "openai/starcoder");
-
-        apply_user_default_completion_model(
-            &mut target,
-            Some("openai/starcoder"),
-            &completion_models,
-        );
-        assert_eq!(target, "openai/starcoder");
-    }
-
-    #[test]
-    fn user_embedding_default_selects_matching_embedding_record() {
-        let embedding_models = vec![
-            EmbeddingModelRecord {
-                base: BaseModelRecord {
-                    id: "openai/text-embedding-3-small".to_string(),
-                    name: "text-embedding-3-small".to_string(),
-                    ..Default::default()
-                },
-                embedding_size: 1536,
-                ..Default::default()
-            },
-            EmbeddingModelRecord {
-                base: BaseModelRecord {
-                    id: "openai_2/text-embedding-3-small".to_string(),
-                    name: "text-embedding-3-small".to_string(),
-                    ..Default::default()
-                },
-                embedding_size: 3072,
-                ..Default::default()
-            },
-        ];
-        let mut target = EmbeddingModelRecord::default();
-
-        apply_user_default_embedding_model(
-            &mut target,
-            Some("openai_2/text-embedding-3-small"),
-            &embedding_models,
-        );
-        assert_eq!(target.base.id, "openai_2/text-embedding-3-small");
-        assert_eq!(target.embedding_size, 3072);
     }
 
     #[test]

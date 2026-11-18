@@ -61,7 +61,6 @@ function makeStore(messages: ChatMessage[], options: RenderExecToolOptions) {
     apiKey: null,
     features: {
       statistics: true,
-      vecdb: true,
       ast: true,
       images: true,
     },

@@ -1,6 +1,5 @@
 wire_format: openai_chat_completions
 chat_endpoint: https://api.githubcopilot.com/chat/completions
-supports_completion: false
 extra_headers:
   Openai-Intent: conversation-edits
   x-initiator: user

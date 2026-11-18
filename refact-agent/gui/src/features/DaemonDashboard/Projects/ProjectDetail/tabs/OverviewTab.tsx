@@ -47,14 +47,6 @@ function codegraphStateLabel(status: RagStatus): string {
     : codegraph.state;
 }
 
-function vecdbStateLabel(status: RagStatus): string {
-  const vecdb = status.vecdb;
-  if (!vecdb) return "unavailable";
-  if (status.vec_db_error) return "error";
-  if (vecdb.state === "done" || vecdb.state === "cooldown") return "ready";
-  return `${vecdb.state} · ${vecdb.files_unprocessed} queued`;
-}
-
 function IndexBrain({
   daemonBase,
   projectId,
@@ -98,7 +90,6 @@ function IndexBrain({
                 label="Files"
                 value={status.codegraph?.counts.files ?? "—"}
               />
-              <Fact label="VecDB" value={vecdbStateLabel(status)} />
             </dl>
           )}
         </ResourceView>

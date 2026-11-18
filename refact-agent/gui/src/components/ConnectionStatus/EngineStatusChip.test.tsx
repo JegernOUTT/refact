@@ -9,9 +9,6 @@ import { EngineStatusChip } from "./EngineStatusChip";
 const ragStatus: RagStatus = {
   ast: null,
   ast_alive: "turned_off",
-  vecdb: null,
-  vecdb_alive: "turned_off",
-  vec_db_error: "",
   codegraph: {
     counts: { nodes: 12, edges: 6, files: 3, fts_docs: 3 },
     queued: 0,

@@ -266,16 +266,13 @@ available:
             readonly: false,
             wire_format: self.default_wire_format(),
             chat_endpoint: format!("{}/v1/chat/completions", base_url),
-            completion_endpoint: format!("{}/v1/completions", base_url),
-            embedding_endpoint: format!("{}/v1/embeddings", base_url),
+
             api_key: self.api_key.clone(),
             auth_token: String::new(),
             tokenizer_api_key: String::new(),
             extra_headers: HashMap::new(),
             supports_cache_control: self.supports_cache_control,
             chat_models: Vec::new(),
-            completion_models: Vec::new(),
-            embedding_model: None,
         })
     }
 

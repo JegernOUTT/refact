@@ -61,13 +61,9 @@ export type Config = {
   themeProps: Omit<ThemeProps, "children">;
   features?: {
     statistics?: boolean;
-    vecdb?: boolean;
     ast?: boolean;
     codegraph?: boolean;
     images?: boolean;
-  };
-  keyBindings?: {
-    completeManual?: string;
   };
   apiKey?: string | null;
   shiftEnterToSubmit?: boolean;
@@ -80,7 +76,6 @@ const initialState: Config = {
   apiKey: null,
   features: {
     statistics: true,
-    vecdb: true,
     ast: true,
     codegraph: true,
     images: true,
@@ -199,7 +194,6 @@ export const reducer = createReducer<Config>(initialState, (builder) => {
     if (hasConfigProperty(action.payload, "daemonPort")) {
       state.daemonPort = action.payload.daemonPort;
     }
-    state.keyBindings = action.payload.keyBindings ?? state.keyBindings;
     state.currentWorkspaceName =
       action.payload.currentWorkspaceName ?? state.currentWorkspaceName;
     state.shiftEnterToSubmit =
@@ -247,10 +241,6 @@ export const selectRuntimeVersions = (state: RootState) =>
 export const selectLspPort = (state: RootState) => state.config.lspPort;
 
 export const selectFeatures = (state: RootState) => state.config.features;
-export const selectVecdb = createSelector(
-  selectFeatures,
-  (features) => features?.vecdb,
-);
 export const selectAst = createSelector(
   selectFeatures,
   (features) => features?.ast,

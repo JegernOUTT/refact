@@ -1,7 +1,5 @@
 wire_format: openai_chat_completions
 chat_endpoint: https://api.z.ai/api/paas/v4/chat/completions
-supports_completion: false
-
 api_key: "$ZHIPU_API_KEY"
 endpoint_type: zai
 custom_models: {}

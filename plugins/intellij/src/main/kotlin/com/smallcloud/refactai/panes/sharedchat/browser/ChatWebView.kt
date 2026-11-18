@@ -461,13 +461,11 @@ class ChatWebView(val editor: Editor, val messageHandler: (event: Events.FromCha
                 val wasTabPressed = event?.type == CefKeyboardHandler.CefKeyEvent.EventType.KEYEVENT_KEYUP &&
                                    event.modifiers == 0 && event.character == '\t'
                 val currentEditor = FileEditorManager.getInstance(editor.project).selectedTextEditor
-                val isInDiffMode = currentEditor != null &&
-                                  ModeProvider.getOrCreateModeProvider(currentEditor).isDiffMode()
+                val diffProvider = currentEditor?.let { ModeProvider.findModeProvider(it) }
 
-                if (wasTabPressed && currentEditor != null && isInDiffMode) {
+                if (wasTabPressed && currentEditor != null && diffProvider?.isDiffMode() == true) {
                     ApplicationManager.getApplication().invokeLater {
-                        ModeProvider.getOrCreateModeProvider(currentEditor)
-                            .onTabPressed(currentEditor, null, DataContext.EMPTY_CONTEXT)
+                        diffProvider.onTabPressed(currentEditor, null, DataContext.EMPTY_CONTEXT)
                     }
                     return false
                 }

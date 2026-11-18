@@ -47,10 +47,6 @@ export const ideEscapeKeyPressed = createAction<string>("ide/escapeKeyPressed");
 export const ideIsChatStreaming = createAction<boolean>("ide/isChatStreaming");
 export const ideIsChatReady = createAction<boolean>("ide/isChatReady");
 
-export const ideSetCodeCompletionModel = createAction<string>(
-  "ide/setCodeCompletionModel",
-);
-
 export const ideSetLoginMessage = createAction<string>(
   "ide/ideSetLoginMessage",
 );
@@ -287,14 +283,6 @@ export const useEventsBusForIDE = () => {
     [postMessage],
   );
 
-  const setCodeCompletionModel = useCallback(
-    (model: string) => {
-      const action = ideSetCodeCompletionModel(model);
-      postMessage(action);
-    },
-    [postMessage],
-  );
-
   const setLoginMessage = useCallback(
     (message: string) => {
       const action = ideSetLoginMessage(message);
@@ -412,7 +400,6 @@ export const useEventsBusForIDE = () => {
     setIsChatReady,
     setForceReloadFileByPath,
     sendToolCallToIde,
-    setCodeCompletionModel,
     setLoginMessage,
     notifyTaskDone,
     notifyAskQuestions,

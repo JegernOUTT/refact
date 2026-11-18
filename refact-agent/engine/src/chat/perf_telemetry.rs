@@ -242,7 +242,6 @@ impl PerformanceTelemetry {
                     PerfComponent::ToolSessionMergeEvents,
                     PerfComponent::ToolCheckpointScheduling,
                     PerfComponent::ToolIntegrationToolsBuild,
-                    PerfComponent::ToolAvailabilityVecdbWait,
                     PerfComponent::ToolAvailabilityCodegraphWait,
                     PerfComponent::ToolModeConfig,
                     PerfComponent::ToolModelCaps,
@@ -257,7 +256,7 @@ impl PerformanceTelemetry {
                     PerfComponent::ExecPathQueueWait,
                     PerfComponent::ExecPathCollect,
                 ]),
-                index_watcher_vecdb_amplification: IndexWatcherVecdbAmplification {
+                index_watcher_amplification: IndexWatcherAmplification {
                     trajectory_index_reads_per_listing_call: ratio_counts(
                         listing_counters.index_reads,
                         listing_calls,
@@ -267,18 +266,11 @@ impl PerformanceTelemetry {
                         &[PerfComponent::TrajectoryIndexRebuild],
                         PerfComponent::TrajectoryCommit,
                     ),
-                    vecdb_searches_per_enrichment_attempt: self.ratio(
-                        &[PerfComponent::EnrichmentScopedSearch],
-                        PerfComponent::EnrichmentAttempt,
-                    ),
                     aggregate: self.aggregate_components(&[
                         PerfComponent::TrajectoryIndexLockWait,
                         PerfComponent::TrajectoryIndexRead,
                         PerfComponent::TrajectoryIndexWrite,
                         PerfComponent::TrajectoryIndexRebuild,
-                        PerfComponent::EnrichmentVecdbLockWait,
-                        PerfComponent::EnrichmentVecdbLockHold,
-                        PerfComponent::EnrichmentScopedSearch,
                     ]),
                 },
                 enrichment_stages: self.aggregate_components(&[
@@ -296,13 +288,7 @@ impl PerformanceTelemetry {
                     PerfComponent::EnrichmentQueryNormalize,
                     PerfComponent::EnrichmentRootDiscovery,
                     PerfComponent::EnrichmentCurrentRootResolve,
-                    PerfComponent::EnrichmentVecdbLockWait,
-                    PerfComponent::EnrichmentVecdbLockHold,
-                    PerfComponent::EnrichmentEmbedding,
-                    PerfComponent::EnrichmentScopedSearch,
-                    PerfComponent::EnrichmentMergeDedup,
-                    PerfComponent::EnrichmentFileReread,
-                    PerfComponent::EnrichmentFallback,
+                    PerfComponent::EnrichmentLexical,
                     PerfComponent::EnrichmentCardBuild,
                     PerfComponent::EnrichmentCacheMiss,
                     PerfComponent::EnrichmentCacheHit,
@@ -401,16 +387,15 @@ pub struct PerformanceComponentAggregate {
 pub struct PerformanceTelemetryRollups {
     pub advancement: PerformanceComponentAggregate,
     pub tool_stages: PerformanceComponentAggregate,
-    pub index_watcher_vecdb_amplification: IndexWatcherVecdbAmplification,
+    pub index_watcher_amplification: IndexWatcherAmplification,
     pub enrichment_stages: PerformanceComponentAggregate,
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub struct IndexWatcherVecdbAmplification {
+pub struct IndexWatcherAmplification {
     pub trajectory_index_reads_per_listing_call: f64,
     pub calls_by_caller: Vec<(&'static str, u64)>,
     pub watcher_rebuilds_per_commit: f64,
-    pub vecdb_searches_per_enrichment_attempt: f64,
     pub aggregate: PerformanceComponentAggregate,
 }
 
@@ -682,14 +667,15 @@ mod tests {
         assert_eq!(aggregate.batch_size_sum, 3);
         assert_eq!(snapshot.rollups.tool_stages.sample_count, 4);
         assert_eq!(snapshot.rollups.tool_stages.cancelled_count, 1);
+        let serialized = serde_json::to_string(&snapshot).unwrap();
+        assert!(!serialized.contains("vecdb"));
+        assert!(!serialized.contains("enrichment.embedding"));
         let rendered = serde_json::to_value(&snapshot).unwrap();
         assert_eq!(rendered["components"][25]["cancelled_count"], 1);
-        assert!(rendered["rollups"]["index_watcher_vecdb_amplification"]
+        assert!(rendered["rollups"]["index_watcher_amplification"]
             ["trajectory_index_reads_per_listing_call"]
             .is_number());
-        assert!(
-            rendered["rollups"]["index_watcher_vecdb_amplification"]["calls_by_caller"].is_array()
-        );
+        assert!(rendered["rollups"]["index_watcher_amplification"]["calls_by_caller"].is_array());
     }
 
     #[test]
@@ -760,20 +746,35 @@ mod tests {
             None,
         );
         assert!(!telemetry.record(&event));
-        assert_eq!(telemetry.snapshot().components[3].sample_count, 0);
+        assert_eq!(
+            telemetry.snapshot().components[PerfComponent::TrajectoryCommit.index()].sample_count,
+            0
+        );
 
         telemetry.set_enabled(true);
         assert!(telemetry.record(&event));
         telemetry.set_enabled(false);
         assert!(!telemetry.record(&event));
-        assert_eq!(telemetry.snapshot().components[3].sample_count, 1);
+        assert_eq!(
+            telemetry.snapshot().components[PerfComponent::TrajectoryCommit.index()].sample_count,
+            1
+        );
 
         telemetry.reset();
         let snapshot = telemetry.snapshot();
         assert!(!snapshot.enabled);
-        assert_eq!(snapshot.components[3].sample_count, 0);
-        assert_eq!(snapshot.components[3].min_us, None);
-        assert_eq!(snapshot.components[3].size_bytes_sum, 0);
+        assert_eq!(
+            snapshot.components[PerfComponent::TrajectoryCommit.index()].sample_count,
+            0
+        );
+        assert_eq!(
+            snapshot.components[PerfComponent::TrajectoryCommit.index()].min_us,
+            None
+        );
+        assert_eq!(
+            snapshot.components[PerfComponent::TrajectoryCommit.index()].size_bytes_sum,
+            0
+        );
     }
 
     #[test]
@@ -785,7 +786,7 @@ mod tests {
             chat_id_hash: Some(private_chat_id.to_string()),
             path_hash: Some(private_path.to_string()),
             ..event(
-                PerfComponent::EnrichmentScopedSearch,
+                PerfComponent::EnrichmentLexical,
                 PerfOutcome::Success,
                 5,
                 Some(99),

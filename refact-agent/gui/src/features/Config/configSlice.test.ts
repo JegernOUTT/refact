@@ -11,7 +11,6 @@ describe("configSlice", () => {
 
     expect(state.features?.images).toBe(false);
     expect(state.features?.statistics).toBe(true);
-    expect(state.features?.vecdb).toBe(true);
     expect(state.features?.ast).toBe(true);
     expect(state.features?.codegraph).toBe(true);
   });

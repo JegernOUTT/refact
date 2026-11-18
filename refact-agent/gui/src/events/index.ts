@@ -14,7 +14,6 @@ import { type Chat } from "../features/Chat/Thread/types";
 import type { Snippet } from "../features/Chat/selectedSnippet";
 import type { Config } from "../features/Config/configSlice";
 import type { ErrorSliceState } from "../features/Errors/errorsSlice";
-import { request, ready, receive, error } from "../features/FIM/actions";
 import type { HistoryState } from "../features/History/historySlice";
 import type { TipOfTheDayState } from "../features/TipOfTheDay";
 import type { PageSliceState } from "../features/Pages/pagesSlice";
@@ -26,7 +25,6 @@ export {
   type Snippet,
   setSelectedSnippet,
 } from "../features/Chat/selectedSnippet";
-export type { FimDebugData } from "../services/refact/fim";
 export type { ChatHistoryItem } from "../features/History/historySlice";
 export { addInputValue, setInputValue } from "../components/ChatForm/actions";
 export {
@@ -76,7 +74,6 @@ export {
   ideIsChatReady,
   ideToolCall,
   ideToolCallResponse,
-  ideSetCodeCompletionModel,
   ideSetLoginMessage,
   ideTaskDone,
   ideAskQuestions,
@@ -125,12 +122,6 @@ export type {
 export { ideAttachFileToChat } from "../hooks/useEventBusForApp";
 export { ideLogLines } from "../features/BugReport/ideLog";
 export { toPascalCase } from "../utils/toPascalCase";
-export const fim = {
-  request,
-  ready,
-  receive,
-  error,
-};
 
 export {
   isAssistantDelta,

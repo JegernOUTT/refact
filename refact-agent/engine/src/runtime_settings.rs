@@ -21,7 +21,6 @@ const MAX_FILE_SIZE_DEFAULT: usize = 40_000;
 const AUTO_ENRICHMENT_TOTAL_TOKEN_CAP_DEFAULT: usize = 1600;
 const AUTO_ENRICHMENT_CARD_TOKEN_CAP_DEFAULT: usize = 480;
 const KNOWLEDGE_TOP_N_DEFAULT: usize = 3;
-const TRAJECTORY_TOP_N_DEFAULT: usize = 2;
 const PP_MAX_TOOL_BUDGET_TOKENS_DEFAULT: usize = 131_072;
 const PP_MAX_PER_FILE_BUDGET_TOKENS_DEFAULT: usize = 131_072;
 const PP_MAX_LINE_LENGTH_CHARS_DEFAULT: usize = 10_000;
@@ -33,7 +32,6 @@ const GIT_INTEL_MAX_FILES_PER_COMMIT_COCHANGE_DEFAULT: usize = 1_000;
 const GIT_INTEL_MAX_FILES_PER_COMMIT_ENTROPY_DEFAULT: usize = 200;
 const CODEGRAPH_DEAD_CODE_MAX_RESULTS_DEFAULT: usize = 5_000;
 const CODEGRAPH_EXEC_FLOW_MAX_NODES_DEFAULT: usize = 5_000;
-const VECDB_TRAJECTORY_SPLIT_BYTES_DEFAULT: usize = 16_384;
 const CAT_MAX_INPUT_PATHS_DEFAULT: usize = 512;
 const CAT_MAX_LINES_DEFAULT: usize = 5_000;
 const CAT_MAX_FILE_BYTES_DEFAULT: usize = 8_388_608;
@@ -312,7 +310,12 @@ const RETIRED_COORDINATION_SETTINGS: &[&str] = &[
     "agent_followup_max_count",
 ];
 
-pub const RETIRED_TRAJECTORY_SETTINGS: &[&str] = &["max_parallel_tools"];
+pub const RETIRED_TRAJECTORY_SETTINGS: &[&str] = &[
+    "max_parallel_tools",
+    "auto_enrichment_trajectory_top_n",
+    "vecdb_path_coalescing_enabled",
+    "vecdb_trajectory_split_bytes",
+];
 
 pub fn coordination_field_path(name: &str) -> String {
     format!("{COORDINATION_SETTINGS_KEY}.{name}")
@@ -338,12 +341,10 @@ pub struct TrajectoryRuntimeSettings {
     pub auto_enrichment_total_token_cap: usize,
     pub auto_enrichment_card_token_cap: usize,
     pub auto_enrichment_knowledge_top_n: usize,
-    pub auto_enrichment_trajectory_top_n: usize,
     pub trajectory_writer_enabled: bool,
     pub trajectory_index_coordinator_enabled: bool,
     pub trajectory_watcher_self_write_enabled: bool,
     pub tool_catalog_snapshots_enabled: bool,
-    pub vecdb_path_coalescing_enabled: bool,
     pub pp_max_tool_budget_tokens: usize,
     pub pp_max_per_file_budget_tokens: usize,
     pub pp_max_line_length_chars: usize,
@@ -355,7 +356,6 @@ pub struct TrajectoryRuntimeSettings {
     pub git_intel_max_files_per_commit_entropy: usize,
     pub codegraph_dead_code_max_results: usize,
     pub codegraph_exec_flow_max_nodes: usize,
-    pub vecdb_trajectory_split_bytes: usize,
     pub cat_max_input_paths: usize,
     pub cat_max_lines: usize,
     pub cat_max_file_bytes: usize,
@@ -411,12 +411,10 @@ impl Default for TrajectoryRuntimeSettings {
             auto_enrichment_total_token_cap: AUTO_ENRICHMENT_TOTAL_TOKEN_CAP_DEFAULT,
             auto_enrichment_card_token_cap: AUTO_ENRICHMENT_CARD_TOKEN_CAP_DEFAULT,
             auto_enrichment_knowledge_top_n: KNOWLEDGE_TOP_N_DEFAULT,
-            auto_enrichment_trajectory_top_n: TRAJECTORY_TOP_N_DEFAULT,
             trajectory_writer_enabled: true,
             trajectory_index_coordinator_enabled: true,
             trajectory_watcher_self_write_enabled: true,
             tool_catalog_snapshots_enabled: true,
-            vecdb_path_coalescing_enabled: true,
             pp_max_tool_budget_tokens: PP_MAX_TOOL_BUDGET_TOKENS_DEFAULT,
             pp_max_per_file_budget_tokens: PP_MAX_PER_FILE_BUDGET_TOKENS_DEFAULT,
             pp_max_line_length_chars: PP_MAX_LINE_LENGTH_CHARS_DEFAULT,
@@ -429,7 +427,6 @@ impl Default for TrajectoryRuntimeSettings {
             git_intel_max_files_per_commit_entropy: GIT_INTEL_MAX_FILES_PER_COMMIT_ENTROPY_DEFAULT,
             codegraph_dead_code_max_results: CODEGRAPH_DEAD_CODE_MAX_RESULTS_DEFAULT,
             codegraph_exec_flow_max_nodes: CODEGRAPH_EXEC_FLOW_MAX_NODES_DEFAULT,
-            vecdb_trajectory_split_bytes: VECDB_TRAJECTORY_SPLIT_BYTES_DEFAULT,
             cat_max_input_paths: CAT_MAX_INPUT_PATHS_DEFAULT,
             cat_max_lines: CAT_MAX_LINES_DEFAULT,
             cat_max_file_bytes: CAT_MAX_FILE_BYTES_DEFAULT,
@@ -534,9 +531,6 @@ fn install_crate_limits(settings: &TrajectoryRuntimeSettings) {
         dead_code_max_results: settings.codegraph_dead_code_max_results,
         exec_flow_max_nodes: settings.codegraph_exec_flow_max_nodes,
     });
-    refact_vecdb::vdb_thread::install_vecdb_trajectory_split_bytes(
-        settings.vecdb_trajectory_split_bytes,
-    );
     if let Err(error) =
         refact_work_core::install_coordination_settings(settings.coordination.clone())
     {
@@ -549,9 +543,6 @@ fn install_crate_limits(settings: &TrajectoryRuntimeSettings) {
 
 pub fn install_startup(settings: TrajectoryRuntimeSettings) {
     install_crate_limits(&settings);
-    refact_vecdb::vdb_thread::install_vecdb_path_coalescing_setting(
-        settings.vecdb_path_coalescing_enabled,
-    );
     refact_chat_history::config::install_runtime_config(refact_chat_history::config::ChatConfig {
         limits: refact_chat_history::config::ChatLimits {
             max_queue_size: settings.max_queue_size,
@@ -599,14 +590,12 @@ pub fn install_live(settings: &TrajectoryRuntimeSettings) {
         active.trajectory_writer_enabled,
         active.trajectory_index_coordinator_enabled,
         active.tool_catalog_snapshots_enabled,
-        active.vecdb_path_coalescing_enabled,
     );
     *active = settings.clone();
     active.event_channel_capacity = restart_required.0;
     active.trajectory_writer_enabled = restart_required.1;
     active.trajectory_index_coordinator_enabled = restart_required.2;
     active.tool_catalog_snapshots_enabled = restart_required.3;
-    active.vecdb_path_coalescing_enabled = restart_required.4;
 }
 
 #[cfg(test)]
@@ -714,12 +703,6 @@ pub fn validate(settings: &TrajectoryRuntimeSettings) -> Result<(), String> {
         20,
     )?;
     validate_usize(
-        "auto_enrichment_trajectory_top_n",
-        settings.auto_enrichment_trajectory_top_n,
-        1,
-        20,
-    )?;
-    validate_usize(
         "pp_max_tool_budget_tokens",
         settings.pp_max_tool_budget_tokens,
         4_096,
@@ -784,12 +767,6 @@ pub fn validate(settings: &TrajectoryRuntimeSettings) -> Result<(), String> {
         settings.codegraph_exec_flow_max_nodes,
         50,
         1_000_000,
-    )?;
-    validate_usize(
-        "vecdb_trajectory_split_bytes",
-        settings.vecdb_trajectory_split_bytes,
-        256,
-        1_048_576,
     )?;
     validate_usize(
         "cat_max_input_paths",
@@ -1289,6 +1266,38 @@ mod tests {
     use super::*;
     use serial_test::serial;
 
+    #[tokio::test]
+    async fn legacy_trajectory_enrichment_setting_loads_and_is_not_written_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = settings_path(dir.path());
+        tokio::fs::write(
+            &path,
+            "max_queue_size: 7\nauto_enrichment_trajectory_top_n: 2\n",
+        )
+        .await
+        .unwrap();
+        let loaded = load_from_path(&path).await.unwrap();
+        assert_eq!(loaded.max_queue_size, 7);
+        let serialized = serde_yaml::to_string(&loaded).unwrap();
+        assert!(!serialized.contains("auto_enrichment_trajectory_top_n"));
+        assert!(
+            parse_persisted(b"max_queue_size: 0\nauto_enrichment_trajectory_top_n: 2\n").is_err()
+        );
+    }
+
+    #[test]
+    fn persisted_vecdb_settings_are_ignored_and_not_written_back() {
+        let loaded = parse_persisted(
+            b"max_queue_size: 7\nvecdb_path_coalescing_enabled: true\nvecdb_trajectory_split_bytes: 1\n",
+        )
+        .unwrap();
+        assert_eq!(loaded.max_queue_size, 7);
+        let serialized = serde_json::to_value(loaded).unwrap();
+        assert!(serialized.get("vecdb_path_coalescing_enabled").is_none());
+        assert!(serialized.get("vecdb_trajectory_split_bytes").is_none());
+        assert!(parse_persisted(b"max_queue_size: 0\nvecdb_trajectory_split_bytes: 1\n").is_err());
+    }
+
     #[test]
     fn coordination_field_bounds_include_python_fields() {
         let flag = coordination_field_bounds()
@@ -1446,7 +1455,6 @@ mod tests {
             git_intel_max_files_per_commit_entropy: 77,
             codegraph_dead_code_max_results: 654,
             codegraph_exec_flow_max_nodes: 987,
-            vecdb_trajectory_split_bytes: 4_096,
             coordination: CoordinationSettings {
                 max_work_views: 512,
                 lock_timeout_secs: 17,
@@ -1504,10 +1512,6 @@ mod tests {
         install_startup(settings.clone());
         assert_crate_limits_match(&settings);
         assert_eq!(
-            refact_vecdb::vdb_thread::vecdb_trajectory_split_bytes(),
-            settings.vecdb_trajectory_split_bytes
-        );
-        assert_eq!(
             current().pp_max_tool_budget_tokens,
             settings.pp_max_tool_budget_tokens
         );
@@ -1521,10 +1525,6 @@ mod tests {
         let settings = tweaked();
         install_live(&settings);
         assert_crate_limits_match(&settings);
-        assert_eq!(
-            refact_vecdb::vdb_thread::vecdb_trajectory_split_bytes(),
-            settings.vecdb_trajectory_split_bytes
-        );
         // None of the new limits are carved out as restart-required, so the
         // active snapshot must reflect them immediately.
         assert_eq!(current(), settings);
@@ -1553,10 +1553,6 @@ trajectory_writer_enabled: false
         assert_eq!(
             loaded.codegraph_exec_flow_max_nodes,
             defaults.codegraph_exec_flow_max_nodes
-        );
-        assert_eq!(
-            loaded.vecdb_trajectory_split_bytes,
-            defaults.vecdb_trajectory_split_bytes
         );
         assert_eq!(loaded.cat_max_input_paths, defaults.cat_max_input_paths);
         assert!(validate(&loaded).is_ok());

@@ -10,10 +10,9 @@ class SharedChatPaneReadyTest {
         val calls = mutableListOf<String>()
         val config = Events.Config.Update(
             Events.Config.UpdatePayload(
-                features = Events.Config.Features(true, true),
+                features = Events.Config.Features(true),
                 themeProps = Events.Config.ThemeProps("dark"),
                 lspPort = 8488,
-                keyBindings = Events.Config.KeyBindings(""),
                 lspUrl = "http://127.0.0.1:8488/p/project-123/",
                 backendReady = true,
                 connectionStatus = "ready",

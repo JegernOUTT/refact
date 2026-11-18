@@ -90,7 +90,7 @@ impl Tool for ToolAddWorkspaceFolder {
             );
         }
 
-        let file_count = enqueue_all_files_from_workspace_folders(gcx.clone(), true, false).await;
+        let file_count = enqueue_all_files_from_workspace_folders(gcx.clone(), false).await;
         let msg = format!(
             "Successfully added folder to workspace: {}\nWorkspace now contains {} files.",
             abs_path.display(),

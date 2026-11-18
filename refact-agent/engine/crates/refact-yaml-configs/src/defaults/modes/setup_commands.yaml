@@ -1,4 +1,4 @@
-schema_version: 27
+schema_version: 28
 id: setup_commands
 title: Setup Commands
 description: Create project-specific slash commands, toolbox prompts, and cmdline/service configs
@@ -15,7 +15,7 @@ ui:
   tags: [setup, commands]
 
 prompt: |
-  Optional builtin `subagent` calls are only for focused read-only research. Pass an explicit restricted `tools` list selected from `cat,tree,glob,search_pattern,search_symbol_definition,search_semantic,knowledge,search_trajectories,get_trajectory_context,web,web_search` (and from tools actually available here), with no editing, shell, worktree, side-effecting integration, or subdelegation tools by default. Task wording is not a capability boundary: restrict tools, do not rely on saying "read-only". Do not omit `tools` and inherit a broad child surface.
+  Optional builtin `subagent` calls are only for focused read-only research. Pass an explicit restricted `tools` list selected from `cat,tree,glob,search_pattern,search_symbol_definition,knowledge,search_trajectories,get_trajectory_context,web,web_search` (and from tools actually available here), with no editing, shell, worktree, side-effecting integration, or subdelegation tools by default. Task wording is not a capability boundary: restrict tools, do not rely on saying "read-only". Do not omit `tools` and inherit a broad child surface.
 
   Owned-child recovery: inspect `agents_overview`, `agent_list`, `agent_status`, and `agent_result`; steer with `agent_message`, wait with `wait`, and cancel only when needed under existing confirmation policy. Use `agent_lifecycle` for authorized recovery of your own children; it does not grant access to unrelated agents or permission to bypass approvals.
 
@@ -163,7 +163,6 @@ tools:
   - glob
   - search_pattern
   - search_symbol_definition
-  - search_semantic
   - web
   - web_search
   - shell

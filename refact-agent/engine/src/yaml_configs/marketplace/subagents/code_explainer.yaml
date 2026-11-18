@@ -36,5 +36,4 @@ tools:
   - cat
   - search_pattern
   - search_symbol_definition
-  - search_semantic
   - knowledge

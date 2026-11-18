@@ -25,8 +25,6 @@ class EventNames {
         OPEN_CHAT_IN_TAB("ide/openChatInNewTab"),
         OPEN_CHAT_IN_BROWSER("ide/openChatInBrowser"),
         OPEN_EXTERNAL_URL("open_external_url"),
-        FIM_READY("fim/ready"),
-        FIM_REQUEST("fim/request"),
 
         // Adding
         START_ANIMATION("ide/animateFile/start"),
@@ -39,7 +37,6 @@ class EventNames {
         IDE_TOOL_EDIT("ide/toolEdit"),
         FORCE_RELOAD_FILE_BY_PATH("ide/forceReloadFileByPath"),
         FORCE_RELOAD_PROJECT_TREE_FILES("ide/forceReloadProjectTreeFiles"),
-        SET_CODE_COMPLETION_MODEL("ide/setCodeCompletionModel"),
         DROPDOWN_STATE_CHANGED("ide/dropdownStateChanged"),
         TASK_DONE("ide/taskDone"),
         ASK_QUESTIONS("ide/askQuestions"),
@@ -54,10 +51,6 @@ class EventNames {
         SET_SELECTED_SNIPPET("selected_snippet/set"),
         @SerializedName("activeFile/setFileInfo")
         SET_ACTIVE_FILE_INFO("activeFile/setFileInfo"),
-        @SerializedName("fim/error")
-        FIM_ERROR("fim/error"),
-        @SerializedName("fim/receive")
-        FIM_RECEIVE("fim/receive"),
         @SerializedName("chatThread/new")
         NEW_CHAT("chatThread/new"),
 
@@ -99,9 +92,6 @@ class Events {
 
                 EventNames.FromChat.PASTE_DIFF.value -> payload?.asString?.let { Events.Editor.PasteDiff(it) }
 
-
-                // EventNames.FromChat.FIM_READY.value -> p2?.deserialize(payload, Fim.Ready::class.java)
-                EventNames.FromChat.FIM_REQUEST.value -> Fim.Request()
                 EventNames.FromChat.OPEN_HOTKEYS.value -> OpenHotKeys()
                 EventNames.FromChat.OPEN_CHAT_IN_BROWSER.value -> OpenChatInBrowser()
                 EventNames.FromChat.IS_CHAT_STREAMING.value -> {
@@ -148,11 +138,6 @@ class Events {
 
                 EventNames.FromChat.FORCE_RELOAD_PROJECT_TREE_FILES.value -> {
                     return Editor.ForceReloadProjectTreeFiles()
-                }
-
-                EventNames.FromChat.SET_CODE_COMPLETION_MODEL.value -> {
-                    val model = payload?.asString ?: return null
-                    return Editor.SetCodeCompletionModel(model)
                 }
 
                 EventNames.FromChat.DROPDOWN_STATE_CHANGED.value -> {
@@ -224,119 +209,6 @@ class Events {
 
         // typealias ApplyPayload: Payload()
         class Apply(override val payload: ApplyPayload) : FromChat(EventNames.FromChat.WRITE_RESULTS_TO_FILE, payload)
-    }
-
-    class Fim {
-        class Ready : FromChat(EventNames.FromChat.FIM_READY, null)
-        class Request : FromChat(EventNames.FromChat.FIM_REQUEST, null)
-
-        class Choice(
-            @SerializedName("code_completion")
-            val codeCompletion: String,
-            @SerializedName("finish_reason")
-            val finishReason: String,
-            val index: Int
-        )
-
-        data class File(
-            @SerializedName("file_content")
-            val fileContent: String,
-            @SerializedName("file_name")
-            val fileName: String,
-            val line1: Int,
-            val line2: Int,
-        )
-
-        data class Bucket(
-            @SerializedName("file_path")
-            val filePath: String,
-            val line1: Int,
-            val line2: Int,
-            val name: String,
-        )
-
-        data class Context(
-            @SerializedName("attached_files")
-            val attachedFiles: Array<File>?,
-            @SerializedName("bucket_declarations")
-            val bucketDeclarations: Array<Bucket>?,
-            @SerializedName("bucket_usage_of_same_stuff")
-            val bucketUsageOfSameStuff: Array<Bucket>?,
-            @SerializedName("bucket_high_overlap")
-            val bucketHighOverlap: Array<Bucket>?,
-            @SerializedName("cursor_symbols")
-            val cursorSymbols: Array<Bucket>?,
-            @SerializedName("fim_ms")
-            val fimMs: Int?,
-            @SerializedName("n_ctx")
-            val nCtx: Int?,
-            @SerializedName("rag_ms")
-            val ragMs: Int?,
-            @SerializedName("rag_tokens_limit")
-            val ragTokensLimit: Int?,
-        ) {
-            override fun equals(other: Any?): Boolean {
-                if (this === other) return true
-                if (javaClass != other?.javaClass) return false
-
-                other as Context
-
-                if (attachedFiles != null) {
-                    if (other.attachedFiles == null) return false
-                    if (!attachedFiles.contentEquals(other.attachedFiles)) return false
-                } else if (other.attachedFiles != null) return false
-                if (bucketDeclarations != null) {
-                    if (other.bucketDeclarations == null) return false
-                    if (!bucketDeclarations.contentEquals(other.bucketDeclarations)) return false
-                } else if (other.bucketDeclarations != null) return false
-                if (bucketUsageOfSameStuff != null) {
-                    if (other.bucketUsageOfSameStuff == null) return false
-                    if (!bucketUsageOfSameStuff.contentEquals(other.bucketUsageOfSameStuff)) return false
-                } else if (other.bucketUsageOfSameStuff != null) return false
-                if (bucketHighOverlap != null) {
-                    if (other.bucketHighOverlap == null) return false
-                    if (!bucketHighOverlap.contentEquals(other.bucketHighOverlap)) return false
-                } else if (other.bucketHighOverlap != null) return false
-                if (cursorSymbols != null) {
-                    if (other.cursorSymbols == null) return false
-                    if (!cursorSymbols.contentEquals(other.cursorSymbols)) return false
-                } else if (other.cursorSymbols != null) return false
-                if (fimMs != other.fimMs) return false
-                if (nCtx != other.nCtx) return false
-                if (ragMs != other.ragMs) return false
-                if (ragTokensLimit != other.ragTokensLimit) return false
-
-                return true
-            }
-
-            override fun hashCode(): Int {
-                var result = attachedFiles?.contentHashCode() ?: 0
-                result = 31 * result + (bucketDeclarations?.contentHashCode() ?: 0)
-                result = 31 * result + (bucketUsageOfSameStuff?.contentHashCode() ?: 0)
-                result = 31 * result + (bucketHighOverlap?.contentHashCode() ?: 0)
-                result = 31 * result + (cursorSymbols?.contentHashCode() ?: 0)
-                result = 31 * result + (fimMs?.hashCode() ?: 0)
-                result = 31 * result + (nCtx?.hashCode() ?: 0)
-                result = 31 * result + (ragMs?.hashCode() ?: 0)
-                result = 31 * result + (ragTokensLimit?.hashCode() ?: 0)
-                return result
-            }
-        }
-
-        // Debug data
-
-        data class FimDebugPayload(
-            val choices: Array<Choice>,
-            val model: String,
-            val context: Context?,
-            val created: Number?,
-            val elapsed: Number?,
-            val cached: Boolean?,
-        ) : Payload()
-
-        class Receive(payload: FimDebugPayload) : ToChat<Payload>(EventNames.ToChat.FIM_RECEIVE, payload)
-
-        class Error(payload: String) : ToChat<String>(EventNames.ToChat.FIM_ERROR, payload)
     }
 
     abstract class ToChat<T : Any>(
@@ -414,7 +286,6 @@ class Events {
         class SetSnippetToChat(payload: Snippet) : ToChat<Payload>(EventNames.ToChat.SET_SELECTED_SNIPPET, payload)
         class ForceReloadFileByPath(val path: String) : FromChat(EventNames.FromChat.FORCE_RELOAD_FILE_BY_PATH, path)
         class ForceReloadProjectTreeFiles(): FromChat(EventNames.FromChat.FORCE_RELOAD_PROJECT_TREE_FILES, null)
-        class SetCodeCompletionModel(val model: String): FromChat(EventNames.FromChat.SET_CODE_COMPLETION_MODEL, model)
     }
 
     object NewChat : ToChat<Unit>(EventNames.ToChat.NEW_CHAT, Unit)
@@ -441,7 +312,7 @@ class Events {
     class Config {
         abstract class BaseFeatures()
 
-        data class Features(val ast: Boolean, val vecdb: Boolean, val codegraph: Boolean = true, val images: Boolean? = true, val statistics: Boolean? = true, val knowledge: Boolean? = false) : BaseFeatures()
+        data class Features(val ast: Boolean, val codegraph: Boolean = true, val images: Boolean? = true, val statistics: Boolean? = true, val knowledge: Boolean? = false) : BaseFeatures()
 
         data class ThemeProps(
             val appearance: String,
@@ -449,8 +320,6 @@ class Events {
             val scale: String = "90%",
             val accentColor: String = "gray"
         )
-
-        data class KeyBindings(val completeManual: String)
 
         data class ConnectionIssue(
             val code: String,
@@ -486,7 +355,6 @@ class Events {
             val features: Config.Features,
             val themeProps: Config.ThemeProps?,
             val lspPort: Int,
-            val keyBindings: Config.KeyBindings,
             val lspUrl: String? = null,
             val backendReady: Boolean = lspPort > 0,
             val connectionStatus: String = if (backendReady) "ready" else "connecting",

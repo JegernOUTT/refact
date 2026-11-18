@@ -8,7 +8,7 @@ import com.intellij.openapi.editor.event.CaretEvent
 import com.smallcloud.refactai.modes.Mode
 import com.smallcloud.refactai.modes.ModeProvider.Companion.getOrCreateModeProvider
 import com.smallcloud.refactai.modes.ModeType
-import com.smallcloud.refactai.modes.completion.structs.DocumentEventExtra
+import com.smallcloud.refactai.modes.DocumentEventExtra
 import dev.gitlive.difflib.DiffUtils
 
 open class DiffMode(
@@ -23,16 +23,13 @@ open class DiffMode(
             diffLayout?.cancelPreview()
             diffLayout = null
         }
-        if (editor != null && !Thread.currentThread().stackTrace.any { it.methodName == "switchMode" }) {
-            getOrCreateModeProvider(editor).switchMode()
+        if (editor != null) {
+            getOrCreateModeProvider(editor).exitMode(this)
         }
     }
 
     override fun beforeDocumentChangeNonBulk(event: DocumentEventExtra) {
         cancel(event.editor)
-    }
-
-    override fun onTextChange(event: DocumentEventExtra) {
     }
 
     override fun onTabPressed(editor: Editor, caret: Caret?, dataContext: DataContext) {

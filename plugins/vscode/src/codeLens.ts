@@ -114,7 +114,6 @@ export class LensProvider implements vscode.CodeLensProvider
             // lenses.push(new ExperimentalLens(range, "↻ Rerun \"" + estate.global_intent + "\" (F1)", "RERUN"));  // 🔃
         }
 
-        state.completion_reset_on_cursor_movement = false;
         return lenses;
     }
 }

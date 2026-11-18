@@ -44,26 +44,6 @@ function codeGraphState(
   return "Error";
 }
 
-function semanticIndexState(
-  isError: boolean,
-  alive?: string,
-  state?: string,
-  hasError?: boolean,
-): OverviewState {
-  if (isError || hasError) return "Error";
-  if (alive === "turned_off" || alive === "" || alive === "false") return "Off";
-  if (state === "starting" || state === "parsing") return "Indexing";
-  if (
-    state === "done" ||
-    state === "cooldown" ||
-    alive === "working" ||
-    alive === "true"
-  ) {
-    return "Healthy";
-  }
-  return "Error";
-}
-
 export const GeneralSettingsSection: React.FC = () => {
   const dispatch = useAppDispatch();
   const config = useAppSelector(selectConfig);
@@ -143,12 +123,6 @@ export const GeneralSettingsSection: React.FC = () => {
     isRagStatusError,
     ragStatus?.codegraph_alive,
     ragStatus?.codegraph?.state,
-  );
-  const semanticIndex = semanticIndexState(
-    isRagStatusError,
-    ragStatus?.vecdb_alive,
-    ragStatus?.vecdb?.state,
-    Boolean(ragStatus?.vec_db_error),
   );
 
   return (
@@ -249,7 +223,7 @@ export const GeneralSettingsSection: React.FC = () => {
         <SettingItem
           className="rf-enter"
           title="Index health"
-          description={`CodeGraph: ${codeGraph} · Semantic index: ${semanticIndex}`}
+          description={`CodeGraph: ${codeGraph}`}
           control={
             <Button
               variant="soft"

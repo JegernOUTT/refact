@@ -260,7 +260,6 @@ impl McpSessionOwner {
         if native.launched_cfg.get("operator_tools").is_none()
             || native.startup_task_handles.is_some()
             || native.health_task_handle.is_some()
-            || native.resource_index_task.is_some()
             || native.oauth_refresh_task_handle.is_some()
         {
             return Err(ResourceError::ValidationFailed(

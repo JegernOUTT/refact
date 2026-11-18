@@ -10,27 +10,34 @@ class LSPConfigTest {
         val settings = LSPConfig(
             ast = true,
             astFileLimit = 123,
-            vecdb = false,
-            vecdbFileLimit = 456,
             codegraph = true,
             codegraphFileLimit = 789,
         ).toOpenProjectSettings()
 
+        assertEquals(
+            setOf("ast", "codegraph", "ast_max_files", "codegraph_max_files"),
+            settings.keys
+        )
         assertEquals(true, settings["ast"])
-        assertEquals(false, settings["vecdb"])
         assertEquals(true, settings["codegraph"])
         assertEquals(123, settings["ast_max_files"])
-        assertEquals(456, settings["vecdb_max_files"])
         assertEquals(789, settings["codegraph_max_files"])
         assertFalse(settings.containsKey("port"))
     }
 
     @Test
+    fun openProjectSettingsNeverSendVecdbKeys() {
+        val settings = LSPConfig().toOpenProjectSettings()
+
+        assertFalse(settings.containsKey("vecdb"))
+        assertFalse(settings.containsKey("vecdb_max_files"))
+    }
+
+    @Test
     fun openProjectSettingsFillDefaults() {
-        val settings = LSPConfig(astFileLimit = null, vecdbFileLimit = null, codegraphFileLimit = null).toOpenProjectSettings()
+        val settings = LSPConfig(astFileLimit = null, codegraphFileLimit = null).toOpenProjectSettings()
 
         assertEquals(LSPConfig.DEFAULT_AST_MAX_FILES, settings["ast_max_files"])
-        assertEquals(LSPConfig.DEFAULT_VECDB_MAX_FILES, settings["vecdb_max_files"])
         assertEquals(LSPConfig.DEFAULT_CODEGRAPH_MAX_FILES, settings["codegraph_max_files"])
     }
 }

@@ -13,9 +13,6 @@ vi.mock("../../services/refact/ragStatus", () => ({
 const status: RagStatus = {
   ast: null,
   ast_alive: "turned_off",
-  vecdb: null,
-  vecdb_alive: "turned_off",
-  vec_db_error: "",
   codegraph: {
     counts: {
       nodes: 12,

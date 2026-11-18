@@ -16,14 +16,12 @@ import styles from "./SearchTool.module.css";
 
 export type SearchToolType =
   | "search_pattern"
-  | "search_semantic"
   | "search_symbol_definition"
   | "glob"
   | "tree";
 
 interface SearchArgs {
   pattern?: unknown;
-  queries?: unknown;
   symbols?: unknown;
   scope?: unknown;
   path?: unknown;
@@ -72,14 +70,6 @@ function presentation(
         target: text(args.pattern) ?? "pattern",
         scope: visibleScope,
         unit: "matches",
-      };
-    case "search_semantic":
-      return {
-        icon: <Search />,
-        verb: "Search",
-        target: text(args.queries) ?? "query",
-        scope: visibleScope,
-        unit: "results",
       };
     case "search_symbol_definition":
       return {

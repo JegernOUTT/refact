@@ -1,4 +1,4 @@
-schema_version: 26
+schema_version: 27
 id: setup_modes
 title: Setup Modes
 description: Guided setup for project-specific chat modes
@@ -217,7 +217,6 @@ tools:
   - glob
   - search_pattern
   - search_symbol_definition
-  - search_semantic
   - web
   - web_search
   - search_trajectories

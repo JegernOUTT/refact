@@ -67,10 +67,10 @@ What makes Refact different is ownership. You bring the models and keys, choose 
 
 ## Autonomous agents & tools
 
-Refact is not a one-shot autocomplete box; it is a live agent loop that can inspect a repo, change it, run the result, read the fallout, and try again. The fun part: the same brain that streams an answer can pause for permission, fan out tool calls, preserve signed thinking blocks, and keep working like a tiny dev team in a trench coat.
+Refact is not a one-shot prompt box; it is a live agent loop that can inspect a repo, change it, run the result, read the fallout, and try again. The fun part: the same brain that streams an answer can pause for permission, fan out tool calls, preserve signed thinking blocks, and keep working like a tiny dev team in a trench coat.
 
 - Real session runtime: chats move through `Idle → Generating → ExecutingTools → WaitingUserInput/Paused → Completed/Error`, so a request can become an iterative edit-test-debug cycle instead of a single reply.
-- Search stack with teeth: `tree`, `cat`, regex search, AST `symbol_def`, semantic search, trajectory/knowledge lookup, and project memory let the agent triangulate code by path, structure, and meaning.
+- Search stack with teeth: `tree`, `cat`, regex search, AST `symbol_def`, trajectory/knowledge lookup, and project memory let the agent triangulate code by path, structure, and history.
 - Editing is first-class and guarded: `apply_patch`, `create_textdoc`, `update_textdoc*`, `mv`, `rm`, and `undo_textdoc` produce concrete workspace mutations, with confirmation gates and limited auto-approval for patch-like edits.
 - Runtime tools close the loop: `shell`, `process_start`, `process_read`, `process_wait`, `process_kill`, PTY `process_write_stdin`, `sleep`, and `cron_*` let agents run commands, monitor services, drive interactive processes, and schedule follow-ups.
 - Delegation is built in: `subagent` splits exploration, review, and implementation work across specialized agents; reviewers using different models independently investigate explicit domains, then challenge each other's findings before evidence-based adjudication.
@@ -79,7 +79,7 @@ Refact is not a one-shot autocomplete box; it is a live agent loop that can insp
 
 | Need       | Tool families                                              |
 | ---------- | ---------------------------------------------------------- |
-| Understand | `tree`, `cat`, regex, AST, semantic search, knowledge      |
+| Understand | `tree`, `cat`, regex, AST, trajectories, knowledge        |
 | Change     | `apply_patch`, `create/update_textdoc`, `mv`, `rm`, `undo` |
 | Prove      | `shell`, `process_*`, PTY stdin, browser, cron             |
 
@@ -123,16 +123,16 @@ Describe a feature once; the planner cracks it into cards, launches a tiny swarm
 
 ![Knowledge save and autoinjection](media/memory.png#gh-light-mode-only)
 ![Knowledge save and autoinjection](media/memory-dark.png#gh-dark-mode-only)
-Refact turns your repo into a local memory palace: plans, notes, trajectories, code semantics, and background signals live under `<project>/.refact/`, ready for the next session without leaving your machine.
+Refact turns your repo into a local memory palace: plans, notes, trajectories, code structure, and background signals live under `<project>/.refact/`, ready for the next session without leaving your machine.
 Static plans are the uncrushable spine—`set_plan` pins the base, `update_plan` appends deltas, and `get_plan` synthesizes the current truth while compression is forbidden from erasing it.
 
-- **Local by design:** project knowledge, trajectories, task memory, integrations, schedules, and VecDB state are scoped to `.refact/`, with global memory only added explicitly through the configured knowledge directory.
+- **Local by design:** project knowledge, trajectories, task memory, integrations, and schedules are scoped to `.refact/`, with global memory only added explicitly through the configured knowledge directory.
 - **Plans that survive the squeeze:** hidden `plan` messages and `event(plan_delta)` updates are marked `Never` in chat-history compression, so long agent runs can trim noise without eating the mission briefing.
-- **Graph + vector recall:** a petgraph knowledge graph links documents to tags, file refs, entities, links, and supersession edges, while SQLite + vec0 embeddings index code, Markdown, and trajectory chunks for semantic search.
+- **Graph + lexical recall:** a petgraph knowledge graph links documents to tags, file refs, entities, links, and supersession edges, while a lexical `KnowledgeIndex` scores tags, filenames, and content and the graph expands the hits to related documents.
 - **Autoinjected context, not paste spam:** @-commands and memory injection turn recall into `context_file` messages, then token-aware postprocessing resolves paths, AST-marks useful regions, and keeps only the sharpest context slices.
 - **Typed operational memory:** decisions, specs, gotchas, risks, handoffs, progress notes, postmortems, briefs, and task memories become searchable project artifacts instead of disappearing into chat scrollback.
-- **Trajectories become fuel:** saved conversations under `.refact/trajectories/` are chunked into metadata plus message windows, making past tool results and decisions discoverable without replaying the whole transcript.
-- **Background indexers keep watch:** AST, VecDB, knowledge cleanup, and Buddy memory observers refresh the map while respecting shutdown and project scope, so future chats start warm instead of blank.
+- **Trajectories become fuel:** saved conversations under `.refact/trajectories/` (plus the global trajectories directory) are searchable by keyword (BM25) through `search_trajectories`, and `get_trajectory_context` expands a hit, making past tool results and decisions discoverable without replaying the whole transcript.
+- **Background indexers keep watch:** CodeGraph, knowledge cleanup, and Buddy memory observers refresh the map while respecting shutdown and project scope, so future chats start warm instead of blank.
 
 → Deep dive: [Memory and Knowledge](https://github.com/JegernOUTT/refact/wiki/Memory-and-Knowledge), [Hidden Roles and Plans](https://github.com/JegernOUTT/refact/wiki/Hidden-Roles-and-Plans)
 
@@ -141,7 +141,7 @@ Static plans are the uncrushable spine—`set_plan` pins the base, `update_plan`
 Refact runs where your code already lives: on your machine, pointed only at the models, runtimes, and integrations you choose. No bundled cloud is required, no account is mandatory, and local/BYOK usage keeps the whole AI stack inspectable, forkable, and yours.
 
 - The engine runs as local `refact` daemon and worker processes; network traffic is limited to configured providers and integrations, from hosted APIs to local Ollama/LM Studio-style runtimes.
-- Project state is plain project state: trajectories, knowledge, tasks, integration settings, schedules, and VecDB indexes live under `<project>/.refact/`.
+- Project state is plain project state: trajectories, knowledge, tasks, integration settings, and schedules live under `<project>/.refact/`.
 - User-level knobs stay local too: privacy rules and provider definitions live under `~/.config/refact/`, while caches, logs, telemetry artifacts, shadow repos, and integration runtime state live under `~/.cache/refact/`.
 - Bring your own keys and keep credentials on your machine; BYOK provider settings can target cloud APIs or fully offline local inference with no Refact-hosted control plane in the loop.
 - Agent modes, subagents, toolbox/slash commands, code-lens prompts, system prompts, and provider defaults are YAML-configurable from `refact-agent/engine/yaml_configs/defaults/` and its packaged defaults.
@@ -190,9 +190,9 @@ Plug in almost anything — local CLIs, HTTP/SSE services, project rituals, spec
 Refact is BYOK all the way down: hosted frontier APIs, local runtimes, self-hosted OpenAI-compatible stacks, and OAuth-backed coding agents can all sit in the same cockpit. Pick the right brain per task, keep credentials and policy local, and let capability-aware routing do the boring glue work.
 
 - 20+ provider families are first-class citizens: Anthropic, OpenAI, OpenAI Responses, OpenAI Codex, OpenRouter, Groq, DeepSeek, Doubao, xAI, xAI Responses, Google Gemini, Qwen, Kimi, Zhipu, MiniMax, GitHub Copilot, Claude Code, plus custom endpoints and local runtimes.
-- Run fully local or self-hosted when you want the keys off the internet: Ollama, LM Studio, vLLM, and any OpenAI-compatible `/chat/completions`, `/responses`, `/completions`, or embeddings route can be wired in.
-- Mix models by role instead of marrying one vendor: chat, agent, task planner, light chat, thinking, Buddy, code completion/FIM, and embeddings each have their own defaults.
-- Capability metadata keeps selections honest: tool use, agent mode, reasoning, multimodality, context windows, cache control, tokenizer/FIM settings, and embeddings are resolved before a model is offered for work.
+- Run fully local or self-hosted when you want the keys off the internet: Ollama, LM Studio, vLLM, and any OpenAI-compatible `/chat/completions` or `/responses` route can be wired in.
+- Mix models by role instead of marrying one vendor: chat, agent, task planner, light chat, thinking, and Buddy each have their own defaults.
+- Capability metadata keeps selections honest: tool use, agent mode, reasoning, multimodality, context windows, cache control, and tokenizer settings are resolved before a model is offered for work.
 - OAuth is built into the provider surface for OpenAI Codex and Claude Code, while classic API-key providers stay plain BYOK through local provider config.
 - Adding a new provider is intentionally tiny: create one YAML template for endpoints, wire format, defaults, and model caps, then add one entry to the provider template list.
 - The result is model freedom without config soup: swap paid frontier models, cheap routers, local coders, and private deployments per task while Refact keeps the same agentic tool loop.
@@ -209,11 +209,11 @@ One `refact` binary becomes the whole control room. Running `refact` (the same a
 - `refact projects open .` registers the current workspace and starts its worker; `refact ps`, `refact status`, `refact logs`, `refact events`, and `refact doctor` inspect the same local runtime.
 - `refact daemon --foreground` is available for debugging or service supervision, while normal `refact`/`refact ui` usage auto-starts the daemon when needed.
 - IDE plugins provide file context and editor actions through LSP, HTTP, and a postMessage bridge; they attach to the daemon-backed project instead of being the only way to run Refact.
-- Local intelligence stays local: tree-sitter AST indexing, SQLite+vec0 semantic search, project memory, Buddy, scheduler, and task-agent worktrees live on your machine and feed the same agent/tool pipeline.
+- Local intelligence stays local: CodeGraph source indexing, lexical knowledge search, project memory, Buddy, scheduler, and task-agent worktrees live on your machine and feed the same agent/tool pipeline.
 
 → Deep dive: [Architecture](https://github.com/JegernOUTT/refact/wiki/Architecture), [GUI Architecture](https://github.com/JegernOUTT/refact/wiki/GUI-Architecture)
 
-**Also included:** [Code Completion (FIM)](https://github.com/JegernOUTT/refact/wiki/Code-Completion-FIM), browser automation via [Chrome integrations](https://github.com/JegernOUTT/refact/wiki/Integrations-Chrome), and [Checkpoints &amp; Git](https://github.com/JegernOUTT/refact/wiki/Checkpoints-and-Git).
+**Also included:** browser automation via [Chrome integrations](https://github.com/JegernOUTT/refact/wiki/Integrations-Chrome) and [Checkpoints &amp; Git](https://github.com/JegernOUTT/refact/wiki/Checkpoints-and-Git).
 
 ## Quickstart & install
 
@@ -289,7 +289,7 @@ Full guide: [CLI and daemon installation guide](https://github.com/JegernOUTT/re
 | BYOK providers                    | Broad hosted, local, OpenAI-compatible, and custom provider support                   | Usually one vendor or a small provider set |
 | Autonomous agents                 | Tool-using agent modes with shell, file, browser, MCP, and delegation support         | Often chat-first with limited autonomy     |
 | Task planner + cards              | Planner chats, task boards, per-card agents, and worktree isolation                   | Usually external project tracking          |
-| Persistent memory + autoinjection | `.refact/` knowledge, trajectories, tasks, integrations, VecDB, and context injection | Often ephemeral or account-cloud memory    |
+| Persistent memory + autoinjection | `.refact/` knowledge, trajectories, tasks, integrations, and context injection | Often ephemeral or account-cloud memory    |
 | Hidden static plans               | `set_plan`, `update_plan`, and `get_plan` preserve base plans plus append-only deltas | Rarely supported                           |
 | MCP / skills / subagents          | MCP lazy discovery, skills, slash commands, hooks, subagents, and marketplaces        | Varies by vendor                           |
 | Worktree isolation                | Per-card isolated git worktrees for task-agent execution                              | Rarely built in                            |

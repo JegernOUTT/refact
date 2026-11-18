@@ -7,7 +7,6 @@ members = [
     "crates/refact-scheduler-core",
     "crates/refact-claude-cloud",
     "crates/refact-chat-api",
-    "crates/refact-vecdb",
     "crates/refact-codegraph-parsers",
     "crates/refact-codegraph",
     "crates/refact-codehealth",
@@ -113,14 +112,12 @@ rust-embed = { version = "8.5.0", features = ["include-exclude"] }
 serde_yaml = "0.9.31"
 sha2 = "0.10.8"
 shell-words = "1.1.0"
-sqlite-vec = "0.1.6"
 strip-ansi-escapes = "0.2.1"
 tokio-rusqlite = "0.5.0"
 unicode-width = "0.2"
 url = { version = "2", features = ["serde"] }
 walkdir = "2.3"
 which = "7.0.2"
-zerocopy = "0.8.14"
 zip = { version = "2.2", default-features = false, features = ["deflate"] }
 
 [profile.release]
@@ -156,9 +153,6 @@ debug = false
 opt-level = 3
 
 [profile.dev.package.rusqlite]
-opt-level = 3
-
-[profile.dev.package.sqlite-vec]
 opt-level = 3
 
 [profile.dev.package.tokio-rusqlite]
@@ -313,7 +307,6 @@ perf-tests = []
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [build-dependencies]
-cc = "1"
 shadow-rs = { version = "1.1.0", default-features = false, features = ["build"] }
 serde.workspace = true
 serde_json.workspace = true
@@ -343,7 +336,6 @@ refact-apps-core = { path = "crates/refact-apps-core" }
 refact-scheduler-core = { path = "crates/refact-scheduler-core" }
 refact-claude-cloud = { path = "crates/refact-claude-cloud" }
 refact-chat-api = { path = "crates/refact-chat-api" }
-refact-vecdb = { path = "crates/refact-vecdb" }
 refact-codegraph = { path = "crates/refact-codegraph" }
 refact-codehealth = { path = "crates/refact-codehealth" }
 refact-git-intel = { path = "crates/refact-git-intel" }
@@ -444,7 +436,6 @@ hex.workspace = true
 shell-words.workspace = true
 shell-escape = "0.1.5"
 similar = "2.3.0"
-sqlite-vec.workspace = true
 strsim = "0.11.1"
 sysinfo = { version = "0.35.2", default-features = false, features = ["system"] }
 tempfile.workspace = true
@@ -471,7 +462,6 @@ walkdir.workspace = true
 which.workspace = true
 zip.workspace = true
 petgraph.workspace = true
-zerocopy.workspace = true
 
 # There you can use a local copy
 # rmcp = { path = "../../../rust-sdk/crates/rmcp/", features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest", "auth"] }

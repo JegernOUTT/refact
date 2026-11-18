@@ -37,15 +37,15 @@ impl BuddyJob for HealthWatcherJob {
             .await
             .caps
             .as_ref()
-            .map(|c| (!c.completion_models.is_empty(), !c.chat_models.is_empty()));
+            .map(|c| !c.chat_models.is_empty());
 
-        let Some((has_completion, has_chat)) = caps_result else {
+        let Some(has_chat) = caps_result else {
             return BuddyJobResult::default();
         };
 
         let was_healthy = ctx.job_state.last_result.as_deref() == Some("healthy");
 
-        if !has_completion && !has_chat {
+        if !has_chat {
             let suggestion = if !was_healthy {
                 None
             } else {
@@ -53,7 +53,9 @@ impl BuddyJob for HealthWatcherJob {
                     id: "health-no-models".to_string(),
                     suggestion_type: "health".to_string(),
                     title: "No AI models configured".to_string(),
-                    description: "I couldn't find any completion or chat models. Head to Provider Settings to add one.".to_string(),
+                    description:
+                        "I couldn't find any chat models. Head to Provider Settings to add one."
+                            .to_string(),
                     created_at: chrono::Utc::now().to_rfc3339(),
                     dismissed: false,
                     controls: vec![],
@@ -76,18 +78,7 @@ impl BuddyJob for HealthWatcherJob {
             };
         }
 
-        let parts: Vec<&str> = [
-            if has_completion {
-                Some("completion")
-            } else {
-                None
-            },
-            if has_chat { Some("chat") } else { None },
-        ]
-        .into_iter()
-        .flatten()
-        .collect();
-        let title = format!("Models ready: {}", parts.join(", "));
+        let title = "Models ready: chat".to_string();
 
         let activity = if !was_healthy {
             Some(BuddyActivity {
@@ -128,10 +119,9 @@ fn health_watcher_has_visible_output(
     let Some(caps) = caps else {
         return false;
     };
-    let has_completion = !caps.completion_models.is_empty();
     let has_chat = !caps.chat_models.is_empty();
     let was_healthy = ctx.job_state.last_result.as_deref() == Some("healthy");
-    !has_completion && !has_chat || !was_healthy
+    !has_chat || !was_healthy
 }
 
 #[cfg(test)]

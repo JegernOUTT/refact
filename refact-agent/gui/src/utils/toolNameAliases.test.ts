@@ -9,7 +9,6 @@ describe("toolNameAliases", () => {
     ["t_delegate", "subagent"],
     ["t_regex_search", "search_pattern"],
     ["t_symbol_def", "search_symbol_definition"],
-    ["t_semantic_search", "search_semantic"],
     ["t_write", "create_textdoc"],
     ["t_patch", "update_textdoc"],
     ["t_patch_re", "update_textdoc_regex"],

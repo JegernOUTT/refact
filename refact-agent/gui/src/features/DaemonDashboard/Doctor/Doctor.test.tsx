@@ -94,8 +94,6 @@ function modelsResponse(names: string[]) {
       removable: false,
       user_configured: false,
     })),
-    completion_models: [],
-    embedding_model: null,
   };
 }
 

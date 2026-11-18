@@ -1211,40 +1211,6 @@ pub struct SamplingParameters {
     pub enable_thinking: Option<bool>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, Default)]
-pub struct CursorPosition {
-    pub file: String,
-    pub line: i32,
-    pub character: i32,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone, Default)]
-pub struct CodeCompletionInputs {
-    pub sources: HashMap<String, String>,
-    pub cursor: CursorPosition,
-    pub multiline: bool,
-}
-
-#[derive(Debug, Deserialize, Clone)]
-pub struct CodeCompletionPost {
-    pub inputs: CodeCompletionInputs,
-    #[serde(default)]
-    pub parameters: SamplingParameters,
-    #[serde(default)]
-    pub model: String,
-    #[serde(default)]
-    pub stream: bool,
-    #[serde(default)]
-    pub no_cache: bool,
-    #[serde(default)]
-    pub use_ast: bool,
-    #[allow(dead_code)]
-    #[serde(default)]
-    pub use_vecdb: bool,
-    #[serde(default)]
-    pub rag_tokens_n: usize,
-}
-
 /// How a delivered batch of messages should land in a chat that may be busy.
 ///
 /// * `Preempt` (A) — urgent: abort the in-flight draft and land immediately.

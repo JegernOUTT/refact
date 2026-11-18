@@ -17,7 +17,7 @@ pub fn functions() -> Vec<EngineFn> {
                 "provider":{"type":"string","minLength":1,"description":"Provider instance name to keep."},
                 "include_disabled":{"type":"boolean","description":"Include disabled models; false by default."}
             }}),
-            output: || Some(json!({"type":"object","required":["models"],"properties":{"models":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"provider":{"type":"string"},"display_name":{"type":"string"},"n_ctx":{"type":"integer"},"max_output_tokens":{"type":"integer"},"supports_tools":{"type":"boolean"},"supports_agent":{"type":"boolean"},"supports_multimodality":{"type":"boolean"},"supports_parallel_tools":{"type":"boolean"},"supports_temperature":{"type":"boolean"},"reasoning_effort_options":{"type":"array"},"supports_thinking_budget":{"type":"boolean"},"max_thinking_tokens":{"type":"integer"},"pricing":{"type":"object","description":"USD per 1M tokens as stored"},"slots":{"type":"array","items":{"enum":["chat","chat_model_2","task_planner","light","thinking","buddy"]}},"enabled":{"type":"boolean"},"experimental":{"type":"boolean"}}}},"completion_default":{"type":"string"},"embedding":{"type":"object","properties":{"id":{"type":"string"},"n_ctx":{"type":"integer"}}}}})),
+            output: || Some(json!({"type":"object","required":["models"],"properties":{"models":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"provider":{"type":"string"},"display_name":{"type":"string"},"n_ctx":{"type":"integer"},"max_output_tokens":{"type":"integer"},"supports_tools":{"type":"boolean"},"supports_agent":{"type":"boolean"},"supports_multimodality":{"type":"boolean"},"supports_parallel_tools":{"type":"boolean"},"supports_temperature":{"type":"boolean"},"reasoning_effort_options":{"type":"array"},"supports_thinking_budget":{"type":"boolean"},"max_thinking_tokens":{"type":"integer"},"pricing":{"type":"object","description":"USD per 1M tokens as stored"},"slots":{"type":"array","items":{"enum":["chat","chat_model_2","task_planner","light","thinking","buddy"]}},"enabled":{"type":"boolean"},"experimental":{"type":"boolean"}}}}}})),
             handler: list,
             preview: None,
             timeout: None,
@@ -131,14 +131,8 @@ fn list<'a>(
             }
             models.push(row);
         }
-        let mut data = json!({"models":models});
-        if !caps.defaults.completion_default_model.is_empty() {
-            data["completion_default"] = json!(caps.defaults.completion_default_model);
-        }
-        if !caps.embedding_model.base.id.is_empty() {
-            data["embedding"] =
-                json!({"id":caps.embedding_model.base.id,"n_ctx":caps.embedding_model.base.n_ctx});
-        }
+        let data = json!({"models":models});
+
         let text = format!(
             "{} chat models; default {}",
             models.len(),
@@ -236,7 +230,7 @@ fn defaults<'a>(
         effective.apply_project_overrides(&project);
         let caps = caps(ctx).await?;
         let d = &caps.defaults;
-        let resolved = json!({"chat":d.chat_default_model,"chat_model_2":d.chat_model_2,"task_planner_agent_model":d.task_planner_agent_model,"chat_light":d.chat_light_model,"chat_thinking":d.chat_thinking_model,"chat_buddy":d.chat_buddy_model,"completion_model":d.completion_default_model});
+        let resolved = json!({"chat":d.chat_default_model,"chat_model_2":d.chat_model_2,"task_planner_agent_model":d.task_planner_agent_model,"chat_light":d.chat_light_model,"chat_thinking":d.chat_thinking_model,"chat_buddy":d.chat_buddy_model});
         let marks = |slot: &str, model: &str| {
             let overridden = to_value(&project).ok().is_some_and(|p| !p[slot].is_null());
             format!(
@@ -298,8 +292,8 @@ pub(super) fn change_functions() -> Vec<EngineFn> {
                 for name in SLOTS {
                     slots.insert(name.to_string(), slot.clone());
                 }
-                slots.insert("completion_model".into(), json!({"type":["string","null"],"description":"global scope only"}));
-                slots.insert("embedding_model".into(), json!({"type":["string","null"],"description":"global scope only"}));
+                slots.insert("completion_model".into(), json!({"type":["string","null"],"description":"Legacy ignored input; has no effect."}));
+                slots.insert("embedding_model".into(), json!({"type":["string","null"],"description":"Legacy ignored input; has no effect."}));
                 json!({"type":"object","additionalProperties":false,"required":["scope","slots"],"properties":{
                     "scope":{"enum":["global","project"]},
                     "slots":{"type":"object","additionalProperties":false,"minProperties":1,"properties":slots}
@@ -479,37 +473,6 @@ fn set_defaults_preview<'a>(
         let slots = args["slots"].as_object().cloned().unwrap_or_default();
         for (name, value) in &slots {
             if matches!(name.as_str(), "completion_model" | "embedding_model") {
-                let DefaultsTarget::Global(global) = &mut target else {
-                    return Err(EngineError::Type(format!(
-                        "{name} can be set only with scope global"
-                    )));
-                };
-                let new = value.as_str().map(String::from);
-                let field = if name == "completion_model" {
-                    &mut global.completion_model
-                } else {
-                    &mut global.embedding_model
-                };
-                if *field != new {
-                    let effective = if name == "completion_model" {
-                        &caps.defaults.completion_default_model
-                    } else {
-                        &caps.embedding_model.base.id
-                    };
-                    provider_moves |= moves_provider(
-                        field
-                            .as_deref()
-                            .filter(|m| !m.is_empty())
-                            .or(Some(effective.as_str())),
-                        new.as_deref(),
-                    );
-                    items.push(super::mask::item(
-                        name,
-                        field.clone().map(Value::from),
-                        new.clone().map(Value::from),
-                    ));
-                    *field = new;
-                }
                 continue;
             }
             let given: Option<ModelTypeDefaults> = if value.is_null() {

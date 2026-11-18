@@ -341,12 +341,8 @@ pub(crate) async fn indexing_settings_save(
     atomic_write(&path, &yaml).await?;
 
     crate::files_blocklist::reload_indexing_everywhere_now(app.gcx.clone()).await;
-    crate::files_in_workspace::enqueue_all_files_from_workspace_folders(
-        app.gcx.clone(),
-        true,
-        false,
-    )
-    .await;
+    crate::files_in_workspace::enqueue_all_files_from_workspace_folders(app.gcx.clone(), false)
+        .await;
     Ok(indexing_response(scope, &path, config, project_available))
 }
 
@@ -528,12 +524,10 @@ pub(crate) fn trajectory_settings_fields() -> Vec<TrajectorySettingField> {
         live_usize("auto_enrichment_total_token_cap", 64, 32_000),
         live_usize("auto_enrichment_card_token_cap", 32, 16_000),
         live_usize("auto_enrichment_knowledge_top_n", 1, 20),
-        live_usize("auto_enrichment_trajectory_top_n", 1, 20),
         restart_bool("trajectory_writer_enabled"),
         restart_bool("trajectory_index_coordinator_enabled"),
         live_bool("trajectory_watcher_self_write_enabled"),
         restart_bool("tool_catalog_snapshots_enabled"),
-        restart_bool("vecdb_path_coalescing_enabled"),
         live_usize("pp_max_tool_budget_tokens", 4_096, 2_000_000),
         live_usize("pp_max_per_file_budget_tokens", 1_024, 2_000_000),
         live_usize("pp_max_line_length_chars", 80, 1_000_000),
@@ -545,7 +539,6 @@ pub(crate) fn trajectory_settings_fields() -> Vec<TrajectorySettingField> {
         live_usize("git_intel_max_files_per_commit_entropy", 5, 100_000),
         live_usize("codegraph_dead_code_max_results", 50, 1_000_000),
         live_usize("codegraph_exec_flow_max_nodes", 50, 1_000_000),
-        live_usize("vecdb_trajectory_split_bytes", 256, 1_048_576),
         live_usize("cat_max_input_paths", 1, 100_000),
         live_usize("cat_max_lines", 100, 1_000_000),
         live_usize("cat_max_file_bytes", 4_096, 268_435_456),
@@ -599,7 +592,7 @@ fn trajectory_settings_response(
         current: crate::runtime_settings::current(),
         defaults: crate::runtime_settings::TrajectoryRuntimeSettings::default(),
         fields: trajectory_settings_fields(),
-        environment_precedence: "REFACT_TRAJECTORY_WRITER, REFACT_TRAJECTORY_INDEX_COORDINATOR, REFACT_TRAJECTORY_WATCHER_SELF_WRITE, REFACT_TOOL_CATALOG_SNAPSHOTS, and REFACT_VECDB_PATH_COALESCING take precedence over persisted rollout switches. Persisted writer, index coordinator, tool catalog, and VecDB changes apply after restart; watcher self-write suppression applies live.",
+        environment_precedence: "REFACT_TRAJECTORY_WRITER, REFACT_TRAJECTORY_INDEX_COORDINATOR, REFACT_TRAJECTORY_WATCHER_SELF_WRITE, REFACT_TOOL_CATALOG_SNAPSHOTS take precedence over persisted rollout switches. Persisted writer, index coordinator, tool catalog changes apply after restart; watcher self-write suppression applies live.",
     })
 }
 
@@ -617,7 +610,25 @@ pub async fn handle_v1_trajectory_settings_post(
     State(app): State<AppState>,
     body: hyper::body::Bytes,
 ) -> Result<Json<TrajectorySettingsResponse>, ScratchError> {
-    let settings = serde_json::from_slice::<TrajectorySettingsPost>(&body)
+    let mut payload: serde_json::Value = serde_json::from_slice(&body).map_err(|error| {
+        ScratchError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("invalid trajectory settings payload: {error}"),
+        )
+    })?;
+    let config = if payload.get("config").is_some() {
+        payload.get_mut("config").unwrap()
+    } else {
+        &mut payload
+    };
+    if let Some(config) = config.as_object_mut() {
+        for retired in crate::runtime_settings::RETIRED_TRAJECTORY_SETTINGS {
+            if *retired != "max_parallel_tools" {
+                config.remove(*retired);
+            }
+        }
+    }
+    let settings = serde_json::from_value::<TrajectorySettingsPost>(payload)
         .map_err(|error| {
             ScratchError::new(
                 StatusCode::UNPROCESSABLE_ENTITY,
@@ -971,6 +982,71 @@ mod tests {
 
     #[tokio::test]
     #[serial(runtime_settings)]
+    async fn legacy_retrieval_settings_posts_are_ignored_for_direct_and_wrapped_payloads() {
+        crate::runtime_settings::reset_for_test();
+        let app = trajectory_settings_app().await;
+        for wrapped in [false, true] {
+            let mut config =
+                serde_json::to_value(crate::runtime_settings::TrajectoryRuntimeSettings::default())
+                    .unwrap();
+            config["max_queue_size"] = serde_json::json!(7);
+            config["auto_enrichment_trajectory_top_n"] = serde_json::json!(2);
+            config["vecdb_path_coalescing_enabled"] = serde_json::json!(true);
+            config["vecdb_trajectory_split_bytes"] = serde_json::json!(1);
+            let payload = if wrapped {
+                serde_json::json!({"config": config})
+            } else {
+                config
+            };
+            let saved = handle_v1_trajectory_settings_post(
+                State(app.clone()),
+                hyper::body::Bytes::from(serde_json::to_vec(&payload).unwrap()),
+            )
+            .await
+            .unwrap()
+            .0;
+            assert_eq!(saved.config.max_queue_size, 7);
+            let response = serde_json::to_value(saved).unwrap();
+            assert!(response["config"]
+                .get("auto_enrichment_trajectory_top_n")
+                .is_none());
+            assert!(!response["fields"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|field| field["name"] == "auto_enrichment_trajectory_top_n"));
+            assert!(response["config"]
+                .get("vecdb_path_coalescing_enabled")
+                .is_none());
+            assert!(response["config"]
+                .get("vecdb_trajectory_split_bytes")
+                .is_none());
+            assert!(!response["fields"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|field| field["name"].as_str().unwrap().starts_with("vecdb_")));
+            let persisted = tokio::fs::read_to_string(crate::runtime_settings::settings_path(
+                &app.paths.config_dir,
+            ))
+            .await
+            .unwrap();
+            assert!(!persisted.contains("vecdb_"));
+            assert!(!persisted.contains("auto_enrichment_trajectory_top_n"));
+        }
+        assert!(handle_v1_trajectory_settings_post(
+            State(app),
+            hyper::body::Bytes::from(
+                r#"{"max_queue_size":0,"vecdb_path_coalescing_enabled":true}"#
+            ),
+        )
+        .await
+        .is_err());
+        crate::runtime_settings::reset_for_test();
+    }
+
+    #[tokio::test]
+    #[serial(runtime_settings)]
     async fn trajectory_settings_live_values_apply_and_restart_values_wait() {
         crate::runtime_settings::reset_for_test();
         let app = trajectory_settings_app().await;
@@ -984,7 +1060,6 @@ mod tests {
         updated.trajectory_index_coordinator_enabled = false;
         updated.trajectory_watcher_self_write_enabled = false;
         updated.tool_catalog_snapshots_enabled = false;
-        updated.vecdb_path_coalescing_enabled = false;
         let saved = handle_v1_trajectory_settings_post(
             State(app.clone()),
             hyper::body::Bytes::from(serde_json::to_vec(&updated).unwrap()),
@@ -1005,14 +1080,12 @@ mod tests {
         assert!(crate::runtime_settings::current().trajectory_index_coordinator_enabled);
         assert!(!crate::runtime_settings::current().trajectory_watcher_self_write_enabled);
         assert!(crate::runtime_settings::current().tool_catalog_snapshots_enabled);
-        assert!(crate::runtime_settings::current().vecdb_path_coalescing_enabled);
 
         let mut mixed = updated.clone();
         mixed.trajectory_writer_enabled = true;
         mixed.trajectory_index_coordinator_enabled = false;
         mixed.trajectory_watcher_self_write_enabled = true;
         mixed.tool_catalog_snapshots_enabled = false;
-        mixed.vecdb_path_coalescing_enabled = true;
         let mixed_saved = handle_v1_trajectory_settings_post(
             State(app.clone()),
             hyper::body::Bytes::from(serde_json::to_vec(&mixed).unwrap()),
@@ -1024,7 +1097,6 @@ mod tests {
         assert!(crate::runtime_settings::current().trajectory_index_coordinator_enabled);
         assert!(crate::runtime_settings::current().trajectory_watcher_self_write_enabled);
         assert!(crate::runtime_settings::current().tool_catalog_snapshots_enabled);
-        assert!(crate::runtime_settings::current().vecdb_path_coalescing_enabled);
         assert_eq!(
             handle_v1_trajectory_settings_get(State(app))
                 .await

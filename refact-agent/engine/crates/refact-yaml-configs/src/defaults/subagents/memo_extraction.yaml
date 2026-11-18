@@ -1,4 +1,4 @@
-schema_version: 2
+schema_version: 3
 id: memo_extraction
 title: Memo Extraction
 description: Extract memos and insights from chat trajectories
@@ -39,7 +39,7 @@ messages:
     - Skip trivial details or conversation noise
 
     Example output:
-    {"overview": "Implemented a custom VecDB splitter for trajectory files to enable semantic search over past conversations. Added two new tools for searching and retrieving trajectory context.", "title": "Trajectory Search Tools"}
+    {"overview": "Implemented full-text search over past conversations. Added two new tools for searching and retrieving trajectory context.", "title": "Trajectory Search Tools"}
     {"type": "pattern", "content": "When implementing async file operations in this project, use tokio::fs instead of std::fs to avoid blocking."}
     {"type": "preference", "content": "User prefers concise code without excessive comments."}
 

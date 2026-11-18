@@ -9,23 +9,13 @@ import com.intellij.openapi.editor.EditorFactory
 import com.intellij.openapi.editor.event.BulkAwareDocumentListener
 import com.intellij.openapi.editor.event.DocumentEvent
 import com.smallcloud.refactai.modes.ModeProvider
-import com.smallcloud.refactai.io.InferenceGlobalContext.Companion.instance as InferenceGlobalContext
 
 
 class DocumentListener : BulkAwareDocumentListener, Disposable {
     override fun beforeDocumentChangeNonBulk(event: DocumentEvent) {
         Logger.getInstance("DocumentListener").debug("beforeDocumentChangeNonBulk")
         val editor = getActiveEditor(event.document) ?: return
-        val provider = ModeProvider.getOrCreateModeProvider(editor)
-        provider.beforeDocumentChangeNonBulk(event, editor)
-    }
-
-    override fun documentChangedNonBulk(event: DocumentEvent) {
-        Logger.getInstance("DocumentListener").debug("documentChangedNonBulk")
-        if (!InferenceGlobalContext.useAutoCompletion) return
-        val editor = getActiveEditor(event.document) ?: return
-        val provider = ModeProvider.getOrCreateModeProvider(editor)
-        provider.onTextChange(event, editor, false)
+        ModeProvider.findModeProvider(editor)?.beforeDocumentChangeNonBulk(event, editor)
     }
 
     private fun getActiveEditor(document: Document): Editor? {

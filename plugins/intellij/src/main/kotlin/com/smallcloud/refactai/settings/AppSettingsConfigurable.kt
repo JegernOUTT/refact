@@ -36,17 +36,11 @@ class AppSettingsConfigurable : Configurable {
 
         modified = modified || mySettingsComponent!!.astIsEnabled != InferenceGlobalContext.astIsEnabled
         modified = modified || mySettingsComponent!!.astFileLimit != InferenceGlobalContext.astFileLimit
-        modified = modified || mySettingsComponent!!.vecdbIsEnabled != InferenceGlobalContext.vecdbIsEnabled
-        modified = modified || mySettingsComponent!!.vecdbFileLimit != InferenceGlobalContext.vecdbFileLimit
         modified = modified || mySettingsComponent!!.codegraphIsEnabled != InferenceGlobalContext.codegraphIsEnabled
         modified = modified || mySettingsComponent!!.codegraphFileLimit != InferenceGlobalContext.codegraphFileLimit
 
-        modified =
-            modified || mySettingsComponent!!.inferenceModel?.trim()?.ifEmpty { null } != InferenceGlobalContext.model
         modified = modified || mySettingsComponent!!.insecureSSL != InferenceGlobalContext.insecureSSL
-        modified = modified || mySettingsComponent!!.completionMaxTokens!= InferenceGlobalContext.completionMaxTokens
         modified = modified || mySettingsComponent!!.experimentalLspFlagEnabled != InferenceGlobalContext.experimentalLspFlagEnabled
-        modified = modified || mySettingsComponent!!.pauseCompletion != !InferenceGlobalContext.useAutoCompletion
         return modified
     }
 
@@ -57,15 +51,10 @@ class AppSettingsConfigurable : Configurable {
         InferenceGlobalContext.refactBinaryPath = mySettingsComponent!!.refactBinaryPath
         InferenceGlobalContext.astIsEnabled = mySettingsComponent!!.astIsEnabled
         InferenceGlobalContext.astFileLimit = mySettingsComponent!!.astFileLimit
-        InferenceGlobalContext.vecdbIsEnabled = mySettingsComponent!!.vecdbIsEnabled
-        InferenceGlobalContext.vecdbFileLimit = mySettingsComponent!!.vecdbFileLimit
         InferenceGlobalContext.codegraphIsEnabled = mySettingsComponent!!.codegraphIsEnabled
         InferenceGlobalContext.codegraphFileLimit = mySettingsComponent!!.codegraphFileLimit
         InferenceGlobalContext.insecureSSL = mySettingsComponent!!.insecureSSL
-        InferenceGlobalContext.completionMaxTokens = mySettingsComponent!!.completionMaxTokens
         InferenceGlobalContext.experimentalLspFlagEnabled = mySettingsComponent!!.experimentalLspFlagEnabled
-        InferenceGlobalContext.useAutoCompletion = !mySettingsComponent!!.pauseCompletion
-        InferenceGlobalContext.model = mySettingsComponent!!.inferenceModel?.trim()?.ifEmpty { null }
     }
 
     override fun reset() {
@@ -75,15 +64,10 @@ class AppSettingsConfigurable : Configurable {
         mySettingsComponent!!.refactBinaryPath = InferenceGlobalContext.refactBinaryPath
         mySettingsComponent!!.astIsEnabled = InferenceGlobalContext.astIsEnabled
         mySettingsComponent!!.astFileLimit = InferenceGlobalContext.astFileLimit
-        mySettingsComponent!!.vecdbIsEnabled = InferenceGlobalContext.vecdbIsEnabled
-        mySettingsComponent!!.vecdbFileLimit = InferenceGlobalContext.vecdbFileLimit
         mySettingsComponent!!.codegraphIsEnabled = InferenceGlobalContext.codegraphIsEnabled
         mySettingsComponent!!.codegraphFileLimit = InferenceGlobalContext.codegraphFileLimit
-        mySettingsComponent!!.inferenceModel = InferenceGlobalContext.model
         mySettingsComponent!!.insecureSSL = InferenceGlobalContext.insecureSSL
-        mySettingsComponent!!.completionMaxTokens = InferenceGlobalContext.completionMaxTokens
         mySettingsComponent!!.experimentalLspFlagEnabled = InferenceGlobalContext.experimentalLspFlagEnabled
-        mySettingsComponent!!.pauseCompletion = !InferenceGlobalContext.useAutoCompletion
     }
 
     override fun disposeUIResources() {

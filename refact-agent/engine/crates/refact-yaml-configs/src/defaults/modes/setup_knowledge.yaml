@@ -1,4 +1,4 @@
-schema_version: 25
+schema_version: 26
 id: setup_knowledge
 title: Seed Knowledge
 description: Guided seeding of durable project knowledge and memory
@@ -37,7 +37,7 @@ prompt: |
   ## What is Project Knowledge?
 
   Knowledge entries are durable, searchable notes stored in `.refact/knowledge/`. They are created with
-  `create_knowledge()` and surfaced automatically into future chats via semantic search and the knowledge graph.
+  `create_knowledge()` and surfaced automatically into future chats via full-text search and the knowledge graph.
   Good knowledge captures the things a new teammate (or a future agent session) would otherwise have to
   rediscover: hard-won conventions, non-obvious architecture facts, validated commands, gotchas, and decisions.
 
@@ -116,7 +116,6 @@ tools:
   - glob
   - search_pattern
   - search_symbol_definition
-  - search_semantic
   - web
   - web_search
   - search_trajectories

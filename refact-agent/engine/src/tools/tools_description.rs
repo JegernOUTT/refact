@@ -284,7 +284,7 @@ pub trait Tool: Send + Sync {
 
     fn tool_depends_on(&self) -> Vec<String> {
         vec![]
-    } // "ast", "vecdb"
+    }
 
     #[allow(dead_code)] // Trait method for future usage tracking
     fn usage(&mut self) -> &mut Option<ChatUsage> {

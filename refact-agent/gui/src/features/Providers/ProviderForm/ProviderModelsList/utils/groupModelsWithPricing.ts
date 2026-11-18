@@ -37,9 +37,7 @@ export type ModelGroup = {
   models: UiModel[];
 };
 
-type CapsModelMap =
-  | CapsResponse["chat_models"]
-  | CapsResponse["completion_models"];
+type CapsModelMap = CapsResponse["chat_models"];
 
 /**
  * Format context window size to human-readable format
@@ -161,17 +159,13 @@ export function attachPricingAndCapabilities(
     return models.map((m) => ({ ...m, modelType }));
   }
 
-  const capsModels =
-    modelType === "chat" ? caps.chat_models : caps.completion_models;
+  const capsModels = caps.chat_models;
 
   return models.map((m) => {
     const capsModelKey = resolveCapsModelKey(capsModels, m.name, providerName);
     const capsModel = capsModelKey ? capsModels[capsModelKey] : undefined;
 
-    const pricing =
-      modelType === "chat"
-        ? (capsModel as CodeChatModel | undefined)?.pricing
-        : undefined;
+    const pricing = capsModel?.pricing;
 
     const nCtx = capsModel?.n_ctx;
 
@@ -184,47 +178,37 @@ export function attachPricingAndCapabilities(
       nCtxLabel: nCtx ? formatContextWindow(nCtx) : undefined,
     };
 
-    if (modelType === "chat") {
-      uiModel.isDefault = modelMatchesDefault(
-        caps.chat_default_model,
-        m.name,
-        capsModelKey,
-      );
-      uiModel.isChat2 = modelMatchesDefault(
-        caps.chat_model_2,
-        m.name,
-        capsModelKey,
-      );
-      uiModel.isTaskPlannerAgent = modelMatchesDefault(
-        caps.task_planner_agent_model,
-        m.name,
-        capsModelKey,
-      );
-      uiModel.isLight = modelMatchesDefault(
-        caps.chat_light_model,
-        m.name,
-        capsModelKey,
-      );
-      uiModel.isThinking = modelMatchesDefault(
-        caps.chat_thinking_model,
-        m.name,
-        capsModelKey,
-      );
-      uiModel.isBuddy = modelMatchesDefault(
-        caps.chat_buddy_model,
-        m.name,
-        capsModelKey,
-      );
-      uiModel.capabilities = extractCapabilities(capsModel as CodeChatModel);
-    }
-
-    if (modelType === "completion") {
-      uiModel.isDefault = modelMatchesDefault(
-        caps.completion_default_model,
-        m.name,
-        capsModelKey,
-      );
-    }
+    uiModel.isDefault = modelMatchesDefault(
+      caps.chat_default_model,
+      m.name,
+      capsModelKey,
+    );
+    uiModel.isChat2 = modelMatchesDefault(
+      caps.chat_model_2,
+      m.name,
+      capsModelKey,
+    );
+    uiModel.isTaskPlannerAgent = modelMatchesDefault(
+      caps.task_planner_agent_model,
+      m.name,
+      capsModelKey,
+    );
+    uiModel.isLight = modelMatchesDefault(
+      caps.chat_light_model,
+      m.name,
+      capsModelKey,
+    );
+    uiModel.isThinking = modelMatchesDefault(
+      caps.chat_thinking_model,
+      m.name,
+      capsModelKey,
+    );
+    uiModel.isBuddy = modelMatchesDefault(
+      caps.chat_buddy_model,
+      m.name,
+      capsModelKey,
+    );
+    uiModel.capabilities = extractCapabilities(capsModel);
 
     return uiModel;
   });
@@ -249,8 +233,7 @@ export function groupModelsWithPricing(
     return [
       {
         id: "all",
-        title:
-          options.modelType === "chat" ? "Chat models" : "Completion models",
+        title: "Chat models",
         models: decorated,
       },
     ];
@@ -309,8 +292,7 @@ export function groupModelsWithPricing(
     return [
       {
         id: "all",
-        title:
-          options.modelType === "chat" ? "Chat models" : "Completion models",
+        title: "Chat models",
         models: decorated,
       },
     ];

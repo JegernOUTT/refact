@@ -156,7 +156,7 @@ impl AsyncResourceAdapter for SettingsAdapter {
         Ok(ResourcePreview {
             resource_id: spec.resource.resource_id.clone(), expected_version: spec.expected_version.clone(),
             proposed_version: version(&Some(after)), reload_needed: true,
-            diff: Some("Persist trajectory settings. Live fields install immediately; event channel and writer/index/tool-catalog/VecDB rollout switches require restart. Environment rollout overrides retain precedence. Values and unknown fields withheld.".into()),
+            diff: Some("Persist trajectory settings. Live fields install immediately; event channel and writer/index/tool-catalog rollout switches require restart. Environment rollout overrides retain precedence. Values and unknown fields withheld.".into()),
         })
     }
     async fn apply(&self, spec: &ActionSpec) -> Result<ResourceApplyReceipt, ResourceError> {

@@ -12,7 +12,6 @@ const CONFIG_STATE = {
     apiKey: null,
     features: {
       statistics: true,
-      vecdb: true,
       ast: true,
     },
     themeProps: {

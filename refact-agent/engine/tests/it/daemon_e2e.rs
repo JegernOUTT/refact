@@ -137,7 +137,11 @@ async fn open_project(daemon: &DaemonProcess, root: &std::path::Path) -> Value {
         "open returned {}",
         response.status()
     );
-    response.json::<Value>().await.unwrap()
+    let project = response.json::<Value>().await.unwrap();
+    assert!(project["project_id"]
+        .as_str()
+        .is_some_and(|id| !id.is_empty()));
+    project
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

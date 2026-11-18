@@ -14,7 +14,7 @@ if (element) {
     engineServed: false,
     lspUrl: "",
     lspPort: 8001,
-    features: { statistics: true, vecdb: true, ast: true, codegraph: true },
+    features: { statistics: true, ast: true, codegraph: true },
     themeProps: {},
     ...(surface === "dashboard" ? { surface } : {}),
   });

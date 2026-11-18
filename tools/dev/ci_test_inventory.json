@@ -664,44 +664,6 @@
       "reject_evidence": "\\bskipped="
     },
     {
-      "id": "python-test01_completion_edge_cases.py",
-      "lane": "external",
-      "cwd": ".",
-      "command": [
-        "python3",
-        "refact-agent/engine/tests/test01_completion_edge_cases.py"
-      ],
-      "required": false,
-      "platform": "conditional",
-      "prerequisites": [
-        "per-file applicability audit; see unavailability reason"
-      ],
-      "features": [],
-      "secrets": [],
-      "kind": "excluded",
-      "source": "refact-agent/engine/tests/test01_completion_edge_cases.py",
-      "unavailable": "Opt-in real-model/provider certification; requires isolated worker, configured model and read-only provider credentials; not executed by fixture qualification."
-    },
-    {
-      "id": "python-test02_completion_with_rag.py",
-      "lane": "external",
-      "cwd": ".",
-      "command": [
-        "python3",
-        "refact-agent/engine/tests/test02_completion_with_rag.py"
-      ],
-      "required": false,
-      "platform": "conditional",
-      "prerequisites": [
-        "per-file applicability audit; see unavailability reason"
-      ],
-      "features": [],
-      "secrets": [],
-      "kind": "excluded",
-      "source": "refact-agent/engine/tests/test02_completion_with_rag.py",
-      "unavailable": "Opt-in real-model/provider certification; requires isolated worker, configured model and read-only provider credentials; not executed by fixture qualification."
-    },
-    {
       "id": "python-test03_at_commands_completion.py",
       "lane": "engine",
       "cwd": "refact-agent/engine",
@@ -727,25 +689,6 @@
       "kind": "reusable",
       "source": "refact-agent/engine/tests/test03_at_commands_completion.py",
       "evidence_path": ".refact/verification/owned-utility/"
-    },
-    {
-      "id": "python-test04_completion_lsp.py",
-      "lane": "external",
-      "cwd": ".",
-      "command": [
-        "python3",
-        "refact-agent/engine/tests/test04_completion_lsp.py"
-      ],
-      "required": false,
-      "platform": "conditional",
-      "prerequisites": [
-        "per-file applicability audit; see unavailability reason"
-      ],
-      "features": [],
-      "secrets": [],
-      "kind": "excluded",
-      "source": "refact-agent/engine/tests/test04_completion_lsp.py",
-      "unavailable": "Opt-in real-model/provider certification; requires isolated worker, configured model and read-only provider credentials; not executed by fixture qualification."
     },
     {
       "id": "python-test05_is_openai_compatible.py",

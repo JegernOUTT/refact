@@ -30,7 +30,7 @@ function configState(host: Host = "web") {
     lspPort: 8001,
     apiKey: null,
     themeProps: { appearance: "dark" as const },
-    features: { images: true, statistics: true, vecdb: true, ast: true },
+    features: { images: true, statistics: true, ast: true },
   };
 }
 
@@ -256,9 +256,7 @@ function taskHandlers(record: WorktreeRecordView) {
     http.get("*/v1/chat-modes", () =>
       HttpResponse.json({ modes: [], errors: [] }),
     ),
-    http.get("*/v1/caps", () =>
-      HttpResponse.json({ chat_models: [], completion_models: [] }),
-    ),
+    http.get("*/v1/caps", () => HttpResponse.json({ chat_models: [] })),
     http.post("*/v1/buddy/diagnostics/collect", () => HttpResponse.json({})),
     worktreesList([record]),
   ];

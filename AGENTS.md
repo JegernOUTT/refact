@@ -214,12 +214,12 @@ taxonomy: `component/*`, `type/*`, `P0-critical`/`P1-important`/`P2-nice`,
 │ event/plan  │                         │ 15+ providers│  │ cron + sleep │
 └──────┬──────┘                         └──────────────┘  └──────┬───────┘
        │                                                         │
-       ├──────────────► Local indexes (CodeGraph, VecDB) ◄────────┘
+       ├──────────────► Local indexes (CodeGraph) ◄──────────────┘
        └──────────────► Integrations (GitHub, MCP, shell, browser, DBs)
 ```
 
 - **Engine ↔ GUI**: HTTP REST + SSE streaming (`/v1/chats/subscribe`). GUI sends commands via `POST /v1/chats/{id}/commands`, receives state via SSE events with monotonic `seq` numbers.
-- **Engine ↔ IDE**: LSP protocol (tower-lsp) for completions/code-lens, plus HTTP for chat and tools.
+- **Engine ↔ IDE**: LSP protocol (tower-lsp) for editor integration, plus HTTP for chat and tools.
 - **IDE ↔ GUI**: `postMessage` bridge (VSCode `acquireVsCodeApi`, JetBrains `postIntellijMessage`). Events: file context, theme, tool calls.
 
 ### Background subagents
@@ -288,4 +288,4 @@ AGENTS.md files can appear at any directory level. Scope = entire directory tree
 - **SSE sequence gaps**: Every event has monotonic `seq`. Gap → client reconnects for fresh snapshot. Never skip or reorder events.
 - **Thinking block signatures**: Anthropic thinking blocks with cryptographic signatures must be preserved byte-for-byte. No JSON rebuilding, no field reordering.
 - **GUI state**: Chat/history state is ephemeral (not persisted). Only `tour` and `userSurvey` survive Redux persist.
-- **CodeGraph docs**: Source-code indexing is CodeGraph-backed and stored under `~/.cache/refact/codegraph/`; memory/knowledge indexing is VecDB-backed. Do not describe old AST database internals, and do not document CodeGraph-specific CLI flags unless they exist in `global_context.rs`.
+- **CodeGraph docs**: Source-code indexing is CodeGraph-backed and stored under `~/.cache/refact/codegraph/`; memory/knowledge search is a lexical `KnowledgeIndex` plus knowledge-graph expansion (no vector/embedding search), and past-chat search (`search_trajectories`) is BM25 keyword search over saved trajectories. Do not describe old AST database internals, and do not document CodeGraph-specific CLI flags unless they exist in `global_context.rs`.

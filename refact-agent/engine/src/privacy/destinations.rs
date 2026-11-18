@@ -1,6 +1,6 @@
 use refact_privacy::{Cleared, Destination, DestinationId, DestinationKind, PrivacyAudited};
 
-use crate::caps::{BaseModelRecord, EmbeddingModelRecord};
+use crate::caps::BaseModelRecord;
 use crate::global_context::SharedGlobalContext;
 
 pub(crate) trait DestinationExt<T> {
@@ -20,12 +20,6 @@ impl DestinationExt<BaseModelRecord> for Destination {
             kind: DestinationKind::Provider,
             display_name: model_rec.id.clone(),
         }
-    }
-}
-
-impl DestinationExt<EmbeddingModelRecord> for Destination {
-    fn from_model_record(model_rec: &EmbeddingModelRecord) -> Destination {
-        Destination::from_model_record(&model_rec.base)
     }
 }
 
@@ -442,23 +436,6 @@ mod tests {
         assert_eq!(destination.id.0, "trusted");
         assert_eq!(destination.kind, DestinationKind::Provider);
         assert_eq!(destination.display_name, "trusted/model");
-    }
-
-    #[test]
-    fn embedding_destination_uses_provider_prefix() {
-        let model = EmbeddingModelRecord {
-            base: BaseModelRecord {
-                id: "embeddings/text-v1".to_string(),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-
-        let destination = Destination::from_model_record(&model);
-
-        assert_eq!(destination.id.0, "embeddings");
-        assert_eq!(destination.kind, DestinationKind::Provider);
-        assert_eq!(destination.display_name, "embeddings/text-v1");
     }
 
     #[tokio::test]

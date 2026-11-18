@@ -1,10 +1,5 @@
 import { RootState } from "../../app/store";
-import {
-  COMPLETION_MODEL_FAMILIES_URL,
-  MODEL_DEFAULTS_URL,
-  MODEL_URL,
-  MODELS_URL,
-} from "./consts";
+import { MODEL_DEFAULTS_URL, MODEL_URL, MODELS_URL } from "./consts";
 import { createApi, fetchBaseQuery } from "@reduxjs/toolkit/query/react";
 import { hasProperty } from "../../utils";
 import { isDetailMessage } from "./commands";
@@ -127,38 +122,6 @@ export const modelsApi = createApi({
         return { data: result.data };
       },
     }),
-    getCompletionModelFamilies: builder.query<
-      CompletionModelFamiliesResponse,
-      undefined
-    >({
-      queryFn: async (_args, api, extraOptions, baseQuery) => {
-        const state = api.getState() as RootState;
-        const url = buildApiUrlFromState(state, COMPLETION_MODEL_FAMILIES_URL);
-
-        const result = await baseQuery({
-          ...extraOptions,
-          method: "GET",
-          url,
-        });
-
-        if (result.error) {
-          return { error: result.error };
-        }
-
-        if (!isCompletionModelFamiliesResponse(result.data)) {
-          return {
-            meta: result.meta,
-            error: {
-              error: "Invalid response from /v1/completion-model-families",
-              data: result.data,
-              status: "CUSTOM_ERROR",
-            },
-          };
-        }
-
-        return { data: result.data };
-      },
-    }),
     updateModel: builder.mutation<unknown, UpdateModelRequestBody>({
       invalidatesTags: (_result, _error, args) => [
         { type: "MODEL", id: args.model.name },
@@ -242,12 +205,10 @@ export type SimplifiedModel = {
 };
 
 export type ModelsResponse = {
-  completion_models: SimplifiedModel[];
   chat_models: SimplifiedModel[];
-  embedding_model: SimplifiedModel | null;
 };
 
-export type ModelType = "embedding" | "completion" | "chat";
+export type ModelType = "chat";
 
 export type GetModelArgs = {
   modelName: string;
@@ -296,44 +257,14 @@ export type CodeChatModel = {
   type: "chat";
 };
 
-export type CodeCompletionModel = {
-  n_ctx: number;
-  name: string;
-  model_family: string | null;
-  type: "completion";
-  enabled: boolean;
-};
-
-export type EmbeddingModel = {
-  n_ctx: number;
-  name: string;
-  id: string;
-  tokenizer: string;
-
-  embedding_size: number;
-  rejection_threshold: number;
-  embedding_batch: number;
-
-  enabled: boolean;
-
-  type: "embedding";
-};
-
 export function isModelsResponse(data: unknown): data is ModelsResponse {
   // Check if data is an object
   if (typeof data !== "object" || data === null) return false;
 
-  if (
-    !hasProperty(data, "completion_models") ||
-    !hasProperty(data, "chat_models") ||
-    !hasProperty(data, "embedding_model")
-  )
-    return false;
-
-  return true;
+  return hasProperty(data, "chat_models") && Array.isArray(data.chat_models);
 }
 
-export type Model = CodeChatModel | CodeCompletionModel | EmbeddingModel;
+export type Model = CodeChatModel;
 
 export function isCodeChatModel(data: unknown): data is CodeChatModel {
   if (!data || typeof data !== "object") return false;
@@ -367,60 +298,6 @@ export function isCodeChatModel(data: unknown): data is CodeChatModel {
   return true;
 }
 
-export function isCodeCompletionModel(
-  data: unknown,
-): data is CodeCompletionModel {
-  if (!data || typeof data !== "object") return false;
-
-  if (!("n_ctx" in data) || typeof data.n_ctx !== "number") return false;
-  if (!("name" in data) || typeof data.name !== "string") return false;
-  if (
-    "model_family" in data &&
-    typeof data.model_family !== "string" &&
-    data.model_family !== null
-  )
-    return false;
-  if (!("enabled" in data) || typeof data.enabled !== "boolean") return false;
-
-  return true;
-}
-
-export function isEmbeddingModel(data: unknown): data is EmbeddingModel {
-  if (!data || typeof data !== "object") return false;
-
-  if (!("n_ctx" in data) || typeof data.n_ctx !== "number") return false;
-  if (!("name" in data) || typeof data.name !== "string") return false;
-  if (!("tokenizer" in data) || typeof data.tokenizer !== "string")
-    return false;
-
-  if (!("embedding_size" in data) || typeof data.embedding_size !== "number")
-    return false;
-  if (
-    !("rejection_threshold" in data) ||
-    typeof data.rejection_threshold !== "number"
-  )
-    return false;
-  if (!("embedding_batch" in data) || typeof data.embedding_batch !== "number")
-    return false;
-
-  if (!("enabled" in data) || typeof data.enabled !== "boolean") return false;
-
-  return true;
-}
-
 export function isModel(data: unknown): data is Model {
-  return (
-    isCodeChatModel(data) ||
-    isCodeCompletionModel(data) ||
-    isEmbeddingModel(data)
-  );
-}
-
-export type CompletionModelFamiliesResponse = { model_families: string[] };
-
-export function isCompletionModelFamiliesResponse(
-  data: unknown,
-): data is CompletionModelFamiliesResponse {
-  if (!data || typeof data !== "object") return false;
-  return "model_families" in data && Array.isArray(data.model_families);
+  return isCodeChatModel(data);
 }

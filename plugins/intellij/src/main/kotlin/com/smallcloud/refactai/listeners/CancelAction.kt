@@ -12,7 +12,7 @@ import com.smallcloud.refactai.Resources
 import com.smallcloud.refactai.modes.ModeProvider
 
 class CancelPressedAction :
-    EditorAction(InlineCompletionHandler()),
+    EditorAction(RejectDiffHandler()),
     ActionToIgnore {
     val ACTION_ID = "CancelPressedAction"
 
@@ -20,11 +20,10 @@ class CancelPressedAction :
         this.templatePresentation.icon = Resources.Icons.LOGO_RED_16x16
     }
 
-    class InlineCompletionHandler : EditorWriteActionHandler() {
+    class RejectDiffHandler : EditorWriteActionHandler() {
         override fun executeWriteAction(editor: Editor, caret: Caret?, dataContext: DataContext) {
             Logger.getInstance("CancelPressedAction").debug("executeWriteAction")
-            val provider = ModeProvider.getOrCreateModeProvider(editor)
-            provider.onEscPressed(editor, caret, dataContext)
+            ModeProvider.getOrCreateModeProvider(editor).onEscPressed(editor, caret, dataContext)
         }
 
         override fun isEnabledForCaret(
@@ -32,7 +31,7 @@ class CancelPressedAction :
             caret: Caret,
             dataContext: DataContext
         ): Boolean {
-            return ModeProvider.getOrCreateModeProvider(editor).modeInActiveState()
+            return isRefactDiffActive(editor)
         }
     }
 }

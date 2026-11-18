@@ -19,8 +19,6 @@ data class LSPCapabilities(
         @SerializedName("cloud_name") var cloudName: String = "",
         @SerializedName("code_chat_default_model") var codeChatDefaultModel: String = "",
         @SerializedName("code_chat_models") var codeChatModels: Map<String, LSPModelInfo> = mapOf(),
-        @SerializedName("code_completion_default_model") var codeCompletionDefaultModel: String = "",
-        @SerializedName("code_completion_models") var codeCompletionModels: Map<String, LSPModelInfo> = mapOf(),
         @SerializedName("endpoint_style") var endpointStyle: String = "",
         @SerializedName("endpoint_template") var endpointTemplate: String = "",
         @SerializedName("running_models") var runningModels: List<String> = listOf(),

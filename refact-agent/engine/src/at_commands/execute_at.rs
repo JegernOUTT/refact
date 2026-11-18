@@ -52,7 +52,6 @@ pub async fn run_at_commands_locally(
     // Token limit works like this:
     // - if there's only 1 user message at the bottom, it receives reserve_for_context tokens for context
     // - if there are N user messages, they receive reserve_for_context/N tokens each (and there's no taking from one to give to the other)
-    // This is useful to give prefix and suffix of the same file precisely the position necessary for FIM-like operation of a chat model
     let messages_after_user_msg = original_messages.split_off(user_msg_starts);
     let mut new_messages = original_messages;
     for (idx, mut msg) in messages_after_user_msg.into_iter().enumerate() {

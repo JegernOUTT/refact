@@ -182,13 +182,14 @@ async fn publish_supervision_projection(
     // Includes the store scan in the bound; this is not a worker localhost API call.
     tokio::time::timeout(DAEMON_LINK_POST_TIMEOUT, async {
         let supervision = crate::buddy::supervision::daemon_projection(&app).await?;
-        let roots = crate::files_correction::get_unscoped_project_dirs(gcx.clone()).await;
-        if roots.len() != 1 {
-            return Err("single project required".into());
-        }
+        let crate::buddy::operator_runtime::BuddyRootScope::Bound(canonical_root) =
+            crate::buddy::operator_runtime::buddy_root_scope(&app).await
+        else {
+            return Err("Buddy project root is not open in this workspace".into());
+        };
         let report = crate::daemon::buddy_reconciliation::WorkerProjection {
             project_id: gcx.cmdline.project_id.clone(),
-            canonical_root: roots[0].clone(),
+            canonical_root,
             pid: std::process::id(),
             instance_token: gcx.cmdline.ping_message.clone(),
             cursor,

@@ -1236,7 +1236,7 @@ async fn privacy_relax_unblocks_with_effective_view_and_is_risky() {
 #[tokio::test]
 async fn privacy_relax_refuses_opening_every_zone_to_every_known_destination() {
     let (_dir, app, _) = fixture().await;
-    caps_with(&app, &["zone/model-a"], "zone/emb").await;
+    caps_with(&app, &["zone/model-a"]).await;
     std::fs::write(
         global_privacy(&app),
         "privacy_rules:\n  zones:\n    - name: zone_a\n      patterns: ['a/**']\n      send_to: ['zone_x']\n    - name: zone_b\n      patterns: ['b/**']\n      send_to: ['zone_y']\n    - name: normal\n      patterns: ['**']\n      send_to: ['*']\n",
@@ -1522,7 +1522,7 @@ async fn zones_with_secret_like_names_can_be_tightened_and_relaxed() {
     assert!(text.contains("looks like a secret"), "{text}");
 }
 
-async fn caps_with(app: &AppState, models: &[&str], embedding: &str) {
+async fn caps_with(app: &AppState, models: &[&str]) {
     let mut caps = crate::caps::CodeAssistantCaps::default();
     for id in models {
         caps.chat_models.insert(
@@ -1540,7 +1540,6 @@ async fn caps_with(app: &AppState, models: &[&str], embedding: &str) {
         );
     }
     caps.defaults.chat_default_model = models[0].into();
-    caps.embedding_model.base.id = embedding.into();
     let mut state = app.gcx.caps_state.write().await;
     state.caps = Some(Arc::new(caps));
     state.last_attempted_ts = std::time::SystemTime::now()
@@ -1553,15 +1552,25 @@ async fn caps_with(app: &AppState, models: &[&str], embedding: &str) {
 #[tokio::test]
 async fn a2_md_1_and_2_provider_moves_from_unset_slots_and_other_models_are_risky() {
     let (_dir, app, _) = fixture().await;
-    caps_with(&app, &["zone/model-a", "zoneother/model-b"], "zone/emb").await;
+    caps_with(&app, &["zone/model-a", "zoneother/model-b"]).await;
     let card = engine(denied(&app, "await engine('models.set_defaults', scope='project', slots={'chat': {'model': 'zoneother/model-b'}})").await);
     assert_eq!(card.class, Class::Risky, "{card:?}");
     let card = engine(denied(&app, "await engine('models.set_defaults', scope='project', slots={'chat': {'model': 'zone/model-a', 'temperature': 0.5}})").await);
     assert_eq!(card.class, Class::Change, "{card:?}");
-    let card = engine(denied(&app, "await engine('models.set_defaults', scope='global', slots={'embedding_model': 'zoneother/emb'})").await);
-    assert_eq!(card.class, Class::Risky, "{card:?}");
-    let card = engine(denied(&app, "await engine('models.set_defaults', scope='global', slots={'completion_model': 'zoneother/comp'})").await);
-    assert_eq!(card.class, Class::Risky, "{card:?}");
+    let before = result(&run(&app, "(await engine('models.defaults'))['data']").await);
+    for slot in ["embedding_model", "completion_model"] {
+        let output = result(&run(&app, &format!("r = await engine('models.set_defaults', scope='global', slots={{'{slot}': 'zoneother/ignored'}})\n[r['ok'], r['data'], r['text']]")).await);
+        assert_eq!(output, json!([true, null, "nothing to change"]));
+        assert!(session(&app)
+            .await
+            .lock()
+            .await
+            .runtime
+            .python_approvals
+            .is_empty());
+    }
+    let after = result(&run(&app, "(await engine('models.defaults'))['data']").await);
+    assert_eq!(before, after);
 }
 
 #[tokio::test]
@@ -1623,7 +1632,7 @@ fn moved_model(gcx: &Arc<crate::global_context::GlobalContext>, id: &str) {
 #[tokio::test]
 async fn a2_te_1_deny_and_moved_state_for_ordinary_changes() {
     let (dir, app, _) = fixture().await;
-    caps_with(&app, &["openai_2/zone-model", "zone/model-a"], "zone/emb").await;
+    caps_with(&app, &["openai_2/zone-model", "zone/model-a"]).await;
     create_provider(&app, "openai_2", json!({"base_provider":"openai","api_key":"sk-zone","enabled":true,"custom_models":{"zone-model":{"n_ctx":8192}}})).await;
     local_mode(
         &dir,

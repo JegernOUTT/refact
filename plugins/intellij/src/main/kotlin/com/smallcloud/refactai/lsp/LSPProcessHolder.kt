@@ -505,14 +505,6 @@ open class LSPProcessHolder(val project: Project) : Disposable {
                     settingsChanged("ast-file-limit-changed")
                 }
 
-                override fun vecdbFlagChanged(newValue: Boolean) {
-                    settingsChanged("vecdb-flag-changed")
-                }
-
-                override fun vecdbFileLimitChanged(newValue: Int) {
-                    settingsChanged("vecdb-file-limit-changed")
-                }
-
                 override fun codegraphFlagChanged(newValue: Boolean) {
                     settingsChanged("codegraph-flag-changed")
                 }
@@ -606,8 +598,6 @@ open class LSPProcessHolder(val project: Project) : Disposable {
         return LSPConfig(
             ast = InferenceGlobalContext.astIsEnabled,
             astFileLimit = InferenceGlobalContext.astFileLimit,
-            vecdb = InferenceGlobalContext.vecdbIsEnabled,
-            vecdbFileLimit = InferenceGlobalContext.vecdbFileLimit,
             codegraph = InferenceGlobalContext.codegraphIsEnabled,
             codegraphFileLimit = InferenceGlobalContext.codegraphFileLimit,
             insecureSSL = InferenceGlobalContext.insecureSSL,
@@ -998,13 +988,8 @@ open class LSPProcessHolder(val project: Project) : Disposable {
                 ragStatusCheckerScheduler.schedule({ lspRagStatusSync() }, 5000, TimeUnit.MILLISECONDS)
                 return
             }
-            if (ragStatus.vecdb != null && ragStatus.vecdb.vecdbMaxFilesHit) {
-                ragStatusCheckerScheduler.schedule({ lspRagStatusSync() }, 5000, TimeUnit.MILLISECONDS)
-                return
-            }
 
             if ((ragStatus.ast != null && listOf("starting", "parsing", "indexing").contains(ragStatus.ast.state))
-                || (ragStatus.vecdb != null && listOf("starting", "parsing").contains(ragStatus.vecdb.state))
                 || (ragStatus.codegraph != null && ragStatus.codegraph.state == "indexing")
             ) {
                 ragStatusCheckerScheduler.schedule({ lspRagStatusSync() }, 700, TimeUnit.MILLISECONDS)

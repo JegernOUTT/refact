@@ -1437,16 +1437,7 @@ startListening({
     const host =
       isUpdate && action.payload.host ? action.payload.host : state.config.host;
 
-    const completeManual = isUpdate
-      ? action.payload.keyBindings?.completeManual
-      : state.config.keyBindings?.completeManual;
-
-    listenerApi.dispatch(
-      nextTip({
-        host,
-        completeManual,
-      }),
-    );
+    listenerApi.dispatch(nextTip({ host }));
   },
 });
 

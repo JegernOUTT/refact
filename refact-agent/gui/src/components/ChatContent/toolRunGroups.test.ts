@@ -403,6 +403,13 @@ describe("groupToolRuns review regressions", () => {
 });
 
 describe("summarizeToolRun", () => {
+  it("treats retired semantic search calls as generic historical tools", () => {
+    const calls = [call("search_semantic"), call("t_search_semantic")];
+    expect(toolRunSummaryText(summarizeToolRun(calls, NO_STATES, {}))).toBe(
+      "Used 2 other tools",
+    );
+  });
+
   it("orders categories, pluralizes and dedupes files", () => {
     const calls = [
       call("web", { url: "x" }),

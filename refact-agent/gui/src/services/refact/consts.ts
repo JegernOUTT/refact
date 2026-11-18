@@ -48,7 +48,6 @@ export const PROVIDER_URL = "/v1/provider";
 export const MODELS_URL = "/v1/models";
 export const MODEL_URL = "/v1/model";
 export const MODEL_DEFAULTS_URL = "/v1/model-defaults";
-export const COMPLETION_MODEL_FAMILIES_URL = "/v1/completion-model-families";
 
 // Browser endpoints
 export const BROWSER_START = "/v1/browser/start";

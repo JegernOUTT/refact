@@ -718,6 +718,14 @@ pub struct OpenRouterModelEndpointsResponse {
 }
 
 #[derive(Serialize)]
+struct LegacyProviderRuntimeOutput {
+    #[serde(flatten)]
+    runtime: ProviderRuntime,
+    #[serde(flatten)]
+    legacy: refact_caps_core::legacy_output::LegacyProviderOutput,
+}
+
+#[derive(Serialize)]
 pub(crate) struct ProviderDetailResponse {
     name: String,
     base_provider: String,
@@ -728,7 +736,7 @@ pub(crate) struct ProviderDetailResponse {
     selected_models_count: usize,
     status: &'static str,
     settings: serde_json::Value,
-    runtime: Option<ProviderRuntime>,
+    runtime: Option<LegacyProviderRuntimeOutput>,
 }
 
 pub async fn handle_v1_provider_get(
@@ -808,7 +816,10 @@ pub(crate) async fn provider_detail(
         selected_models_count: selected_count,
         status,
         settings: settings_with_identity(provider.as_ref()),
-        runtime: runtime.map(|r| r.redacted()),
+        runtime: runtime.map(|r| LegacyProviderRuntimeOutput {
+            runtime: r.redacted(),
+            legacy: Default::default(),
+        }),
     };
     Ok(response)
 }
@@ -1149,11 +1160,7 @@ pub async fn handle_v1_provider_models(
         .build_runtime()
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
-    let mut models = runtime.chat_models;
-    models.extend(runtime.completion_models);
-    if let Some(emb) = runtime.embedding_model {
-        models.push(emb);
-    }
+    let models = runtime.chat_models;
 
     let response = ProviderModelsResponse {
         models,
@@ -1407,11 +1414,38 @@ struct SimplifiedModel {
     user_configured: bool,
 }
 
+#[cfg(test)]
+mod legacy_output_tests {
+    use super::*;
+
+    #[test]
+    fn model_listing_keeps_legacy_client_required_array_and_null_shapes() {
+        let response = ModelsResponse {
+            chat_models: vec![],
+            legacy: Default::default(),
+        };
+        assert_eq!(
+            serde_json::to_value(response).unwrap(),
+            json!({"chat_models":[], "completion_models":[], "embedding_model":null})
+        );
+    }
+
+    #[test]
+    fn defaults_save_ignores_obsolete_keys_but_rejects_unknown_and_invalid_chat_keys() {
+        assert!(validate_defaults_draft_shape(
+            r#"{"completion_model":{},"embedding_model":[],"chat":{"model":"openai/gpt-4o"}}"#
+        )
+        .is_ok());
+        assert!(validate_defaults_draft_shape(r#"{"unknown":{}}"#).is_err());
+        assert!(validate_defaults_draft_shape(r#"{"chat":"invalid"}"#).is_err());
+    }
+}
+
 #[derive(Serialize)]
 struct ModelsResponse {
     chat_models: Vec<SimplifiedModel>,
-    completion_models: Vec<SimplifiedModel>,
-    embedding_model: Option<SimplifiedModel>,
+    #[serde(flatten)]
+    legacy: refact_caps_core::legacy_output::LegacyModelsOutput,
 }
 
 impl From<&ProviderModel> for SimplifiedModel {
@@ -1455,12 +1489,7 @@ pub async fn handle_v1_models(
             .iter()
             .map(SimplifiedModel::from)
             .collect(),
-        completion_models: runtime
-            .completion_models
-            .iter()
-            .map(SimplifiedModel::from)
-            .collect(),
-        embedding_model: runtime.embedding_model.as_ref().map(SimplifiedModel::from),
+        legacy: Default::default(),
     };
 
     json_response(StatusCode::OK, &response)

@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use axum::http::HeaderMap;
 use refact_buddy_core::operator_types::{
@@ -119,10 +119,55 @@ pub(crate) async fn open_project_runtime_async(
         })?
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum BuddyRootScope {
+    NoService,
+    NoWorkspace,
+    Detached(PathBuf),
+    Bound(PathBuf),
+}
+
+fn canonical_dir(path: &Path) -> Option<PathBuf> {
+    let canonical = std::fs::canonicalize(path).ok()?;
+    canonical
+        .is_dir()
+        .then(|| dunce::simplified(&canonical).to_path_buf())
+}
+
+pub(crate) fn bound_project_root(buddy_root: &Path, workspace_roots: &[PathBuf]) -> BuddyRootScope {
+    if workspace_roots.is_empty() {
+        return BuddyRootScope::NoWorkspace;
+    }
+    let Some(canonical) = canonical_dir(buddy_root) else {
+        return BuddyRootScope::Detached(buddy_root.to_path_buf());
+    };
+    if workspace_roots
+        .iter()
+        .any(|root| canonical_dir(root).as_deref() == Some(canonical.as_path()))
+    {
+        BuddyRootScope::Bound(buddy_root.to_path_buf())
+    } else {
+        BuddyRootScope::Detached(buddy_root.to_path_buf())
+    }
+}
+
+pub(crate) async fn buddy_root_scope(app: &AppState) -> BuddyRootScope {
+    let buddy_root = {
+        let buddy = app.buddy.buddy.lock().await;
+        match buddy.as_ref() {
+            Some(service) => service.project_root.clone(),
+            None => return BuddyRootScope::NoService,
+        }
+    };
+    let roots = crate::files_correction::get_unscoped_project_dirs(app.gcx.clone()).await;
+    bound_project_root(&buddy_root, &roots)
+}
+
 pub async fn runtime(
     app: &AppState,
     capability: OperatorCapability,
 ) -> Result<OutcomeRuntime, String> {
+    let scope = buddy_root_scope(app).await;
     let (runtime, root) = {
         let buddy = app.buddy.buddy.lock().await;
         let service = buddy.as_ref().ok_or("Buddy service unavailable")?;
@@ -137,9 +182,7 @@ pub async fn runtime(
             service.project_root.clone(),
         )
     };
-    let roots = crate::files_correction::get_unscoped_project_dirs(app.gcx.clone()).await;
-    if roots.len() != 1
-        || roots[0] != root
+    if scope != BuddyRootScope::Bound(root.clone())
         || runtime.project().canonical_root != root.to_string_lossy()
     {
         return Err("Buddy operator project identity changed".into());
@@ -173,6 +216,48 @@ pub fn authenticated_operator_request(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bound_root_requires_canonical_equality_with_a_workspace_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = dunce::canonicalize(temp.path()).unwrap();
+        let root = base.join("project");
+        let nested = root.join("module");
+        let sibling = base.join("sibling");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::create_dir_all(&sibling).unwrap();
+        assert_eq!(
+            bound_project_root(&root, &[sibling.clone(), root.clone()]),
+            BuddyRootScope::Bound(root.clone())
+        );
+        assert_eq!(
+            bound_project_root(&root, &[root.join(".")]),
+            BuddyRootScope::Bound(root.clone())
+        );
+        assert_eq!(
+            bound_project_root(&root, &[nested.clone(), sibling.clone()]),
+            BuddyRootScope::Detached(root.clone())
+        );
+        assert_eq!(
+            bound_project_root(&nested, &[root.clone()]),
+            BuddyRootScope::Detached(nested.clone())
+        );
+        assert_eq!(bound_project_root(&root, &[]), BuddyRootScope::NoWorkspace);
+        let missing = base.join("missing");
+        assert_eq!(
+            bound_project_root(&missing, &[missing.clone()]),
+            BuddyRootScope::Detached(missing.clone())
+        );
+        #[cfg(unix)]
+        {
+            let alias = base.join("alias");
+            std::os::unix::fs::symlink(&root, &alias).unwrap();
+            assert_eq!(
+                bound_project_root(&root, &[alias.clone()]),
+                BuddyRootScope::Bound(root.clone())
+            );
+        }
+    }
 
     #[tokio::test]
     async fn missing_or_wrong_transport_never_becomes_a_user_grant() {

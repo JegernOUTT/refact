@@ -14,7 +14,6 @@ GIFS = [
     "hero",
     "agent-task-planner",
     "chat-modes",
-    "code-completion",
     "auto-apply",
     "browser-tool",
     "memory",

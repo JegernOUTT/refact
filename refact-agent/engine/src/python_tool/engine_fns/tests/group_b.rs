@@ -546,7 +546,10 @@ async fn index_set_settings_classes_effect_and_refusals() {
         Decision::AllowOnce,
         |engine| {
             assert_eq!(engine.class, refact_chat_api::PythonEngineClass::Risky);
-            assert_eq!(engine.warning.as_deref(), Some("More files will be indexed, and with VecDB enabled their contents are sent to the embedding provider."));
+            assert_eq!(
+                engine.warning.as_deref(),
+                Some("More files will be indexed.")
+            );
             assert_eq!(engine.items[0].old, Some(json!("zone_a")));
         },
     )

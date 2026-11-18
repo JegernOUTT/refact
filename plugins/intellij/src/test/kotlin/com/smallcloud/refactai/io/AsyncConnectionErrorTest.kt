@@ -13,9 +13,9 @@ import org.junit.Test
 import java.net.URI
 import com.smallcloud.refactai.io.InferenceGlobalContext.Companion.instance as InferenceGlobalContext
 
-class AsyncConnectionCompletionErrorTest : BasePlatformTestCase() {
+class AsyncConnectionErrorTest : BasePlatformTestCase() {
     @Test
-    fun testFailedCompletionHttpRequestPublishesVisibleErrorState() {
+    fun testFailedHttpRequestPublishesVisibleErrorState() {
         val previousConnection = InferenceGlobalContext.connection
         val previousStatus = InferenceGlobalContext.status
         val previousError = InferenceGlobalContext.lastErrorMsg
@@ -31,21 +31,21 @@ class AsyncConnectionCompletionErrorTest : BasePlatformTestCase() {
                 MockResponse.Builder()
                     .code(503)
                     .addHeader("Content-Type", "application/json")
-                    .body("completion unavailable")
+                    .body("service unavailable")
                     .build()
             )
 
-            val future = connection.post(URI(server.url("/v1/code-completion").toString()), "{}").get()
+            val future = connection.post(URI(server.url("/v1/customization").toString()), "{}").get()
 
             try {
                 future.get()
-                fail("completion HTTP failure should fail the request")
+                fail("HTTP failure should fail the request")
             } catch (_: Exception) {
             }
             assertEquals(ConnectionStatus.ERROR, InferenceGlobalContext.status)
             val message = InferenceGlobalContext.lastErrorMsg.orEmpty()
             assertTrue(message.contains("HTTP 503"))
-            assertTrue(message.contains("completion unavailable"))
+            assertTrue(message.contains("service unavailable"))
         } finally {
             server.shutdown()
             InferenceGlobalContext.connection = previousConnection

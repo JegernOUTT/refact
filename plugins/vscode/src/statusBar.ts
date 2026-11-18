@@ -26,13 +26,8 @@ export class StatusBarMenu {
     socketerror_msg: string = '';
     spinner: boolean = false;
     ast_limit_hit: boolean = false;
-    vecdb_limit_hit: boolean = false;
     codegraph_limit_hit: boolean = false;
-    vecdb_warning: string = "";
     codegraph_warning: string = "";
-    last_url: string = "";
-    last_model_name: string = "";
-    have_completion_success: boolean = false;
     access_level: number = -1;
     rag_status: string = "";
     rag_tootip: string = "";
@@ -90,47 +85,14 @@ export class StatusBarMenu {
             this.menu.text = `$(debug-disconnect) AST files limit`;
             this.menu.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
             this.menu.tooltip = "Click to make changes in settings";
-        } else if (this.vecdb_limit_hit) {
-            this.menu.text = `$(debug-disconnect) VecDB files limit`;
-            this.menu.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
-            this.menu.tooltip = "Click to make changes in settings";
         } else if (this.codegraph_limit_hit) {
             this.menu.text = `$(debug-disconnect) CodeGraph files limit`;
             this.menu.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
             this.menu.tooltip = "Click to make changes in settings";
-        } else if (this.vecdb_warning !== '') {
-            this.menu.text = `$(debug-disconnect) Refact.ai`;
-            this.menu.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
-            this.menu.tooltip = this.vecdb_warning;
         } else if (this.codegraph_warning !== '') {
             this.menu.text = `$(debug-disconnect) Refact.ai`;
             this.menu.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
             this.menu.tooltip = this.codegraph_warning;
-        } else if (this.have_completion_success) {
-            this.menu.text = this.rag_status || `$(codify-logo) Refact.ai`;
-            this.menu.backgroundColor = undefined;
-            let msg: string = "";
-            let reach = global.rust_binary_blob ? global.rust_binary_blob.attemping_to_reach() : "";
-            if (reach) {
-                msg += `Communicating with:\n 🌩️ ${reach}`;
-            }
-            if (this.last_model_name) {
-                if (msg) {
-                    msg += "\n\n";
-                }
-                msg += `Last used model:\n 🧠 ${this.last_model_name}`;
-            }
-            if (this.rag_tootip) {
-                if (msg) {
-                    msg += "\n\n";
-                }
-                msg += `${this.rag_tootip}`;
-            }
-            if (_website_message || _inference_message) {
-                msg += "\n\n";
-                msg += _website_message || _inference_message;
-            }
-            this.menu.tooltip = msg;
         } else {
             this.menu.text = this.rag_status || `$(codify-logo) Refact.ai`;
             this.menu.backgroundColor = undefined;
@@ -163,12 +125,6 @@ export class StatusBarMenu {
         } else {
             this.socketerror_msg = "";
         }
-        if (this.socketerror) {
-            this.last_model_name = "";
-        }
-        if (error) {
-            this.have_completion_success = false;
-        }
         this.choose_color();
     }
 
@@ -178,30 +134,13 @@ export class StatusBarMenu {
         this.choose_color();
     }
 
-    completion_model_worked(model_name: string)
-    {
-        this.last_model_name = model_name;
-        this.have_completion_success = true;
-        this.choose_color();
-    }
-
     ast_status_limit_reached() {
         this.ast_limit_hit = true;
         this.choose_color();
     }
 
-    vecdb_status_limit_reached() {
-        this.vecdb_limit_hit = true;
-        this.choose_color();
-    }
-
     codegraph_status_limit_reached() {
         this.codegraph_limit_hit = true;
-        this.choose_color();
-    }
-
-    vecdb_error(error: string) {
-        this.vecdb_warning = error;
         this.choose_color();
     }
 
@@ -213,10 +152,6 @@ export class StatusBarMenu {
     update_rag_status(status: RagStatus)
     {
         this.rag_status = '';
-        if (status.vecdb && !["done", "idle", "cooldown"].includes(status.vecdb.state)) {
-            const vecdb_parsed_qty = status.vecdb.files_total - status.vecdb.files_unprocessed;
-            this.rag_status = `$(sync~spin) VecDB ${vecdb_parsed_qty}/${status.vecdb.files_total}`;
-        }
         if (status.ast && !["done", "idle"].includes(status.ast.state)) {
             if (status.ast.state === "parsing") {
                 const ast_parsed_qty = status.ast.files_total - status.ast.files_unparsed;
@@ -239,16 +174,6 @@ export class StatusBarMenu {
             ;
         } else {
             rag_tootip += "AST turned off\n\n";
-        }
-        if (status.vecdb) {
-            rag_tootip +=
-                `VecDB Size: ${status.vecdb.db_size}\n` +
-                `VecDB Cache: ${status.vecdb.db_cache_size}\n` +
-                `VecDB this session API calls: ${status.vecdb.requests_made_since_start}\n` +
-                `VecDB this session vectors requested: ${status.vecdb.vectors_made_since_start}\n\n`
-            ;
-        } else {
-            rag_tootip += "VecDB turned off\n\n";
         }
         if (status.codegraph && status.codegraph.state !== "turned_off") {
             rag_tootip +=

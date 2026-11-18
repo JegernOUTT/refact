@@ -96,7 +96,7 @@ impl Tool for ToolGetKnowledge {
             },
             experimental: false,
             allow_parallel: true,
-            description: "Searches project knowledge base for relevant information. Uses semantic search and knowledge graph expansion.".to_string(),
+            description: "Searches project knowledge base for relevant information. Uses lexical retrieval and knowledge graph expansion.".to_string(),
             input_schema: json_schema_from_params(&[("search_key", "string", "Search query for the knowledge database.")], &["search_key"]),
             output_schema: Some(refact_tool_api::tool_output::output_schema_for::<KnowledgeOutput>()),
             annotations: None,
@@ -128,7 +128,7 @@ impl Tool for ToolGetKnowledge {
             None => return Err("argument `search_key` is missing".to_string()),
         };
 
-        let memories = memories_search(gcx.clone(), &search_key, 5, 0, None).await?;
+        let memories = memories_search(gcx.clone(), &search_key, 5, None).await?;
 
         let mut seen_memids = HashSet::new();
         let mut unique_memories = Vec::new();

@@ -4,32 +4,20 @@ import com.intellij.openapi.editor.Editor
 import com.intellij.codeInsight.completion.CompletionUtil.DUMMY_IDENTIFIER
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.actionSystem.DataContext
-import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.editor.Caret
 import com.intellij.openapi.editor.event.CaretEvent
 import com.intellij.openapi.editor.event.DocumentEvent
 import com.intellij.openapi.editor.ex.EditorEx
-import com.intellij.util.concurrency.AppExecutorUtil
-import com.intellij.util.messages.MessageBus
-import com.intellij.util.xmlb.annotations.Transient
 import com.jetbrains.rd.util.getOrCreate
-import com.smallcloud.refactai.io.ConnectionStatus
-import com.smallcloud.refactai.io.InferenceGlobalContextChangedNotifier
 import com.smallcloud.refactai.listeners.GlobalCaretListener
 import com.smallcloud.refactai.listeners.GlobalFocusListener
-import com.smallcloud.refactai.modes.completion.StubCompletionMode
-import com.smallcloud.refactai.modes.completion.structs.DocumentEventExtra
 import com.smallcloud.refactai.modes.diff.DiffMode
 import com.smallcloud.refactai.modes.diff.DiffModeWithSideEffects
 import java.lang.System.currentTimeMillis
 import java.lang.System.identityHashCode
-import java.util.concurrent.ConcurrentLinkedQueue
-import java.util.concurrent.TimeUnit
-import com.smallcloud.refactai.io.InferenceGlobalContext.Companion.instance as InferenceGlobalContext
 
 
 enum class ModeType {
-    Completion,
     Diff,
     DiffWithSideEffects,
 }
@@ -37,37 +25,21 @@ enum class ModeType {
 class ModeProvider(
     private val editor: Editor,
     private val modes: MutableMap<ModeType, Mode> = mutableMapOf(
-        ModeType.Completion to StubCompletionMode(),
         ModeType.Diff to DiffMode()
     ),
     private var activeMode: Mode? = null,
-) : Disposable, InferenceGlobalContextChangedNotifier {
-
-    @Transient
-    private val messageBus: MessageBus = ApplicationManager.getApplication().messageBus
-
-    init {
-        activeMode = modes[ModeType.Completion]
-        messageBus.connect(this).subscribe(
-            InferenceGlobalContextChangedNotifier.TOPIC, this
-        )
-    }
+) : Disposable {
 
     fun modeInActiveState(): Boolean = activeMode?.isInActiveState() == true
 
-    fun isInCompletionMode(): Boolean =
-        activeMode === modes[ModeType.Completion]
-    fun isDiffMode(): Boolean = activeMode == modes[ModeType.Diff] || activeMode == modes[ModeType.DiffWithSideEffects]
-    fun getCompletionMode(): Mode = modes[ModeType.Completion]!!
+    fun isDiffMode(): Boolean {
+        val mode = activeMode ?: return false
+        return mode === modes[ModeType.Diff] || mode === modes[ModeType.DiffWithSideEffects]
+    }
 
     fun beforeDocumentChangeNonBulk(event: DocumentEvent?, editor: Editor) {
         if (event?.newFragment.toString() == DUMMY_IDENTIFIER) return
         activeMode?.beforeDocumentChangeNonBulk(DocumentEventExtra(event, editor, currentTimeMillis()))
-    }
-
-    fun onTextChange(event: DocumentEvent?, editor: Editor, force: Boolean) {
-        if (event?.newFragment.toString() == DUMMY_IDENTIFIER) return
-        activeMode?.onTextChange(DocumentEventExtra(event, editor, currentTimeMillis(), force))
     }
 
     fun onCaretChange(event: CaretEvent) {
@@ -89,10 +61,14 @@ class ModeProvider(
     override fun dispose() {
     }
 
-    fun switchMode(newMode: ModeType = ModeType.Completion) {
+    fun switchMode(newMode: ModeType) {
         if (activeMode == modes[newMode]) return
         activeMode?.cleanup(editor)
         activeMode = modes[newMode]
+    }
+
+    fun exitMode(mode: Mode) {
+        if (activeMode === mode) activeMode = null
     }
 
     fun removeSideEffects() {
@@ -141,6 +117,7 @@ class ModeProvider(
                 modeProvider
             }
         }
+
+        fun findModeProvider(editor: Editor): ModeProvider? = modeProviders[identityHashCode(editor)]
     }
 }
-

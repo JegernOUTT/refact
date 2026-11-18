@@ -11,11 +11,6 @@ fn main() {
     let root = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());
     let version = runtime_version::emit(&root.join("Cargo.toml"));
     emit_build_identity(&root, &version);
-    if env::var("TARGET").as_deref() == Ok("i686-pc-windows-msvc") {
-        cc::Build::new()
-            .file("build_support/sqlite_vec_i686_popcnt.c")
-            .compile("sqlite_vec_i686_popcnt");
-    }
     for name in [
         "REFACT_SKIP_GUI_BUILD",
         "REFACT_USE_PREBUILT_GUI",

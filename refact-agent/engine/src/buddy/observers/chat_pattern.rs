@@ -90,11 +90,23 @@ impl BuddyObserver for ChatPatternObserver {
     }
 
     async fn observe(&self, gcx: AppState, ctx: &ObserverContext) -> Vec<BuddyFact> {
-        let sessions_map = gcx.chat.sessions.clone();
-        let sessions_read = sessions_map.read().await;
+        let loaded: Vec<_> = gcx
+            .chat
+            .sessions
+            .read()
+            .await
+            .iter()
+            .map(|(id, session)| (id.clone(), session.clone()))
+            .collect();
+        let filter =
+            crate::buddy::attribution::BuddyRootFilter::new(gcx.gcx.clone(), &ctx.project_root)
+                .await;
         let mut facts = vec![];
-        for (chat_id, session_arc) in sessions_read.iter() {
+        for (chat_id, session_arc) in &loaded {
             if let Ok(session) = session_arc.try_lock() {
+                if !filter.attributes_session(&session).await {
+                    continue;
+                }
                 // Run detection on borrowed slice — messages never leave this scope
                 facts.extend(detect_chat_pattern_facts(
                     &session.messages,

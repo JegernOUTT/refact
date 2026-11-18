@@ -11,26 +11,21 @@ import { Button, Dialog } from "../../../../../components/ui";
 import styles from "../ModelCard.module.css";
 
 import {
-  useGetCompletionModelFamiliesQuery,
   useGetModelConfiguration,
   useGetModelDefaults,
 } from "../../../../../hooks/useModelsQuery";
 
 import { FormField } from "./FormField";
-import { FormSelect } from "./FormSelect";
 import { CapabilityBadge } from "./CapabilityBadge";
 
 import type {
   CodeChatModel,
-  CodeCompletionModel,
-  EmbeddingModel,
   Model,
   ModelType,
   SimplifiedModel,
 } from "../../../../../services/refact";
 
 import { useEffectOnce } from "../../../../../hooks";
-import { Spinner } from "../../../../../components/Spinner";
 
 export type ModelCardPopupProps = {
   minifiedModel?: SimplifiedModel;
@@ -189,24 +184,17 @@ export const ModelCardPopup: FC<ModelCardPopupProps> = ({
     return value;
   };
 
-  const updateFieldByKey = useCallback(
-    (key: string, value: string | number) => {
+  const handleFieldValueChange = useCallback(
+    (e: ChangeEvent<HTMLInputElement>, field: string) => {
       if (!editedModelData) return;
+      const valueType = typeof editedModelData[field as keyof Model];
+      const value = getValueByType(e.target.value, valueType);
       setEditedModelData({
         ...editedModelData,
-        [key]: value,
+        [field]: value,
       });
     },
     [editedModelData],
-  );
-
-  const handleFieldValueChange = useCallback(
-    (e: ChangeEvent<HTMLInputElement>, field: string) => {
-      const valueType = typeof editedModelData?.[field as keyof Model];
-      const value = getValueByType(e.target.value, valueType);
-      updateFieldByKey(field, value);
-    },
-    [editedModelData, updateFieldByKey],
   );
 
   // Toggle capability value
@@ -243,27 +231,12 @@ export const ModelCardPopup: FC<ModelCardPopupProps> = ({
             placeholder="Model name"
             isDisabled={!newModelCreation && !isRemovable}
           />
-          {editedModelData?.type === "completion" && (
-            <CompletionModelFields
-              editedModelData={editedModelData}
-              handleFieldValueChange={handleFieldValueChange}
-              updateFieldByKey={updateFieldByKey}
-            />
-          )}
-
           {editedModelData?.type === "chat" && (
             <ChatModelFields
               editedModelData={editedModelData}
               handleFieldValueChange={handleFieldValueChange}
               setEditedModelData={setEditedModelData}
               toggleCapability={toggleCapability}
-            />
-          )}
-
-          {editedModelData?.type === "embedding" && (
-            <EmbeddingModelFields
-              editedModelData={editedModelData}
-              handleFieldValueChange={handleFieldValueChange}
             />
           )}
         </div>
@@ -296,48 +269,6 @@ export const ModelCardPopup: FC<ModelCardPopupProps> = ({
         </div>
       </Dialog.Content>
     </Dialog>
-  );
-};
-
-type CompletionModelFieldsProps = {
-  editedModelData: CodeCompletionModel;
-  handleFieldValueChange: (
-    e: ChangeEvent<HTMLInputElement>,
-    field: string,
-  ) => void;
-  updateFieldByKey: (key: string, value: string | number) => void;
-};
-
-const CompletionModelFields: FC<CompletionModelFieldsProps> = ({
-  editedModelData,
-  handleFieldValueChange,
-  updateFieldByKey,
-}) => {
-  const {
-    data: modelFamiliesData,
-    isSuccess,
-    isLoading,
-  } = useGetCompletionModelFamiliesQuery();
-  if (isLoading || !isSuccess) return <Spinner spinning />;
-
-  const aggregatedModelFamilies = [...modelFamiliesData.model_families, null];
-  return (
-    <>
-      <FormField
-        label="Context Window (n_ctx)"
-        value={editedModelData.n_ctx.toString()}
-        onChange={(e) => handleFieldValueChange(e, "n_ctx")}
-        placeholder="Context window size"
-        type="number"
-      />
-      <FormSelect
-        label="Model Family"
-        placeholder="Desired model family"
-        value={editedModelData.model_family ?? "null"}
-        onValueChange={(value) => updateFieldByKey("model_family", value)}
-        options={aggregatedModelFamilies}
-      />
-    </>
   );
 };
 
@@ -453,45 +384,6 @@ const ChatModelFields: FC<ChatModelFieldsProps> = ({
           />
         </div>
       </div>
-    </>
-  );
-};
-// Embedding model specific fields
-type EmbeddingModelFieldsProps = {
-  editedModelData: EmbeddingModel;
-  handleFieldValueChange: (
-    e: ChangeEvent<HTMLInputElement>,
-    field: string,
-  ) => void;
-};
-
-const EmbeddingModelFields: FC<EmbeddingModelFieldsProps> = ({
-  editedModelData,
-  handleFieldValueChange,
-}) => {
-  return (
-    <>
-      <FormField
-        label="Embedding Size"
-        value={editedModelData.embedding_size.toString()}
-        onChange={(e) => handleFieldValueChange(e, "embedding_size")}
-        placeholder="Embedding size"
-        type="number"
-      />
-      <FormField
-        label="Rejection Threshold"
-        value={editedModelData.rejection_threshold.toString()}
-        onChange={(e) => handleFieldValueChange(e, "rejection_threshold")}
-        placeholder="Rejection threshold"
-        type="number"
-      />
-      <FormField
-        label="Embedding Batch"
-        value={editedModelData.embedding_batch.toString()}
-        onChange={(e) => handleFieldValueChange(e, "embedding_batch")}
-        placeholder="Embedding batch"
-        type="number"
-      />
     </>
   );
 };

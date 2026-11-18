@@ -26,5 +26,4 @@ pub mod semver;
 pub mod string_utils;
 pub mod subagent_config;
 pub mod tokenizer_state;
-pub mod vecdb_types;
 pub mod worktree_meta;

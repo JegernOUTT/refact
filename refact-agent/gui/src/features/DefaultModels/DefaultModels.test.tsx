@@ -224,6 +224,22 @@ describe("DefaultModels — embedded", () => {
     await waitFor(() => expect(updateDefaults).toHaveBeenCalledOnce());
   });
 
+  it("does not send legacy completion or embedding defaults on save", async () => {
+    const legacyDefaults = {
+      ...baseDefaults,
+      completion_model: "legacy/completion",
+      embedding_model: "legacy/embedding",
+    };
+    const { updateDefaults } = setupMocks({ defaults: legacyDefaults });
+    render(<DefaultModels {...defaultProps} embedded />);
+    fireEvent.click(screen.getAllByTestId("model-selector")[0]);
+    fireEvent.click(screen.getByRole("button", { name: "Save Changes" }));
+    await waitFor(() => expect(updateDefaults).toHaveBeenCalledOnce());
+    const payload = updateDefaults.mock.calls[0][0] as Record<string, unknown>;
+    expect(payload).not.toHaveProperty("completion_model");
+    expect(payload).not.toHaveProperty("embedding_model");
+  });
+
   it("applies draft overrides and enables Save when draft is present", () => {
     setupMocks({
       draftData: {

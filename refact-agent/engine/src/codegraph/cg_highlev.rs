@@ -382,12 +382,8 @@ async fn recover_if_database_replaced(
         DatabaseRecovery::Recovered => {
             info!("codegraph: database was replaced on disk, reopened both connections");
             gcx.codegraph_error.lock().unwrap().clear();
-            crate::files_in_workspace::enqueue_all_files_from_workspace_folders(
-                gcx.clone(),
-                true,
-                false,
-            )
-            .await;
+            crate::files_in_workspace::enqueue_all_files_from_workspace_folders(gcx.clone(), false)
+                .await;
             match reconcile_deleted_paths(service.clone()).await {
                 Ok(removed) if removed > 0 => {
                     info!("codegraph: removed {removed} stale stored files after recovery");
@@ -415,8 +411,7 @@ pub async fn codegraph_background_task(gcx: Arc<GlobalContext>) {
     };
 
     let queue_len_before_enqueue = service.queue_len();
-    crate::files_in_workspace::enqueue_all_files_from_workspace_folders(gcx.clone(), true, false)
-        .await;
+    crate::files_in_workspace::enqueue_all_files_from_workspace_folders(gcx.clone(), false).await;
     let initial_enqueued = service.queue_len().saturating_sub(queue_len_before_enqueue);
     info!("codegraph: start_background_tasks, enqueued {initial_enqueued} initial files");
 
