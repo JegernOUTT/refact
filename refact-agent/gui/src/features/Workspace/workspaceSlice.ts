@@ -12,6 +12,7 @@ import {
   type SplitNode,
 } from "../ChatPanes/panesTree";
 import {
+  BROWSER_SURFACE_KEY,
   isAppSurface,
   isChatSurface,
   isSplittableSurface,
@@ -34,6 +35,7 @@ export type PaneGroup = {
 export type WorkspaceGroups = Record<SurfaceKey, PaneGroup | undefined>;
 
 export type WorkspaceState = {
+  browserAutoOpenHandled?: boolean;
   contentTaskView?: Record<string, "chat" | "board" | "memories" | "documents">;
   contentCardByTask?: Record<string, string | null>;
   tabs: SurfaceKey[];
@@ -860,10 +862,17 @@ const removeSurfaceFromGroups = (
   }
 };
 
+const hasBrowserSurface = (state: WorkspaceState): boolean =>
+  state.tabs.includes(BROWSER_SURFACE_KEY) ||
+  Object.values(state.groups).some((group) =>
+    group ? Boolean(findLeafByTab(group.root, BROWSER_SURFACE_KEY)) : false,
+  );
+
 const closeWorkspaceSurface = (
   state: WorkspaceState,
   surfaceKey: SurfaceKey,
 ): void => {
+  if (surfaceKey === BROWSER_SURFACE_KEY) state.browserAutoOpenHandled = true;
   const neighbor = removeTopLevelTab(state, surfaceKey);
   if (state.groups[surfaceKey])
     state.tabs = insertTabAt(state.tabs, surfaceKey, 0);
@@ -1518,6 +1527,12 @@ export const workspaceSlice = createSlice({
       if (!isWorkspaceSurface(action.payload)) return;
       openLocalSurface(state, action.payload);
     },
+    openBrowserForLiveTool: (state) => {
+      if (state.browserAutoOpenHandled) return;
+      state.browserAutoOpenHandled = true;
+      if (!hasBrowserSurface(state))
+        openLocalSurface(state, BROWSER_SURFACE_KEY);
+    },
     openSurfaceInNewTab: (state, action: PayloadAction<SurfaceKey>) => {
       if (isSplittableSurface(action.payload))
         openLocalSurface(state, action.payload);
@@ -1734,7 +1749,10 @@ export const workspaceSlice = createSlice({
       action: PayloadAction<{ tabId: SurfaceKey; leafId: string }>,
     ) => {
       const group = state.groups[action.payload.tabId];
-      if (!group || !findLeaf(group.root, action.payload.leafId)) return;
+      const leaf = group && findLeaf(group.root, action.payload.leafId);
+      if (!group || !leaf) return;
+      if (leaf.tabIds.includes(BROWSER_SURFACE_KEY))
+        state.browserAutoOpenHandled = true;
 
       writeGroup(
         state,
@@ -1829,6 +1847,8 @@ export const workspaceSlice = createSlice({
       const group = state.groups[tabId];
       if (!group || !findLeaf(group.root, leafId)?.tabIds.includes(surfaceKey))
         return;
+      if (surfaceKey === BROWSER_SURFACE_KEY)
+        state.browserAutoOpenHandled = true;
       writeGroup(
         state,
         tabId,
@@ -2082,6 +2102,7 @@ export const workspaceSlice = createSlice({
 
       const hydratedState = sanitizeWorkspaceSurfaceUniqueness(
         {
+          browserAutoOpenHandled: _state.browserAutoOpenHandled,
           tabs,
           activeTabId:
             activeTabId &&
@@ -2184,6 +2205,7 @@ export const {
   setDrawerHeight,
   bindSurfaceToChat,
   openTab,
+  openBrowserForLiveTool,
   closeTab,
   setActiveTab,
   activateWorkspaceLayout,
@@ -2285,6 +2307,12 @@ export const selectTabs = createSelector(
 
 export const selectPanelsForced = (state: WorkspaceRootState) =>
   state.workspace.panelsForced ?? false;
+
+export const selectBrowserSurfaceOpen = (state: WorkspaceRootState) =>
+  hasBrowserSurface(state.workspace);
+
+export const selectBrowserAutoOpenHandled = (state: WorkspaceRootState) =>
+  state.workspace.browserAutoOpenHandled ?? false;
 
 export const selectWorkspaceDock = (state: WorkspaceRootState) =>
   state.workspace.dock ?? DEFAULT_WORKSPACE_DOCK;

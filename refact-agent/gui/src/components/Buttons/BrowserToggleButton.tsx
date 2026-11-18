@@ -1,22 +1,12 @@
-import { forwardRef, useCallback, useRef, useState } from "react";
+import { forwardRef } from "react";
 import { Globe } from "lucide-react";
 import { useAppDispatch } from "../../hooks/useAppDispatch";
 import { useAppSelector } from "../../hooks/useAppSelector";
 import {
-  selectBrowserUiOpen,
-  selectBrowserRuntime,
-  openBrowserUi,
-  closeBrowserUi,
-  setBrowserRuntime,
-  updateBrowserFrame,
-  makeBrowserRuntime,
-} from "../../features/Browser";
-import { browserApi } from "../../services/refact/browser";
-import {
-  bindSurfaceToChat,
-  closeTab,
-  makeSurfaceKey,
+  BROWSER_SURFACE_KEY,
   openTab,
+  closeTab,
+  selectBrowserSurfaceOpen,
 } from "../../features/Workspace";
 import { ComposerTrigger, KitTooltip } from "../ComposerKit";
 
@@ -28,121 +18,26 @@ type BrowserToggleButtonProps = {
 export const BrowserToggleButton = forwardRef<
   HTMLButtonElement,
   BrowserToggleButtonProps
->(({ chatId, disabled }, ref) => {
+>(({ disabled }, ref) => {
   const dispatch = useAppDispatch();
-  const isOpen = useAppSelector((state) => selectBrowserUiOpen(state, chatId));
-  const runtime = useAppSelector((state) =>
-    selectBrowserRuntime(state, chatId),
-  );
-  const [busy, setBusy] = useState(false);
-  const [browserStart] = browserApi.useBrowserStartMutation();
-  const [browserStop] = browserApi.useBrowserStopMutation();
-  const [browserScreenshot] = browserApi.useBrowserScreenshotMutation();
-  const requestIdRef = useRef(0);
-  const designSurfaceKey = makeSurfaceKey("design", chatId);
-  const runtimeIdRef = useRef<string | undefined>(runtime?.runtime_id);
-  runtimeIdRef.current = runtime?.runtime_id;
-
-  const handleClick = useCallback(() => {
-    if (busy) return;
-
-    if (isOpen) {
-      const requestId = ++requestIdRef.current;
-      setBusy(true);
-      void (async () => {
-        try {
-          await browserStop({ chat_id: chatId }).unwrap();
-        } catch {
-          dispatch(closeBrowserUi({ chatId }));
-        } finally {
-          if (requestIdRef.current === requestId) {
-            dispatch(closeBrowserUi({ chatId }));
-            dispatch(closeTab(designSurfaceKey));
-            setBusy(false);
-          }
-        }
-      })();
-      return;
-    }
-
-    const requestId = ++requestIdRef.current;
-    dispatch(openBrowserUi({ chatId }));
-    dispatch(openTab(designSurfaceKey));
-    dispatch(bindSurfaceToChat({ surfaceKey: designSurfaceKey, chatId }));
-    setBusy(true);
-    void (async () => {
-      try {
-        const result = await browserStart({ chat_id: chatId }).unwrap();
-        if (requestIdRef.current !== requestId) return;
-        if (
-          result.status !== "already_running" ||
-          runtimeIdRef.current !== result.runtime_id
-        ) {
-          dispatch(
-            setBrowserRuntime({
-              chatId,
-              runtime: makeBrowserRuntime(result.runtime_id),
-            }),
-          );
-        }
-        const screenshotResult = await browserScreenshot({
-          chat_id: chatId,
-          full_page: false,
-        }).unwrap();
-        if (requestIdRef.current !== requestId) return;
-        dispatch(
-          updateBrowserFrame({
-            chatId,
-            frame: {
-              mime: screenshotResult.mime,
-              data: screenshotResult.data,
-              diff_boxes: [],
-            },
-          }),
-        );
-      } catch {
-        if (requestIdRef.current === requestId) {
-          dispatch(closeBrowserUi({ chatId }));
-        }
-      } finally {
-        if (requestIdRef.current === requestId) {
-          setBusy(false);
-        }
-      }
-    })();
-  }, [
-    isOpen,
-    busy,
-    chatId,
-    dispatch,
-    browserStart,
-    browserStop,
-    browserScreenshot,
-    designSurfaceKey,
-  ]);
-
-  const isActive = isOpen && runtime?.connected;
-  const label = busy
-    ? isOpen
-      ? "Stopping browser…"
-      : "Starting browser…"
-    : isOpen
-      ? "Stop browser"
-      : "Open browser";
+  const isOpen = useAppSelector(selectBrowserSurfaceOpen);
+  const label = isOpen ? "Close browser" : "Open browser";
 
   return (
     <KitTooltip
       label={label}
-      state={isActive ? "On" : undefined}
-      stateTone={"accent"}
+      state={isOpen ? "On" : undefined}
+      stateTone="accent"
     >
       <ComposerTrigger
         iconOnly
         aria-label={label}
-        aria-pressed={isActive}
-        disabled={busy || disabled}
+        aria-pressed={isOpen}
+        disabled={disabled}
         icon={Globe}
-        onClick={handleClick}
+        onClick={() =>
+          dispatch((isOpen ? closeTab : openTab)(BROWSER_SURFACE_KEY))
+        }
         ref={ref}
       />
     </KitTooltip>

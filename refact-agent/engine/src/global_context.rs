@@ -208,6 +208,8 @@ pub struct CommandLine {
     pub daemon_endpoint: String,
     #[arg(skip = daemon_auth_token_from_env())]
     pub daemon_auth_token: Option<String>,
+    #[arg(skip)]
+    pub(crate) project_browser_proxy_token: Option<hyper::header::HeaderValue>,
     #[arg(
         long,
         default_value = "",
@@ -241,6 +243,21 @@ impl CommandLine {
         T: Into<std::ffi::OsString> + Clone,
     {
         Self::try_parse_from(iter)
+    }
+
+    pub fn consume_project_browser_proxy_token(&mut self) {
+        let name = crate::http::routers::v1::v1_browser_project::PROXY_TOKEN_ENV;
+        let token = std::env::var(name).ok();
+        std::env::remove_var(name);
+        if !self.daemon_endpoint.is_empty() && !self.project_id.is_empty() {
+            self.project_browser_proxy_token = token
+                .filter(|token| token.len() == 64 && token.bytes().all(|b| b.is_ascii_hexdigit()))
+                .and_then(|token| hyper::header::HeaderValue::from_str(&token).ok())
+                .map(|mut value| {
+                    value.set_sensitive(true);
+                    value
+                });
+        }
     }
 
     fn with_daemon_auth_token_from_env(mut self) -> Self {
@@ -1380,6 +1397,7 @@ pub mod tests {
             no_scheduler: false,
             daemon_endpoint: String::new(),
             daemon_auth_token: None,
+            project_browser_proxy_token: None,
             project_id: String::new(),
         };
 

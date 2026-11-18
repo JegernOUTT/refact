@@ -2,7 +2,8 @@ fn main() {
     refact_lsp::self_exec::run_if_requested();
     let command = refact_lsp::cli_dispatch::parse_from_env().unwrap_or_else(|error| error.exit());
     match refact_lsp::cli_dispatch::dispatch(command) {
-        refact_lsp::cli_dispatch::DispatchResult::Worker(cmdline) => {
+        refact_lsp::cli_dispatch::DispatchResult::Worker(mut cmdline) => {
+            cmdline.consume_project_browser_proxy_token();
             let runtime = refact_lsp::runtime_config::build_tokio_runtime();
             runtime.block_on(refact_lsp::run_with_cmdline(cmdline));
         }

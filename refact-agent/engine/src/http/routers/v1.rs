@@ -224,6 +224,7 @@ pub mod system_prompt;
 pub mod tasks;
 pub(crate) mod trajectory_ops;
 pub mod v1_browser;
+pub mod v1_browser_project;
 mod v1_integrations;
 pub mod voice;
 mod web_search_settings;
@@ -348,6 +349,7 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
         .merge(scheduler_routes())
         .nest("/scheduler/credentials", automation_credentials::router())
         .merge(browser_routes())
+        .merge(v1_browser_project::router(app_state.clone()))
         .merge(stats_routes())
         .merge(extensions_routes())
         .merge(marketplace_sources_routes())

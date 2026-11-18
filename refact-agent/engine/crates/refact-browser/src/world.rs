@@ -231,6 +231,65 @@ impl WorldManager {
         Ok(result.result.value.unwrap_or(Value::Null))
     }
 
+    /// Explicit operation-time overlay call (picker, annotate). Installs the overlay script into
+    /// the isolated utility world of this one tab, on demand, then calls one of its
+    /// `window.__refact_overlays` methods there. Never touches the page's main world.
+    pub fn call_overlay(&self, tab: &Tab, method: &str, args: Value) -> Result<Value, String> {
+        const OVERLAY_METHODS: [&str; 7] = [
+            "startPicker",
+            "cancelPicker",
+            "readPicked",
+            "startAnnotate",
+            "readAnnotations",
+            "clearAnnotations",
+            "releaseAll",
+        ];
+        if !OVERLAY_METHODS.contains(&method) {
+            return Err(format!("Unknown overlay method '{method}'"));
+        }
+        if !args.is_array() {
+            return Err("Overlay call arguments must be a JSON array".to_string());
+        }
+        let context_id = self.ensure_utility_world(tab)?;
+        let installed = tab
+            .call_method(runtime_evaluate(
+                "typeof globalThis.__refact_overlays === 'object' && globalThis.__refact_overlays !== null"
+                    .to_string(),
+                context_id,
+            ))
+            .map_err(|error| format!("Failed to inspect overlay world: {error}"))?;
+        if installed.result.value != Some(Value::Bool(true)) {
+            let result = tab
+                .call_method(runtime_evaluate(OVERLAY_SCRIPT.to_string(), context_id))
+                .map_err(|error| format!("Failed to install overlay script: {error}"))?;
+            if let Some(exception) = result.exception_details {
+                return Err(format!(
+                    "Overlay script failed: {}",
+                    exception_message(&exception)
+                ));
+            }
+        }
+        let args = serde_json::to_string(&args)
+            .map_err(|error| format!("Failed to serialize overlay arguments: {error}"))?;
+        let method = serde_json::to_string(method)
+            .map_err(|error| format!("Failed to serialize overlay method: {error}"))?;
+        let result = tab
+            .call_method(runtime_evaluate(
+                format!(
+                    "(() => {{ const overlays = globalThis.__refact_overlays; if (!overlays) throw new Error('Overlay is not installed'); const fn = overlays[{method}]; if (typeof fn !== 'function') throw new Error('Overlay method is missing'); return fn.apply(overlays, {args}); }})()"
+                ),
+                context_id,
+            ))
+            .map_err(|error| format!("Failed to call overlay '{method}': {error}"))?;
+        if let Some(exception) = result.exception_details {
+            return Err(format!(
+                "Overlay call '{method}' failed: {}",
+                exception_message(&exception)
+            ));
+        }
+        Ok(result.result.value.unwrap_or(Value::Null))
+    }
+
     pub fn eval_in_utility_frame(
         &self,
         tab: &Tab,
@@ -1169,6 +1228,8 @@ fn exception_message(exception: &Runtime::ExceptionDetails) -> String {
         .unwrap_or(&exception.text)
         .to_string()
 }
+
+const OVERLAY_SCRIPT: &str = include_str!("browser_overlays.js");
 
 pub(crate) fn utility_init_script() -> Page::AddScriptToEvaluateOnNewDocument {
     Page::AddScriptToEvaluateOnNewDocument {

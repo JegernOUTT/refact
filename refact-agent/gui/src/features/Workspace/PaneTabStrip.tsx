@@ -16,6 +16,7 @@ import {
   FileText,
   GitBranch,
   AppWindow,
+  Globe,
   Palette,
 } from "lucide-react";
 import { useMemo, useEffect, useLayoutEffect, useRef, useState } from "react";
@@ -90,7 +91,9 @@ function TabDisplayContent({
             ? AppWindow
             : display.kind === "design"
               ? Palette
-              : null;
+              : display.kind === "browser"
+                ? Globe
+                : null;
   return (
     <>
       {icon ? (

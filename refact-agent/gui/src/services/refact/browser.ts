@@ -1,4 +1,5 @@
 import { createApi, fetchBaseQuery } from "@reduxjs/toolkit/query/react";
+import type { FetchArgs, FetchBaseQueryError } from "@reduxjs/toolkit/query";
 import { RootState } from "../../app/store";
 import {
   BROWSER_ACTION,
@@ -654,6 +655,257 @@ export type BrowserActionResponse = {
   page?: BrowserPageContext | null;
 };
 
+export const BROWSER_PROJECT_STATUS = "/v1/browser/project/status";
+export const BROWSER_PROJECT_START = "/v1/browser/project/start";
+export const BROWSER_PROJECT_TAB = "/v1/browser/project/tab";
+export const BROWSER_PROJECT_NAVIGATE = "/v1/browser/project/navigate";
+export const BROWSER_PROJECT_INPUT = "/v1/browser/project/input";
+export const BROWSER_PROJECT_RESIZE = "/v1/browser/project/resize";
+export const BROWSER_PROJECT_FRAME = "/v1/browser/project/frame";
+export const BROWSER_PROJECT_MIGRATION_CANDIDATES =
+  "/v1/browser/project/migration/candidates";
+export const BROWSER_PROJECT_MIGRATION_ADOPT =
+  "/v1/browser/project/migration/adopt";
+export const BROWSER_PROJECT_MIGRATION_SKIP =
+  "/v1/browser/project/migration/skip";
+
+export type ProjectBrowserTab = {
+  tab_id: string;
+  url: string;
+  title: string;
+};
+
+export type ProjectBrowserMigrationState =
+  | "not_needed"
+  | "available"
+  | "resolved"
+  | "unknown";
+
+export type ProjectBrowserViewport = { width: number; height: number };
+
+export type ProjectBrowserStatus = {
+  project_id: string | null;
+  running: boolean;
+  runtime_id: string | null;
+  connected: boolean;
+  busy: boolean;
+  active_tab: string | null;
+  tabs: ProjectBrowserTab[];
+  migration: { state: ProjectBrowserMigrationState };
+};
+
+export type ProjectBrowserTabRequest =
+  | { op: "select" | "close"; tab_id: string }
+  | { op: "new"; url?: string };
+
+export type ProjectBrowserNavigateRequest =
+  | { url: string; tab_id?: string }
+  | { op: "back" | "forward" | "reload"; tab_id?: string };
+
+export type ProjectBrowserModifier = "Alt" | "Ctrl" | "Meta" | "Shift";
+
+export type ProjectBrowserInputFence = { runtime_id: string; tab_id: string };
+
+export type ProjectBrowserInputRequest = ProjectBrowserInputFence &
+  (
+    | { kind: "click"; x: number; y: number; button: BrowserMouseButton }
+    | { kind: "key"; key: string; modifiers: ProjectBrowserModifier[] }
+    | { kind: "text"; text: string }
+    | { kind: "wheel"; x: number; y: number; dx: number; dy: number }
+  );
+
+export type ProjectBrowserFrame = {
+  runtime_id: string;
+  mime: string;
+  data: string;
+  tab_id: string;
+  url: string;
+  title: string;
+  width: number;
+  height: number;
+  viewport: ProjectBrowserViewport;
+};
+
+export type ProjectBrowserMigrationCandidate = {
+  legacy_chat_id: string;
+  modified_ms: number | null;
+  active: boolean;
+};
+
+export type ProjectBrowserMigrationCandidates = {
+  state: ProjectBrowserMigrationState;
+  candidates: ProjectBrowserMigrationCandidate[];
+};
+
+const PROJECT_BROWSER_FRAME_MIMES = ["image/jpeg", "image/png", "image/webp"];
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+const isPositiveSize = (value: unknown): value is number =>
+  typeof value === "number" && Number.isFinite(value) && value > 0;
+
+const optionalString = (value: unknown): string | null | undefined =>
+  value === undefined || value === null
+    ? null
+    : typeof value === "string"
+      ? value
+      : undefined;
+
+function normalizeMigrationState(value: unknown): ProjectBrowserMigrationState {
+  return value === "not_needed" || value === "available" || value === "resolved"
+    ? value
+    : "unknown";
+}
+
+function normalizeProjectBrowserTab(value: unknown): ProjectBrowserTab | null {
+  if (!isRecord(value)) return null;
+  const { tab_id, url, title } = value;
+  if (typeof tab_id !== "string" || tab_id.length === 0) return null;
+  if (typeof url !== "string" || typeof title !== "string") return null;
+  return { tab_id, url, title };
+}
+
+export function normalizeProjectBrowserStatus(
+  value: unknown,
+): ProjectBrowserStatus | null {
+  if (!isRecord(value)) return null;
+  if (typeof value.running !== "boolean") return null;
+  if (typeof value.connected !== "boolean") return null;
+  if (!Array.isArray(value.tabs) || !isRecord(value.migration)) return null;
+  const runtimeId = optionalString(value.runtime_id);
+  const activeTab = optionalString(value.active_tab);
+  const projectId = optionalString(value.project_id);
+  if (
+    runtimeId === undefined ||
+    activeTab === undefined ||
+    projectId === undefined
+  )
+    return null;
+  const tabs: ProjectBrowserTab[] = [];
+  for (const entry of value.tabs) {
+    const tab = normalizeProjectBrowserTab(entry);
+    if (!tab) return null;
+    tabs.push(tab);
+  }
+  return {
+    project_id: projectId,
+    running: value.running,
+    runtime_id: runtimeId,
+    connected: value.connected,
+    busy: value.busy === true,
+    active_tab: activeTab,
+    tabs,
+    migration: { state: normalizeMigrationState(value.migration.state) },
+  };
+}
+
+export function normalizeProjectBrowserFrame(
+  value: unknown,
+): ProjectBrowserFrame | null {
+  if (!isRecord(value)) return null;
+  const { runtime_id, mime, data, tab_id, url, title, width, height } = value;
+  const viewport = value.viewport;
+  if (typeof runtime_id !== "string" || runtime_id.length === 0) return null;
+  if (
+    !isRecord(viewport) ||
+    !isPositiveSize(viewport.width) ||
+    !isPositiveSize(viewport.height)
+  )
+    return null;
+  if (typeof mime !== "string" || !PROJECT_BROWSER_FRAME_MIMES.includes(mime))
+    return null;
+  if (typeof data !== "string" || !/^[A-Za-z0-9+/]+={0,2}$/.test(data))
+    return null;
+  if (typeof tab_id !== "string" || tab_id.length === 0) return null;
+  if (!isPositiveSize(width) || !isPositiveSize(height)) return null;
+  return {
+    runtime_id,
+    mime,
+    data,
+    tab_id,
+    url: typeof url === "string" ? url : "",
+    title: typeof title === "string" ? title : "",
+    width,
+    height,
+    viewport: { width: viewport.width, height: viewport.height },
+  };
+}
+
+export function normalizeProjectBrowserMigrationCandidates(
+  value: unknown,
+): ProjectBrowserMigrationCandidates | null {
+  if (!isRecord(value) || !Array.isArray(value.candidates)) return null;
+  const candidates: ProjectBrowserMigrationCandidate[] = [];
+  for (const entry of value.candidates) {
+    if (!isRecord(entry)) return null;
+    const { legacy_chat_id, last_used_ms, locked } = entry;
+    if (typeof legacy_chat_id !== "string" || legacy_chat_id.length === 0)
+      return null;
+    if (typeof locked !== "boolean") return null;
+    candidates.push({
+      legacy_chat_id,
+      modified_ms:
+        typeof last_used_ms === "number" && Number.isFinite(last_used_ms)
+          ? last_used_ms
+          : null,
+      active: locked,
+    });
+  }
+  return { state: normalizeMigrationState(value.state), candidates };
+}
+
+export function projectBrowserErrorMessage(error: unknown): string {
+  if (isRecord(error)) {
+    const data = error.data;
+    if (isRecord(data)) {
+      if (typeof data.detail === "string" && data.detail) return data.detail;
+      if (typeof data.error === "string" && data.error) return data.error;
+    }
+    if (typeof data === "string" && data && !data.trimStart().startsWith("<"))
+      return data;
+    if (typeof error.error === "string" && error.error) return error.error;
+    if (typeof error.status === "number")
+      return `Browser request failed (${error.status})`;
+  }
+  return "Browser request failed";
+}
+
+type ProjectBrowserQueryResult =
+  | { data: unknown; error?: undefined }
+  | { error: FetchBaseQueryError; data?: undefined };
+
+type ProjectBrowserBaseQuery = (
+  arg: FetchArgs,
+) => ProjectBrowserQueryResult | PromiseLike<ProjectBrowserQueryResult>;
+
+async function postProjectBrowser<T>(
+  api: { getState: () => unknown },
+  baseQuery: ProjectBrowserBaseQuery,
+  path: string,
+  body: unknown,
+  normalize: (value: unknown) => T | null,
+): Promise<{ data: T } | { error: FetchBaseQueryError }> {
+  const state = api.getState() as RootState;
+  const response = await baseQuery({
+    url: buildApiUrlFromState(state, path),
+    method: "POST",
+    body,
+  });
+  if (response.error) return { error: response.error };
+  const data = normalize(response.data);
+  if (data === null)
+    return {
+      error: {
+        status: "CUSTOM_ERROR",
+        error: `Unexpected response from ${path}`,
+      },
+    };
+  return { data };
+}
+
+const acceptAnyBody = (): true => true;
+
 export const browserApi = createApi({
   reducerPath: "browserApi",
   tagTypes: ["BROWSER"],
@@ -932,6 +1184,121 @@ export const browserApi = createApi({
         if (response.error) return { error: response.error };
         return { data: response.data as BrowserActionResponse };
       },
+    }),
+    projectBrowserStatus: builder.mutation<ProjectBrowserStatus, undefined>({
+      queryFn: (_args, api, _extraOptions, baseQuery) =>
+        postProjectBrowser(
+          api,
+          baseQuery,
+          BROWSER_PROJECT_STATUS,
+          {},
+          normalizeProjectBrowserStatus,
+        ),
+    }),
+    projectBrowserStart: builder.mutation<ProjectBrowserStatus, undefined>({
+      queryFn: (_args, api, _extraOptions, baseQuery) =>
+        postProjectBrowser(
+          api,
+          baseQuery,
+          BROWSER_PROJECT_START,
+          {},
+          normalizeProjectBrowserStatus,
+        ),
+    }),
+    projectBrowserTab: builder.mutation<
+      ProjectBrowserStatus,
+      ProjectBrowserTabRequest
+    >({
+      queryFn: (args, api, _extraOptions, baseQuery) =>
+        postProjectBrowser(
+          api,
+          baseQuery,
+          BROWSER_PROJECT_TAB,
+          args,
+          normalizeProjectBrowserStatus,
+        ),
+    }),
+    projectBrowserNavigate: builder.mutation<
+      ProjectBrowserStatus,
+      ProjectBrowserNavigateRequest
+    >({
+      queryFn: (args, api, _extraOptions, baseQuery) =>
+        postProjectBrowser(
+          api,
+          baseQuery,
+          BROWSER_PROJECT_NAVIGATE,
+          args,
+          normalizeProjectBrowserStatus,
+        ),
+    }),
+    projectBrowserInput: builder.mutation<true, ProjectBrowserInputRequest>({
+      queryFn: (args, api, _extraOptions, baseQuery) =>
+        postProjectBrowser(
+          api,
+          baseQuery,
+          BROWSER_PROJECT_INPUT,
+          args,
+          acceptAnyBody,
+        ),
+    }),
+    projectBrowserResize: builder.mutation<true, ProjectBrowserViewport>({
+      queryFn: (args, api, _extraOptions, baseQuery) =>
+        postProjectBrowser(
+          api,
+          baseQuery,
+          BROWSER_PROJECT_RESIZE,
+          args,
+          acceptAnyBody,
+        ),
+    }),
+    projectBrowserFrame: builder.mutation<
+      ProjectBrowserFrame,
+      { max_side?: number }
+    >({
+      queryFn: (args, api, _extraOptions, baseQuery) =>
+        postProjectBrowser(
+          api,
+          baseQuery,
+          BROWSER_PROJECT_FRAME,
+          args,
+          normalizeProjectBrowserFrame,
+        ),
+    }),
+    projectBrowserMigrationCandidates: builder.mutation<
+      ProjectBrowserMigrationCandidates,
+      undefined
+    >({
+      queryFn: (_args, api, _extraOptions, baseQuery) =>
+        postProjectBrowser(
+          api,
+          baseQuery,
+          BROWSER_PROJECT_MIGRATION_CANDIDATES,
+          {},
+          normalizeProjectBrowserMigrationCandidates,
+        ),
+    }),
+    projectBrowserMigrationAdopt: builder.mutation<
+      true,
+      { legacy_chat_id: string }
+    >({
+      queryFn: (args, api, _extraOptions, baseQuery) =>
+        postProjectBrowser(
+          api,
+          baseQuery,
+          BROWSER_PROJECT_MIGRATION_ADOPT,
+          { legacy_chat_id: args.legacy_chat_id, confirm: true },
+          acceptAnyBody,
+        ),
+    }),
+    projectBrowserMigrationSkip: builder.mutation<true, undefined>({
+      queryFn: (_args, api, _extraOptions, baseQuery) =>
+        postProjectBrowser(
+          api,
+          baseQuery,
+          BROWSER_PROJECT_MIGRATION_SKIP,
+          { confirm: true },
+          acceptAnyBody,
+        ),
     }),
   }),
 });

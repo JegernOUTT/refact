@@ -2,21 +2,18 @@ use std::path::Path as FsPath;
 use std::sync::Arc;
 use std::time::Duration;
 
-use headless_chrome::protocol::cdp::{Page, Runtime};
 use headless_chrome::Tab;
 use refact_core::image_policy::ImagePolicy;
 use refact_lsp::integrations::browser_controller::{
     execute_request_with_runtime, execute_steps_with_runtime,
 };
-use refact_lsp::integrations::browser_locators::{parse_element_info, INSPECT_ELEMENT_JS};
 use refact_lsp::integrations::browser_models::{
     AccessibilitySnapshotOptions, BrowserActionRequest, BrowserAuthenticatorProtocol,
-    BrowserAuthenticatorTransport, BrowserLocator, BrowserStep, ElementInfo, FieldKind,
-    FillStrategy, HarContentPolicy, HarMode, HarNotFound, NetworkReportMode, SessionPolicy,
-    TabTarget, UrlPattern, WebSocketEventKind, WebSocketMessageAction, WebSocketRouteMode,
+    BrowserAuthenticatorTransport, BrowserLocator, BrowserStep, FieldKind, FillStrategy,
+    HarContentPolicy, HarMode, HarNotFound, NetworkReportMode, SessionPolicy, TabTarget,
+    UrlPattern, WebSocketEventKind, WebSocketMessageAction, WebSocketRouteMode,
 };
-use refact_lsp::refact_browser::{setup_recording_for_tab, BrowserRuntime, UTILITY_WORLD_NAME};
-use refact_lsp::refact_integrations::browser_types::RecorderEvent;
+use refact_lsp::refact_browser::{setup_recording_for_tab, BrowserRuntime};
 use serde_json::{json, Value};
 
 use crate::browser_common::{
@@ -445,17 +442,19 @@ async fn differentiator_09_tab_log_and_runtime_buffers_keep_independent_cursors(
         .any(|entry| entry.url.contains("/slow-echo")));
 }
 
-// The live recorder preserves replayable user activity and mutation summaries across the new core.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
-async fn differentiator_10_live_recorder_emits_actions_and_mutation_summaries() {
+async fn default_browser_actions_work_without_an_in_page_recorder() {
     let Some(mut case) = BrowserCase::start("snapshot.html").await else {
         return;
     };
     case.setup_world();
     case.tab
         .evaluate(
-            "document.body.innerHTML = '<form id=\"record-form\" onsubmit=\"event.preventDefault()\"><input id=\"record-input\"><button id=\"record-click\" type=\"button\">Click</button><button type=\"submit\">Submit</button></form><div id=\"record-bottom\" style=\"margin-top:2000px\">Bottom</div>'",
+            r#"document.body.innerHTML = '<form id="record-form" onsubmit="event.preventDefault()"><input id="record-input"><button id="record-click" type="button">Click</button><button type="submit">Submit</button></form><div id="record-bottom" style="margin-top:2000px">Bottom</div>';
+            document.querySelector('#record-click').addEventListener('click', (event) => {
+                event.currentTarget.dataset.trustedClick = String(event.isTrusted);
+            });"#,
             false,
         )
         .unwrap();
@@ -479,44 +478,24 @@ async fn differentiator_10_live_recorder_emits_actions_and_mutation_summaries() 
         ],
         &ImagePolicy::browser_capture(),
     );
-    assert!(report.ok, "recorded interactions failed: {report:?}");
-    tokio::time::sleep(Duration::from_millis(800)).await;
-    case.runtime.drain_raw_events();
-
-    assert!(case
-        .runtime
-        .action_buffer
-        .iter()
-        .any(|event| matches!(event, RecorderEvent::Navigation { .. })));
-    assert!(case
-        .runtime
-        .action_buffer
-        .iter()
-        .any(|event| matches!(event, RecorderEvent::Click { .. })));
-    assert!(case
-        .runtime
-        .action_buffer
-        .iter()
-        .any(|event| matches!(event, RecorderEvent::Input { .. })));
-    assert!(case
-        .runtime
-        .action_buffer
-        .iter()
-        .any(|event| matches!(event, RecorderEvent::Keypress { .. })));
-    assert!(case
-        .runtime
-        .action_buffer
-        .iter()
-        .any(|event| matches!(event, RecorderEvent::Submit { .. })));
-    assert!(case
-        .runtime
-        .action_buffer
-        .iter()
-        .any(|event| matches!(event, RecorderEvent::Scroll { .. })));
-    assert!(!case.runtime.mutation_summary.is_empty());
+    assert!(report.ok, "browser interactions failed: {report:?}");
+    assert_eq!(
+        eval_value(&case.tab, "document.querySelector('#record-input').value"),
+        json!("recorded")
+    );
+    assert_eq!(
+        eval_value(
+            &case.tab,
+            "document.querySelector('#record-click').getAttribute('data-trusted-click')"
+        ),
+        json!("true")
+    );
+    assert_eq!(
+        eval_value(&case.tab, "document.querySelector('aside') !== null"),
+        json!(true)
+    );
+    assert_no_refact_page_scripts(&case.tab);
 }
-
-// The closed high-z toolbar must remain visible to users without exposing page-owned DOM access.
 
 // Two-layer masking must keep a password out of the final serialized browser payload.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -580,66 +559,47 @@ async fn differentiator_12_password_masking_survives_final_serialization() {
     assert!(serialized.contains("[REDACTED]") || serialized.contains("********"));
 }
 
-// Stealth belongs in the page main world while automation internals stay isolated.
+fn assert_no_refact_page_scripts(tab: &Tab) {
+    let globals = eval_json(
+        tab,
+        "Object.getOwnPropertyNames(globalThis).filter((key) => key.startsWith('__refact'))",
+    );
+    assert_eq!(
+        globals,
+        json!([]),
+        "unexpected Refact globals in the page world"
+    );
+    assert_eq!(
+        eval_value(
+            tab,
+            "document.getElementById('__refact_toolbar_host') === null"
+        ),
+        Value::Bool(true)
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
-async fn differentiator_13_stealth_patches_main_world_only() {
+async fn default_browsing_does_not_install_refact_page_scripts() {
     let Some(mut case) = BrowserCase::start("snapshot.html").await else {
         return;
     };
     case.setup_world();
-    let stealth = case
-        .tab
-        .evaluate(
-            "(async () => JSON.stringify({ webdriverUndefined: navigator.webdriver === undefined, runtime: typeof window.chrome.runtime.sendMessage, notification: (await navigator.permissions.query({name:'notifications'})).state === Notification.permission }))()",
-            true,
-        )
-        .unwrap()
-        .value
-        .unwrap();
-    let stealth: Value = serde_json::from_str(stealth.as_str().unwrap()).unwrap();
-    assert_eq!(stealth["webdriverUndefined"], true);
-    assert_eq!(stealth["runtime"], "function");
-    assert_eq!(stealth["notification"], true);
+    assert_no_refact_page_scripts(&case.tab);
 
-    let frame_id = case
-        .tab
-        .call_method(Page::GetFrameTree(None))
-        .unwrap()
-        .frame_tree
-        .frame
-        .id;
-    let context_id = case
-        .tab
-        .call_method(Page::CreateIsolatedWorld {
-            frame_id,
-            world_name: Some(UTILITY_WORLD_NAME.to_string()),
-            grant_univeral_access: Some(true),
-        })
-        .unwrap()
-        .execution_context_id;
-    let isolated = case
-        .tab
-        .call_method(Runtime::Evaluate {
-            expression: "globalThis.__refact_stealth_installed".to_string(),
-            object_group: None,
-            include_command_line_api: None,
-            silent: None,
-            context_id: Some(context_id),
-            return_by_value: Some(true),
-            generate_preview: None,
-            user_gesture: None,
-            await_promise: None,
-            throw_on_side_effect: None,
-            timeout: None,
-            disable_breaks: None,
-            repl_mode: None,
-            allow_unsafe_eval_blocked_by_csp: None,
-            unique_context_id: None,
-            serialization_options: None,
-        })
+    case.tab
+        .navigate_to(&case.server.url("selectors.html"))
         .unwrap();
-    assert_eq!(isolated.result.value, None);
+    case.tab.wait_until_navigated().unwrap();
+    assert_no_refact_page_scripts(&case.tab);
+
+    let second_tab = case.runtime.browser.new_tab().unwrap();
+    setup_recording_for_tab(&mut case.runtime, second_tab.clone()).unwrap();
+    second_tab
+        .navigate_to(&case.server.url("snapshot.html"))
+        .unwrap();
+    second_tab.wait_until_navigated().unwrap();
+    assert_no_refact_page_scripts(&second_tab);
 }
 
 // Per-chat attachment and idle expiry let one persistent profile survive changing chat owners safely.
@@ -669,78 +629,24 @@ async fn differentiator_14_per_chat_runtime_preserves_profile_and_lifecycle() {
 
 // Rich element metadata lets form and actionability logic decide without ad hoc DOM reinspection.
 
-// A fail-open install flag makes the health loop treat a crashed panel as healthy and never retry it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires Chrome"]
-async fn injected_panel_install_flags_report_the_real_mount_state() {
+async fn explicit_picker_releases_the_page_without_installing_page_world_globals() {
     let mut case = BrowserCase::start_with_chrome("hostile-globals.html").await;
     case.setup_world();
-
-    for flag in [
-        "!!window.__refact_toolbar_installed",
-        "!!window.__refact_recorder_installed",
-        "!!window.__refact_overlays_installed",
-        "!!document.querySelector('#__refact_toolbar_host')",
-        "typeof window.__refact_overlays === 'object'",
-        "!window.__refact_toolbar_blocked",
-        "!window.__refact_recorder_blocked",
-        "!window.__refact_overlays_blocked",
-    ] {
-        assert_eq!(eval_value(&case.tab, flag), Value::Bool(true), "{flag}");
-    }
-
+    let world = &case.runtime.world_manager;
+    let overlay_present = |tab: &Tab| {
+        eval_value(tab, "!!document.getElementById('__refact_picker_overlay')") == Value::Bool(true)
+    };
+    assert!(!overlay_present(&case.tab));
+    world
+        .call_overlay(&case.tab, "startPicker", json!([60_000]))
+        .unwrap();
+    assert!(overlay_present(&case.tab));
     assert_eq!(
-        eval_value(
-            &case.tab,
-            "typeof window.__refact_overlays.startPicker === 'function' && typeof window.__refact_overlays.cancelPicker === 'function' && typeof window.__refact_overlays.startAnnotate === 'function'"
-        ),
-        Value::Bool(true)
+        eval_value(&case.tab, "typeof globalThis.__refact_overlays"),
+        Value::String("undefined".into())
     );
-
-    let health = refact_lsp::refact_browser::probe_injection_health(&case.tab);
-    assert!(!health.needs_injection);
-    assert_eq!(health.blocked, None);
-
-    case.tab
-        .evaluate(
-            "(function(){ document.querySelector('#__refact_toolbar_host').remove(); window.__refact_toolbar_installed = false; })()",
-            false,
-        )
-        .unwrap();
-
-    let degraded = refact_lsp::refact_browser::probe_injection_health(&case.tab);
-    assert!(degraded.needs_injection);
-
-    refact_lsp::refact_browser::ensure_injection_into_tab(
-        &case.tab,
-        true,
-        case.runtime.buffers.raw_recorder_events.clone(),
-    );
-
-    for flag in [
-        "!!window.__refact_toolbar_installed",
-        "!!document.querySelector('#__refact_toolbar_host')",
-    ] {
-        assert_eq!(eval_value(&case.tab, flag), Value::Bool(true), "{flag}");
-    }
-}
-
-// A picker overlay without a release path traps every click on the page behind a full-viewport shield.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires Chrome"]
-async fn picker_overlay_always_releases_the_page() {
-    let mut case = BrowserCase::start_with_chrome("selectors.html").await;
-    case.setup_world();
-
-    case.tab
-        .evaluate("window.__refact_overlays.startPicker(60000)", false)
-        .unwrap();
-    let active = eval_json(
-        &case.tab,
-        "({ overlay: !!document.getElementById('__refact_picker_overlay'), active: !!window.__refact_picker_active })",
-    );
-    assert_eq!(active["overlay"], true);
-    assert_eq!(active["active"], true);
 
     case.tab
         .evaluate(
@@ -748,34 +654,20 @@ async fn picker_overlay_always_releases_the_page() {
             false,
         )
         .unwrap();
-    let released = eval_json(
-        &case.tab,
-        "({ overlay: !!document.getElementById('__refact_picker_overlay'), active: !!window.__refact_picker_active })",
-    );
-    assert_eq!(released["overlay"], false);
-    assert_eq!(released["active"], false);
+    assert!(!overlay_present(&case.tab));
 
-    case.tab
-        .evaluate("window.__refact_overlays.startPicker(150)", false)
+    world
+        .call_overlay(&case.tab, "startPicker", json!([150]))
         .unwrap();
     std::thread::sleep(Duration::from_millis(600));
-    let timed_out = eval_json(
-        &case.tab,
-        "({ overlay: !!document.getElementById('__refact_picker_overlay'), active: !!window.__refact_picker_active })",
-    );
-    assert_eq!(timed_out["overlay"], false);
-    assert_eq!(timed_out["active"], false);
+    assert!(!overlay_present(&case.tab));
 
-    case.tab
-        .evaluate("window.__refact_overlays.startPicker(60000)", false)
+    world
+        .call_overlay(&case.tab, "startPicker", json!([60_000]))
         .unwrap();
-    case.tab
-        .evaluate("window.__refact_overlays.cancelPicker()", false)
+    assert!(overlay_present(&case.tab));
+    world
+        .call_overlay(&case.tab, "cancelPicker", json!([]))
         .unwrap();
-    let cancelled = eval_json(
-        &case.tab,
-        "({ overlay: !!document.getElementById('__refact_picker_overlay'), active: !!window.__refact_picker_active })",
-    );
-    assert_eq!(cancelled["overlay"], false);
-    assert_eq!(cancelled["active"], false);
+    assert!(!overlay_present(&case.tab));
 }

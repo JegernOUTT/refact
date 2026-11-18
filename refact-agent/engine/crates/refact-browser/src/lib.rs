@@ -123,7 +123,7 @@ use std::time::{Duration, Instant};
 
 use headless_chrome::Browser;
 use headless_chrome::protocol::cdp::types::Event;
-use headless_chrome::protocol::cdp::{Network, Page, Runtime};
+use headless_chrome::protocol::cdp::{Network, Page};
 use serde_json;
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -138,62 +138,9 @@ use refact_integrations::browser_types::{
 const FRAME_RATE_LIMIT_MS: u128 = 500;
 const FRAME_HASH_THRESHOLD: u64 = 50;
 
-const MAX_RAW_EVENT_QUEUE: usize = 2000;
-const MAX_RAW_EVENT_BYTES: usize = 64 * 1024;
 pub const MAX_CONSOLE_TEXT_BYTES: usize = 8 * 1024;
 pub const NETWORK_MAX_TOTAL_BUFFER_BYTES: u32 = 32 * 1024 * 1024;
 pub const NETWORK_MAX_RESOURCE_BUFFER_BYTES: u32 = 8 * 1024 * 1024;
-
-const RECORDER_SCRIPT_TEMPLATE: &str = include_str!("browser_recorder.js");
-const TOOLBAR_SCRIPT: &str = include_str!("browser_toolbar.js");
-const OVERLAYS_SCRIPT: &str = include_str!("browser_overlays.js");
-
-pub const PICKER_PAGE_TIMEOUT_MS: u64 = 35_000;
-
-const STEALTH_SCRIPT: &str = r#"(function() {
-    if (window.__refact_stealth_installed) return;
-    window.__refact_stealth_installed = true;
-    try {
-        Object.defineProperty(navigator, 'webdriver', {
-            get: function() { return undefined; },
-            configurable: true,
-        });
-    } catch(e) {}
-    try {
-        if (!window.chrome) window.chrome = {};
-        if (!window.chrome.runtime) {
-            window.chrome.runtime = {
-                connect: function() {},
-                sendMessage: function() {},
-            };
-        }
-    } catch(e) {}
-    try {
-        var origQuery = Permissions.prototype.query;
-        Permissions.prototype.query = function(params) {
-            if (params.name === 'notifications') {
-                return Promise.resolve({ state: Notification.permission });
-            }
-            return origQuery.call(this, params);
-        };
-    } catch(e) {}
-})();"#;
-
-fn stealth_init_script() -> Page::AddScriptToEvaluateOnNewDocument {
-    Page::AddScriptToEvaluateOnNewDocument {
-        source: STEALTH_SCRIPT.to_string(),
-        world_name: None,
-        include_command_line_api: None,
-        run_immediately: None,
-    }
-}
-
-pub fn build_recorder_script(mask_passwords: bool) -> String {
-    RECORDER_SCRIPT_TEMPLATE.replace(
-        "__REFACT_MASK_PASSWORDS__",
-        if mask_passwords { "true" } else { "false" },
-    )
-}
 
 pub fn normalize_timestamp_ms(ts: f64) -> f64 {
     if !ts.is_finite() || ts < 0.0 {
@@ -957,6 +904,7 @@ impl BrowserRuntime {
         // Original owning Browser stays in RuntimeOwnership until actual runtime shutdown.
         // Retire the old transport before publishing a new connection or its callbacks.
         self.browser.disconnect_transport();
+        self.websocket_registry.prepare_reconnect();
         self.ownership
             .connection_epoch
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
@@ -996,23 +944,6 @@ impl BrowserRuntime {
                 self.world_manager.ensure_utility_world(&tab)?;
                 self.dialog_manager.install(&tab)?;
                 setup_file_chooser_capture(&tab, self.file_chooser_manager.clone())?;
-                let buffer = self.buffers.raw_recorder_events.clone();
-                tab.expose_function(
-                    "__refact_event",
-                    Arc::new(move |payload| {
-                        if let Some(event) = extract_refact_event_json(&payload) {
-                            if !event.is_empty() && event.len() <= MAX_RAW_EVENT_BYTES {
-                                if let Ok(mut queue) = buffer.lock() {
-                                    if queue.len() < MAX_RAW_EVENT_QUEUE {
-                                        queue.push(event);
-                                    }
-                                }
-                            }
-                        }
-                    }),
-                )
-                .map_err(|e| e.to_string())?;
-                register_recorder_init_scripts(&tab, self.buffers.mask_passwords)?;
                 setup_console_capture(&tab, self.buffers.raw_console_entries.clone())?;
                 setup_network_capture(
                     tab.clone(),
@@ -1021,7 +952,9 @@ impl BrowserRuntime {
                     self.websocket_registry.clone(),
                     self.har_recorder.clone(),
                 )?;
-                install_websocket_router(&tab, self.websocket_registry.clone())?;
+                if self.websocket_registry.route_count() > 0 {
+                    install_websocket_router(&tab, self.websocket_registry.clone())?;
+                }
                 if self.route_interception_enabled {
                     self.route_registry
                         .enable_for_tab(&tab, self.context_state.http_credentials.is_some())?;
@@ -1066,6 +999,17 @@ impl BrowserRuntime {
             connection_epoch: self.ownership.connection_epoch(),
             same_state_verified: verified,
         })
+    }
+}
+
+impl BrowserRuntime {
+    /// Arms every live tab with the page-world WebSocket mock. Called only after an explicit
+    /// WebSocket route is added; default browsing never reaches this.
+    pub fn arm_websocket_routes_on_all_tabs(&self) -> Result<(), String> {
+        for tab in self.tabs_snapshot() {
+            install_websocket_router(&tab, self.websocket_registry.clone())?;
+        }
+        Ok(())
     }
 }
 
@@ -1803,291 +1747,6 @@ pub fn hash_distance(a: u64, b: u64) -> u64 {
     (a ^ b).count_ones() as u64
 }
 
-fn register_recorder_init_scripts(
-    tab: &headless_chrome::Tab,
-    mask_passwords: bool,
-) -> Result<(), String> {
-    tab.call_method(stealth_init_script())
-        .map_err(|e| e.to_string())?;
-    for source in [
-        build_recorder_script(mask_passwords),
-        OVERLAYS_SCRIPT.to_string(),
-        TOOLBAR_SCRIPT.to_string(),
-    ] {
-        tab.call_method(Page::AddScriptToEvaluateOnNewDocument {
-            source,
-            world_name: None,
-            include_command_line_api: None,
-            run_immediately: None,
-        })
-        .map_err(|e| e.to_string())?;
-    }
-    Ok(())
-}
-
-pub fn inject_recorder_into_tab(
-    tab: &headless_chrome::Tab,
-    mask_passwords: bool,
-    action_buffer: Arc<Mutex<Vec<String>>>,
-) -> Result<(), String> {
-    let script = build_recorder_script(mask_passwords);
-
-    let binding_buffer = action_buffer.clone();
-    if let Err(e) = tab.expose_function(
-        "__refact_event",
-        Arc::new(move |payload: serde_json::Value| {
-            if let Some(event_json) = extract_refact_event_json(&payload) {
-                if event_json.trim().is_empty() {
-                    return;
-                }
-                if event_json.len() > MAX_RAW_EVENT_BYTES {
-                    return;
-                }
-                if let Ok(mut buf) = binding_buffer.lock() {
-                    if buf.len() >= MAX_RAW_EVENT_QUEUE {
-                        return;
-                    }
-                    buf.push(event_json);
-                }
-            }
-        }),
-    ) {
-        warn!("Failed to expose __refact_event binding (non-fatal): {}", e);
-    }
-
-    if let Err(e) = tab.call_method(stealth_init_script()) {
-        warn!("Failed to add stealth script (non-fatal): {}", e);
-    }
-
-    if let Err(e) = tab.call_method(Page::AddScriptToEvaluateOnNewDocument {
-        source: script.clone(),
-        world_name: None,
-        include_command_line_api: None,
-        run_immediately: None,
-    }) {
-        warn!("Failed to add recorder script (non-fatal): {}", e);
-    }
-
-    if let Err(e) = tab.call_method(Page::AddScriptToEvaluateOnNewDocument {
-        source: OVERLAYS_SCRIPT.to_string(),
-        world_name: None,
-        include_command_line_api: None,
-        run_immediately: None,
-    }) {
-        warn!("Failed to add overlays script (non-fatal): {}", e);
-    }
-
-    if let Err(e) = tab.call_method(Page::AddScriptToEvaluateOnNewDocument {
-        source: TOOLBAR_SCRIPT.to_string(),
-        world_name: None,
-        include_command_line_api: None,
-        run_immediately: None,
-    }) {
-        warn!("Failed to add toolbar script (non-fatal): {}", e);
-    }
-
-    if let Err(e) = tab.evaluate(STEALTH_SCRIPT, false) {
-        warn!("Stealth immediate evaluate failed (non-fatal): {}", e);
-    }
-    if let Err(e) = tab.evaluate(&script, false) {
-        warn!("Recorder immediate evaluate failed (non-fatal): {}", e);
-    }
-    if let Err(e) = tab.evaluate(OVERLAYS_SCRIPT, false) {
-        warn!("Overlays immediate evaluate failed (non-fatal): {}", e);
-    }
-    if let Err(e) = tab.evaluate(TOOLBAR_SCRIPT, false) {
-        warn!("Toolbar immediate evaluate failed (non-fatal): {}", e);
-    }
-
-    Ok(())
-}
-
-pub const INJECTION_HEALTH_PROBE_JS: &str = r#"(function(){
-    try {
-        var blocked = window.__refact_toolbar_blocked || window.__refact_recorder_blocked || window.__refact_overlays_blocked || null;
-        var installed = typeof window.__refact_event === 'function'
-            && !!window.__refact_stealth_installed
-            && !!window.__refact_recorder_installed
-            && !!window.__refact_overlays_installed
-            && !!window.__refact_toolbar_installed;
-        if (installed) { try { window.__refact_event(''); } catch(e) { return {needs:true, blocked:null}; } }
-        return { needs: !installed && !blocked, blocked: blocked };
-    } catch(e) { return { needs: true, blocked: null }; }
-})()"#;
-
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct InjectionHealth {
-    pub needs_injection: bool,
-    pub blocked: Option<String>,
-}
-
-pub fn evaluate_by_value(
-    tab: &headless_chrome::Tab,
-    expression: &str,
-) -> Option<serde_json::Value> {
-    let evaluated = tab
-        .call_method(Runtime::Evaluate {
-            expression: expression.to_string(),
-            return_by_value: Some(true),
-            generate_preview: Some(false),
-            silent: Some(false),
-            await_promise: Some(false),
-            include_command_line_api: Some(false),
-            user_gesture: Some(false),
-            object_group: None,
-            context_id: None,
-            throw_on_side_effect: None,
-            timeout: None,
-            disable_breaks: None,
-            repl_mode: None,
-            allow_unsafe_eval_blocked_by_csp: None,
-            unique_context_id: None,
-            serialization_options: None,
-        })
-        .ok()?;
-    if evaluated.exception_details.is_some() {
-        return None;
-    }
-    evaluated.result.value
-}
-
-pub fn probe_injection_health(tab: &headless_chrome::Tab) -> InjectionHealth {
-    parse_injection_health(evaluate_by_value(tab, INJECTION_HEALTH_PROBE_JS).as_ref())
-}
-
-pub fn parse_injection_health(value: Option<&serde_json::Value>) -> InjectionHealth {
-    let Some(value) = value.and_then(|value| value.as_object()) else {
-        return InjectionHealth {
-            needs_injection: true,
-            blocked: None,
-        };
-    };
-    InjectionHealth {
-        needs_injection: value
-            .get("needs")
-            .and_then(|needs| needs.as_bool())
-            .unwrap_or(true),
-        blocked: value
-            .get("blocked")
-            .and_then(|blocked| blocked.as_str())
-            .filter(|blocked| !blocked.is_empty())
-            .map(str::to_string),
-    }
-}
-
-pub fn ensure_injection_into_tab(
-    tab: &headless_chrome::Tab,
-    mask_passwords: bool,
-    action_buffer: Arc<Mutex<Vec<String>>>,
-) -> InjectionHealth {
-    let health = probe_injection_health(tab);
-
-    if health.needs_injection {
-        let _ = inject_recorder_into_tab(tab, mask_passwords, action_buffer);
-    } else if let Some(reason) = &health.blocked {
-        warn!(
-            "Injected panel blocked on {} ({}), skipping retry",
-            tab.get_url(),
-            reason
-        );
-    }
-    health
-}
-
-pub fn ensure_injection_into_all_tabs(runtime: &BrowserRuntime) -> Vec<(String, InjectionHealth)> {
-    let mask_passwords = runtime.buffers.mask_passwords;
-    let action_buffer = runtime.buffers.raw_recorder_events.clone();
-    let tabs: Vec<Arc<headless_chrome::Tab>> = runtime
-        .browser
-        .get_tabs()
-        .lock()
-        .map(|tabs| tabs.iter().cloned().collect())
-        .unwrap_or_default();
-
-    let mut visited = BTreeSet::new();
-    let mut report = Vec::new();
-    for tab in tabs {
-        let target_id = tab.get_target_id().to_string();
-        if !visited.insert(target_id.clone()) {
-            continue;
-        }
-        let url = tab.get_url();
-        if url.starts_with("chrome://") || url == "about:blank" {
-            continue;
-        }
-        let health = ensure_injection_into_tab(&tab, mask_passwords, action_buffer.clone());
-        report.push((target_id, health));
-    }
-    report
-}
-
-fn extract_refact_event_json(payload: &serde_json::Value) -> Option<String> {
-    fn extract_from_value(value: &serde_json::Value) -> Option<String> {
-        if let Some(arr) = value.as_array() {
-            if let Some(first) = arr.first() {
-                if let Some(event_str) = first.as_str() {
-                    return Some(event_str.to_string());
-                }
-                if first.is_object() {
-                    return serde_json::to_string(first).ok();
-                }
-            }
-        }
-
-        if let Some(args) = value.get("args").and_then(|v| v.as_array()) {
-            if let Some(first) = args.first() {
-                if let Some(event_str) = first.as_str() {
-                    return Some(event_str.to_string());
-                }
-                if first.is_object() {
-                    return serde_json::to_string(first).ok();
-                }
-            }
-        }
-
-        if let Some(args) = value.get("arguments").and_then(|v| v.as_array()) {
-            if let Some(first) = args.first() {
-                if let Some(event_str) = first.as_str() {
-                    return Some(event_str.to_string());
-                }
-                if first.is_object() {
-                    return serde_json::to_string(first).ok();
-                }
-            }
-        }
-
-        if let Some(event_type) = value.get("type").and_then(|v| v.as_str()) {
-            if !event_type.is_empty() {
-                return serde_json::to_string(value).ok();
-            }
-        }
-
-        None
-    }
-
-    if let Some(as_str) = payload.as_str() {
-        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(as_str) {
-            if let Some(unwrapped) = extract_from_value(&parsed) {
-                return Some(unwrapped);
-            }
-            if parsed.is_object() {
-                return serde_json::to_string(&parsed).ok();
-            }
-        }
-        return Some(as_str.to_string());
-    }
-
-    if let Some(unwrapped) = extract_from_value(payload) {
-        return Some(unwrapped);
-    }
-
-    if payload.is_object() {
-        return serde_json::to_string(payload).ok();
-    }
-
-    None
-}
-
 pub fn setup_console_capture(
     tab: &headless_chrome::Tab,
     console_buffer: Arc<Mutex<Vec<ConsoleEntry>>>,
@@ -2400,11 +2059,6 @@ pub fn setup_recording_for_tab(
         .configure_context(browser_context_id.as_deref())?;
     setup_file_chooser_capture(&tab, runtime.file_chooser_manager.clone())?;
     runtime.world_manager.ensure_utility_world(&tab)?;
-    inject_recorder_into_tab(
-        &tab,
-        runtime.buffers.mask_passwords,
-        runtime.buffers.raw_recorder_events.clone(),
-    )?;
     setup_console_capture(&tab, runtime.buffers.raw_console_entries.clone())?;
     setup_network_capture(
         tab.clone(),
@@ -2413,7 +2067,9 @@ pub fn setup_recording_for_tab(
         runtime.websocket_registry.clone(),
         runtime.har_recorder.clone(),
     )?;
-    install_websocket_router(&tab, runtime.websocket_registry.clone())?;
+    if runtime.websocket_registry.route_count() > 0 {
+        install_websocket_router(&tab, runtime.websocket_registry.clone())?;
+    }
     runtime.context_state.apply_to_tab(&tab)?;
     runtime.clock.apply_to_tab(&tab)?;
     runtime.init_scripts.apply_to_tab(&tab)?;
@@ -2993,22 +2649,6 @@ mod tests {
     }
 
     #[test]
-    fn test_build_recorder_script_mask_true() {
-        let script = build_recorder_script(true);
-        assert!(script.contains("var MASK_PASSWORDS = true;"));
-        assert!(!script.contains("__REFACT_MASK_PASSWORDS__"));
-    }
-
-    #[test]
-    fn test_stealth_and_injected_bundle_use_separate_worlds() {
-        assert_eq!(stealth_init_script().world_name, None);
-        assert_eq!(
-            world::utility_init_script().world_name.as_deref(),
-            Some(UTILITY_WORLD_NAME)
-        );
-    }
-
-    #[test]
     fn action_overflow_rewinds_every_action_cursor_not_just_the_send_cursor() {
         let mut buf = make_test_buffers();
         for i in 0..MAX_BUFFER_SIZE {
@@ -3079,59 +2719,6 @@ mod tests {
     // A fail-open install flag makes the health loop believe a crashed panel is healthy and never retry.
 
     // Divergent overlay copies drift apart; one module owns picker, annotate and the z-index ladder.
-
-    // A blocked page must not be re-injected on every health tick, and a healthy page must not be touched.
-
-    // Healing only the active tab leaves background tabs permanently un-instrumented.
-
-    // Inline overlay template strings in the router are what drifted into four divergent copies.
-
-    // A length-preserving mask still discloses the password length to anything reading the transcript.
-    #[test]
-    fn password_mask_is_fixed_length_in_both_layers() {
-        let script = build_recorder_script(true);
-        assert!(script.contains("var MASKED_VALUE = '********';"));
-        assert!(script.contains("value: masked ? MASKED_VALUE : (el.value || ''),"));
-        assert!(!script.contains("'*'.repeat("));
-
-        let mut buf = make_test_buffers();
-        for secret in ["a", "much-longer-password-value"] {
-            buf.handle_recorder_event(&format!(
-                r##"{{"type":"input","selector":"#pass","value":"{secret}","masked":true,"timestamp":1}}"##
-            ));
-        }
-        let masked = buf.flush_action_buffer();
-        let values = masked
-            .iter()
-            .map(|event| match event {
-                RecorderEvent::Input {
-                    value, ..
-                } => value.clone(),
-                _ => panic!("expected input"),
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(values, vec!["********".to_string(), "********".to_string()]);
-    }
-
-    // Browser-side detection plus Rust-side remasking must keep secrets out of serialized recorder output.
-    #[test]
-    fn differentiator_12_password_masking_has_two_layers_and_serializes_safely() {
-        let script = build_recorder_script(true);
-        assert!(script.contains("el.type === 'password'"));
-        assert!(script.contains("ac === 'current-password' || ac === 'new-password'"));
-
-        let secret = "serialized-secret";
-        let mut buf = make_test_buffers();
-        buf.handle_recorder_event(&format!(
-            r##"{{"type":"input","selector":"#password","value":"{secret}","masked":true,"timestamp":1}}"##
-        ));
-        let payload = serde_json::to_string(&buf.flush_action_buffer()).unwrap();
-        assert!(!payload.contains(secret), "secret leaked: {payload}");
-        assert!(payload.contains("********"));
-        assert!(!payload.contains("*********"));
-    }
-
-    // Page-observable stealth patches must remain separate from isolated automation internals.
 
     // A registry emptied by times-expiry once left Fetch.enable installed on every tab,
     // stalling all traffic and driving pages into reload loops.

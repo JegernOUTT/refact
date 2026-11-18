@@ -13,7 +13,7 @@ export type WorkspaceCapabilities = Record<
   "filesPanel" | "gitPanel" | "terminalPanel",
   boolean
 >;
-export type MainSurfaceKind = "git";
+export type MainSurfaceKind = "git" | "browser";
 export type PrefixedSurfaceKind =
   | "app"
   | "chat"
@@ -34,7 +34,10 @@ export type PaneSurfaceKey =
   | TaskSurfaceKey
   | BuddySurfaceKey
   | DesignSurfaceKey
+  | BrowserSurfaceKey
   | MainSurfaceKey;
+export type BrowserSurfaceKey = "browser:main";
+export const BROWSER_SURFACE_KEY: BrowserSurfaceKey = "browser:main";
 export type AppSurfaceKey = `app:${string}`;
 export type ChatSurfaceKey = `chat:${string}`;
 export type DesignSurfaceKey = `design:${string}`;
@@ -52,7 +55,7 @@ export type MainSurfaceKey =
 
 export type ParsedSurfaceKey =
   | { kind: PrefixedSurfaceKind; id: string }
-  | { kind: "git"; id: "main" }
+  | { kind: MainSurfaceKind; id: "main" }
   | { kind: "dashboard"; id: null };
 
 const isPrefixedSurfaceKind = (kind: string): kind is PrefixedSurfaceKind =>
@@ -66,13 +69,11 @@ const isPrefixedSurfaceKind = (kind: string): kind is PrefixedSurfaceKind =>
   kind === "worktreediff";
 
 export const isMainSurfaceKind = (kind: string): kind is MainSurfaceKind =>
-  kind === "git";
+  kind === "git" || kind === "browser";
 
 export function makeSurfaceKey(kind: "dashboard", id?: null): SurfaceKey;
-export function makeSurfaceKey(
-  kind: MainSurfaceKind,
-  id: "main",
-): MainSurfaceKey;
+export function makeSurfaceKey(kind: "git", id: "main"): MainSurfaceKey;
+export function makeSurfaceKey(kind: "browser", id: "main"): BrowserSurfaceKey;
 export function makeSurfaceKey(
   kind: Exclude<SurfaceKind, "dashboard" | MainSurfaceKind>,
   id: string,
@@ -157,6 +158,9 @@ export const isSplittableSurface = (key: SurfaceKey): key is PaneSurfaceKey => {
 
 export const isDesignSurface = (key: SurfaceKey): key is DesignSurfaceKey =>
   key.startsWith("design:") && key.length > "design:".length;
+
+export const isBrowserSurface = (key: SurfaceKey): key is BrowserSurfaceKey =>
+  key === BROWSER_SURFACE_KEY;
 
 export const isMainSurface = (key: SurfaceKey): key is MainSurfaceKey =>
   key === "git:main" || isGitDiffSurface(key) || isWorktreeDiffSurface(key);

@@ -5,6 +5,7 @@ import { lazy, Suspense, useCallback } from "react";
 
 import { EmptyState, Spinner } from "../../components/ui";
 import { useAppSelector, useConfig } from "../../hooks";
+import { ProjectBrowserSurface } from "../Browser/ProjectBrowserSurface";
 import { Chat } from "../Chat/Chat";
 import { ChatThreadProvider } from "../Chat/Thread";
 import { selectCapabilities } from "../Config/configSlice";
@@ -153,6 +154,14 @@ export function SurfacePane({
           data-surface-key={surfaceKey}
         >
           <DesignSurface surfaceId={parsed.id} />
+        </div>
+      );
+    }
+
+    if (parsed.kind === "browser") {
+      return (
+        <div className={styles.surfacePane} data-surface-key={surfaceKey}>
+          <ProjectBrowserSurface />
         </div>
       );
     }

@@ -166,6 +166,7 @@ pub struct Supervisor {
     events: EventBus,
     daemon_dir: PathBuf,
     daemon_auth_token: Option<String>,
+    project_browser_proxy_key: Option<String>,
     daemon_port: RwLock<u16>,
     cron_pending: Arc<SyncRwLock<HashMap<String, u64>>>,
     reserved_ports: Arc<SyncMutex<HashSet<u16>>>,
@@ -199,6 +200,7 @@ impl Supervisor {
             Arc::new(SyncRwLock::new(HashMap::new())),
             crate::daemon::config::DaemonConfig::default().idle_timeout_secs,
             None,
+            false,
             crate::daemon::state::resolve_current_executable(),
         )
     }
@@ -211,6 +213,7 @@ impl Supervisor {
         proxy_activity: Arc<SyncRwLock<HashMap<String, ProxyActivity>>>,
         idle_timeout_secs: u64,
         daemon_auth_token: Option<String>,
+        project_browser_proxy_enabled: bool,
         worker_executable: Result<PathBuf, String>,
     ) -> Arc<Self> {
         let (shutdown_tx, _) = watch::channel(None);
@@ -226,6 +229,7 @@ impl Supervisor {
             events,
             daemon_dir,
             daemon_auth_token,
+            project_browser_proxy_key: project_browser_proxy_enabled.then(crate::daemon::auth::generate_token),
             daemon_port: RwLock::new(daemon_port),
             cron_pending,
             reserved_ports: Arc::new(SyncMutex::new(HashSet::new())),
@@ -1428,6 +1432,16 @@ impl Supervisor {
             .map_err(|error| format!("failed to spawn worker command: {error}"))
     }
 
+    pub(crate) fn project_browser_worker_token(&self, project_id: &str) -> Option<String> {
+        use hmac::{Hmac, KeyInit, Mac};
+        let key = self.project_browser_proxy_key.as_ref()?;
+        let mut mac = Hmac::<sha2_observation::Sha256>::new_from_slice(key.as_bytes())
+            .expect("HMAC accepts arbitrary keys");
+        mac.update(b"refact-project-browser-proxy-v1\0");
+        mac.update(project_id.as_bytes());
+        Some(hex::encode(mac.finalize().into_bytes()))
+    }
+
     async fn worker_command(
         &self,
         spec: &WorkerLaunchSpec,
@@ -1444,6 +1458,12 @@ impl Supervisor {
         ));
         if let Some(token) = &self.daemon_auth_token {
             command.env("REFACT_DAEMON_TOKEN", token);
+        }
+        let browser_token_env = crate::http::routers::v1::v1_browser_project::PROXY_TOKEN_ENV;
+        if let Some(token) = self.project_browser_worker_token(&spec.project_id) {
+            command.env(browser_token_env, token);
+        } else {
+            command.env_remove(browser_token_env);
         }
         if std::env::var_os("RUST_LOG").is_none() {
             command.env("RUST_LOG", crate::daemon::default_log_filter_directives());
@@ -2449,7 +2469,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn worker_command_sets_daemon_auth_token_env() {
+    async fn worker_command_sets_distinct_project_browser_and_daemon_auth_tokens() {
         let dir = tempfile::tempdir().unwrap();
         let supervisor = Supervisor::new_with_cron_pending(
             EventBus::new(dir.path().join("events.jsonl")),
@@ -2459,6 +2479,7 @@ mod tests {
             Arc::new(SyncRwLock::new(HashMap::new())),
             crate::daemon::config::DaemonConfig::default().idle_timeout_secs,
             Some("secret-token".to_string()),
+            true,
             crate::daemon::state::resolve_current_executable(),
         );
         let spec = test_launch_spec(dir.path().join("project"));
@@ -2484,9 +2505,23 @@ mod tests {
             .get_args()
             .map(|arg| arg.to_string_lossy().to_string())
             .collect::<Vec<_>>();
+        let browser_token = supervisor
+            .project_browser_worker_token(&spec.project_id)
+            .unwrap();
+        let env_browser_token = command.as_std().get_envs().find_map(|(key, value)| {
+            (key == crate::http::routers::v1::v1_browser_project::PROXY_TOKEN_ENV)
+                .then(|| value.map(|value| value.to_string_lossy().to_string()))
+                .flatten()
+        });
 
         assert_eq!(token.as_deref(), Some("secret-token"));
         assert!(!args.iter().any(|arg| arg.contains("secret-token")));
+        assert_eq!(env_browser_token.as_deref(), Some(browser_token.as_str()));
+        assert_ne!(
+            env_browser_token,
+            supervisor.project_browser_worker_token("different-project")
+        );
+        assert!(!args.iter().any(|arg| arg.contains(&browser_token)));
     }
 
     #[cfg(unix)]
@@ -2514,6 +2549,7 @@ mod tests {
             Arc::new(SyncRwLock::new(HashMap::new())),
             crate::daemon::config::DaemonConfig::default().idle_timeout_secs,
             None,
+            false,
             Ok(stable_path.clone()),
         );
 

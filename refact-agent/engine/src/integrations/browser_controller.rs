@@ -980,8 +980,6 @@ fn execute_steps_with_world(
     image_policy: &ImagePolicy,
     world: &WorldManager,
 ) -> ExecutionReport {
-    let _ = tab.evaluate(INSPECT_ELEMENT_JS, false);
-
     let mut results: Vec<StepResult> = Vec::new();
     let handlers = Arc::new(Mutex::new(LocatorHandlerRegistry::default()));
     let mut locator_handlers = Vec::new();
@@ -1005,9 +1003,6 @@ fn execute_steps_with_world(
             all_ok = false;
             results.push(result);
             break;
-        }
-        if result.ok && is_navigation_step(step) {
-            let _ = tab.evaluate(INSPECT_ELEMENT_JS, false);
         }
         pre_step_url = Some(tab.get_url());
         results.push(result);
@@ -1659,9 +1654,12 @@ fn execute_route_management_step(
                 *on_page_message,
                 *on_server_message,
             ) {
-                Ok(()) => StepResult::success(idx, "Added WebSocket route").with_data(
-                    serde_json::json!({"route_count": runtime.websocket_registry.route_count()}),
-                ),
+                Ok(()) => match runtime.arm_websocket_routes_on_all_tabs() {
+                    Ok(()) => StepResult::success(idx, "Added WebSocket route").with_data(
+                        serde_json::json!({"route_count": runtime.websocket_registry.route_count()}),
+                    ),
+                    Err(error) => StepResult::failure(idx, "Add WebSocket route", error),
+                },
                 Err(error) => StepResult::failure(idx, "Add WebSocket route", error),
             },
         ),
@@ -2818,7 +2816,6 @@ fn execute_step_with_world(
     idx: usize,
     image_policy: &ImagePolicy,
 ) -> StepResult {
-    let _ = tab.evaluate(INSPECT_ELEMENT_JS, false);
     let handlers = Arc::new(Mutex::new(LocatorHandlerRegistry::default()));
     let mut mouse_state = MouseState::default();
     let result = execute_single_step(
@@ -2832,9 +2829,6 @@ fn execute_step_with_world(
         &mut Vec::new(),
         &mut mouse_state,
     );
-    if result.ok && is_navigation_step(step) {
-        let _ = tab.evaluate(INSPECT_ELEMENT_JS, false);
-    }
     let _ = world.release_all(tab);
     result
 }
@@ -4187,9 +4181,6 @@ pub fn execute_steps_with_runtime(
     refact_browser::adopt_new_tabs(runtime, None);
     let initial_tab_ids = runtime.known_tab_ids();
     let mut current_tab: Option<Arc<Tab>> = runtime.get_active_tab();
-    if let Some(ref tab) = current_tab {
-        let _ = tab.evaluate(INSPECT_ELEMENT_JS, false);
-    }
 
     let mut results: Vec<StepResult> = Vec::new();
     let mut new_tabs = Vec::new();
@@ -4261,7 +4252,6 @@ pub fn execute_steps_with_runtime(
                                 || trigger_page_navigation(&new_tab, url),
                             )
                         });
-                        let _ = new_tab.evaluate(INSPECT_ELEMENT_JS, false);
                         current_tab = Some(new_tab);
                         runtime.set_active_tab_target_id(target_id.clone());
                         match navigation.transpose() {
@@ -4347,7 +4337,6 @@ pub fn execute_steps_with_runtime(
                     match found {
                         Some(found_tab) => {
                             runtime.set_active_tab_target_id(found_tab.get_target_id().to_string());
-                            let _ = found_tab.evaluate(INSPECT_ELEMENT_JS, false);
                             current_tab = Some(found_tab.clone());
                             StepResult::success(
                                 idx,
@@ -4650,11 +4639,6 @@ pub fn execute_steps_with_runtime(
             results.push(result);
             break;
         }
-        if result.ok && is_navigation_step(step) {
-            if let Some(ref tab) = current_tab {
-                let _ = tab.evaluate(INSPECT_ELEMENT_JS, false);
-            }
-        }
         pre_step_url = current_tab.as_ref().map(|t| t.get_url());
         if !resolves_popup_wait && pending_popup_wait.is_none() {
             if result.ok
@@ -4767,17 +4751,6 @@ fn mark_unexecuted_steps_skipped(results: &mut Vec<StepResult>, total_steps: usi
 
 fn replaces_document_in_place(step: &BrowserStep) -> bool {
     matches!(step, BrowserStep::SetContent { .. })
-}
-
-fn is_navigation_step(step: &BrowserStep) -> bool {
-    matches!(
-        step,
-        BrowserStep::Navigate { .. }
-            | BrowserStep::Reload
-            | BrowserStep::GoBack
-            | BrowserStep::GoForward
-            | BrowserStep::SetContent { .. }
-    )
 }
 
 fn read_artifact_step(

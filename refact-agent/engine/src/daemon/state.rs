@@ -262,6 +262,10 @@ impl DaemonState {
             proxy_activity.clone(),
             config.idle_timeout_secs,
             worker_auth_token,
+            config.auth.enabled
+                && auth_token
+                    .as_deref()
+                    .is_some_and(|token| !token.trim().is_empty()),
             relaunch_executable.clone(),
         );
         let proxy_client = reqwest::Client::builder()

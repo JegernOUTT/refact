@@ -13,78 +13,33 @@ use crate::global_context::GlobalContext;
 use crate::chat::types::{BrowserTabInfo, ChatEvent, TimelineEntry};
 use crate::custom_error::ScratchError;
 use crate::integrations::browser_runtime::{
-    BrowserLaunchOptions, BrowserProxyOptions, PICKER_PAGE_TIMEOUT_MS, compute_frame_hash,
-    ensure_frame_emitter, ensure_injection_into_all_tabs, get_browser_profile_dir,
-    register_browser_runtime, relaunch_runtime_for_chat, remove_browser_runtime,
-    find_runtime_by_chat_id, setup_recording_for_runtime, launch_with_lock_recovery,
-    relaunch_lock_for_chat,
+    BrowserLaunchOptions, BrowserProxyOptions, compute_frame_hash, ensure_frame_emitter,
+    get_browser_profile_dir, register_browser_runtime, relaunch_runtime_for_chat,
+    remove_browser_runtime, find_runtime_by_chat_id, setup_recording_for_runtime,
+    launch_with_lock_recovery, relaunch_lock_for_chat, validate_legacy_profile_args,
 };
 use crate::integrations::browser_types::{RecorderEvent, ConsoleEntry, NetworkEntry};
 use crate::integrations::browser_models::BrowserActionRequest;
 use crate::integrations::browser_controller;
 
 const FRAME_MAX_SIDE: u32 = 1280;
-
-fn overlay_call_script(call: &str) -> String {
-    format!(
-        "(function(){{ var api = window.__refact_overlays; if (!api) return {{ overlays: 'unavailable' }}; return {{ overlays: 'ready', result: api.{call} }}; }})()"
-    )
-}
+const PICKER_PAGE_TIMEOUT_MS: u64 = 35_000;
 
 fn eval_overlay(
+    rt: &crate::integrations::browser_runtime::BrowserRuntime,
     tab: &headless_chrome::Tab,
-    call: &str,
+    method: &str,
+    args: serde_json::Value,
     context: &str,
 ) -> Result<serde_json::Value, ScratchError> {
-    let evaluated = tab
-        .call_method(headless_chrome::protocol::cdp::Runtime::Evaluate {
-            expression: overlay_call_script(call),
-            return_by_value: Some(true),
-            generate_preview: Some(false),
-            silent: Some(false),
-            await_promise: Some(false),
-            include_command_line_api: Some(false),
-            user_gesture: Some(false),
-            object_group: None,
-            context_id: None,
-            throw_on_side_effect: None,
-            timeout: None,
-            disable_breaks: None,
-            repl_mode: None,
-            allow_unsafe_eval_blocked_by_csp: None,
-            unique_context_id: None,
-            serialization_options: None,
-        })
+    rt.world_manager
+        .call_overlay(tab, method, args)
         .map_err(|e| {
             ScratchError::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("{}: {}", context, e),
             )
-        })?;
-
-    if let Some(details) = evaluated.exception_details {
-        return Err(ScratchError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("{}: {}", context, details.text),
-        ));
-    }
-
-    let parsed = evaluated.result.value.unwrap_or(serde_json::Value::Null);
-
-    if parsed.get("overlays").and_then(|value| value.as_str()) != Some("ready") {
-        return Err(ScratchError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            format!(
-                "{}: injected overlays are not installed on this page",
-                context
-            ),
-        ));
-    }
-
-    Ok(parsed
-        .get("result")
-        .cloned()
-        .unwrap_or(serde_json::Value::Null))
+        })
 }
 
 async fn image_policy_for_chat(app: &AppState, chat_id: &str) -> ImagePolicy {
@@ -240,6 +195,9 @@ pub async fn handle_browser_start(
             format!("JSON problem: {}", e),
         )
     })?;
+    crate::chat::trajectories::validate_trajectory_id(&post.chat_id)?;
+    validate_legacy_profile_args(post.extra_args.as_deref().unwrap_or_default())
+        .map_err(|error| ScratchError::new(StatusCode::BAD_REQUEST, error))?;
 
     if let Some((rid, runtime_arc)) = find_runtime_by_chat_id(app.clone(), &post.chat_id).await {
         let (profile_dir, current_options) = {
@@ -251,6 +209,8 @@ pub async fn handle_browser_start(
             ..current_options.clone()
         });
         if requested_options.headless != current_options.headless {
+            validate_legacy_profile_args(&requested_options.extra_args)
+                .map_err(|error| ScratchError::new(StatusCode::BAD_REQUEST, error))?;
             drop(runtime_arc);
             let mode = requested_options.mode_label();
             let window_bounds = requested_options.window_bounds.clone();
@@ -680,8 +640,10 @@ pub async fn handle_browser_element_pick(
     })?;
 
     eval_overlay(
+        &rt,
         &tab,
-        &format!("startPicker({})", PICKER_PAGE_TIMEOUT_MS),
+        "startPicker",
+        serde_json::json!([PICKER_PAGE_TIMEOUT_MS]),
         "Failed to start element picker",
     )?;
 
@@ -722,7 +684,13 @@ pub async fn handle_browser_element_pick_result(
         )
     })?;
 
-    let parsed = eval_overlay(&tab, "readPicked()", "Failed to read picker result")?;
+    let parsed = eval_overlay(
+        &rt,
+        &tab,
+        "readPicked",
+        serde_json::json!([]),
+        "Failed to read picker result",
+    )?;
     if parsed.is_null() {
         return Ok(json_response(
             StatusCode::OK,
@@ -761,7 +729,13 @@ pub async fn handle_browser_element_pick_cancel(
         )
     })?;
 
-    eval_overlay(&tab, "cancelPicker()", "Failed to cancel picker")?;
+    eval_overlay(
+        &rt,
+        &tab,
+        "cancelPicker",
+        serde_json::json!([]),
+        "Failed to cancel picker",
+    )?;
 
     Ok(json_response(
         StatusCode::OK,
@@ -801,8 +775,10 @@ pub async fn handle_browser_annotate_start(
     })?;
 
     let result = eval_overlay(
+        &rt,
         &tab,
-        "startAnnotate()",
+        "startAnnotate",
+        serde_json::json!([]),
         "Failed to start annotation overlay",
     )?;
     let status = result.as_str().unwrap_or("started").to_string();
@@ -844,7 +820,13 @@ pub async fn handle_browser_annotate_result(
         )
     })?;
 
-    let parsed = eval_overlay(&tab, "readAnnotations()", "Failed to read annotations")?;
+    let parsed = eval_overlay(
+        &rt,
+        &tab,
+        "readAnnotations",
+        serde_json::json!([]),
+        "Failed to read annotations",
+    )?;
     if parsed.is_null() {
         return Ok(json_response(
             StatusCode::OK,
@@ -883,7 +865,13 @@ pub async fn handle_browser_annotate_clear(
         )
     })?;
 
-    eval_overlay(&tab, "clearAnnotations()", "Failed to clear annotations")?;
+    eval_overlay(
+        &rt,
+        &tab,
+        "clearAnnotations",
+        serde_json::json!([]),
+        "Failed to clear annotations",
+    )?;
 
     Ok(json_response(
         StatusCode::OK,
@@ -1417,6 +1405,8 @@ pub async fn handle_browser_handoff(
             format!("JSON problem: {}", e),
         )
     })?;
+    crate::chat::trajectories::validate_trajectory_id(&post.from_chat_id)?;
+    crate::chat::trajectories::validate_trajectory_id(&post.to_chat_id)?;
 
     let (rid, runtime_arc) = find_runtime_by_chat_id(app.clone(), &post.from_chat_id)
         .await
@@ -1429,6 +1419,14 @@ pub async fn handle_browser_handoff(
 
     let (profile_dir, tab_urls, window_bounds, mask_passwords, attach_screenshot) = {
         let mut rt = runtime_arc.lock().await;
+        if !rt.ownership.is_current_generation()
+            || rt.attached_chat_id().as_deref() != Some(post.from_chat_id.as_str())
+        {
+            return Err(ScratchError::new(
+                StatusCode::CONFLICT,
+                "Browser ownership changed before handoff".into(),
+            ));
+        }
         let profile_dir = rt.profile_dir.to_string_lossy().to_string();
         let tab_urls: Vec<String> = rt
             .browser
@@ -1440,7 +1438,6 @@ pub async fn handle_browser_handoff(
         let mask_passwords = rt.mask_passwords();
         let attach_screenshot = false;
 
-        rt.detach();
         rt.reattach(&post.to_chat_id);
         rt.touch();
 
@@ -1737,17 +1734,8 @@ pub async fn browser_frame_emission_task(
             None => break,
         };
 
-        let (
-            toolbar_actions,
-            timeline_entries,
-            actions_len,
-            console_len,
-            network_len,
-            mutation_len,
-        ) = {
+        let timeline_entries = {
             let mut rt = runtime_arc.lock().await;
-            rt.drain_raw_events();
-            let toolbar_actions = rt.drain_toolbar_actions();
             let (new_actions, new_console, new_network) = rt.flush_timeline_events();
             let agent_actions = rt.drain_agent_actions();
             let mut timeline_entries =
@@ -1762,20 +1750,8 @@ pub async fn browser_frame_emission_task(
                 });
             }
             timeline_entries.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
-            (
-                toolbar_actions,
-                timeline_entries,
-                rt.action_buffer.len(),
-                rt.console_buffer.len(),
-                rt.network_buffer.len(),
-                rt.mutation_summary.len(),
-            )
+            timeline_entries
         };
-
-        {
-            let rt = runtime_arc.lock().await;
-            ensure_injection_into_all_tabs(&rt);
-        }
 
         {
             let rt = runtime_arc.lock().await;
@@ -1801,30 +1777,13 @@ pub async fn browser_frame_emission_task(
             }
         }
 
-        let tab_for_counts = {
-            let rt = runtime_arc.lock().await;
-            rt.get_active_tab()
-        };
-        if let Some(tab) = tab_for_counts {
-            let js = format!(
-                "window.__refact_toolbar_setCounts && window.__refact_toolbar_setCounts({{actions:{},console:{},network:{},mutations:{}}});",
-                actions_len, console_len, network_len, mutation_len
-            );
-            let _ = tab.evaluate(&js, false);
-        }
-
-        if !toolbar_actions.is_empty() || !timeline_entries.is_empty() {
+        if !timeline_entries.is_empty() {
             let session_arc = {
                 let sessions_locked = sessions.read().await;
                 sessions_locked.get(&chat_id).cloned()
             };
             if let Some(session_arc) = session_arc {
                 let mut session = session_arc.lock().await;
-                for action in toolbar_actions {
-                    session.emit(ChatEvent::BrowserToolbarAction {
-                        action,
-                    });
-                }
                 if !timeline_entries.is_empty() {
                     session.emit(ChatEvent::BrowserTimeline {
                         events: timeline_entries,
@@ -1954,6 +1913,33 @@ mod tests {
     use axum::http::Request;
     use hyper::body::to_bytes;
     use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn browser_runtime_handoff_rejects_reserved_owners_before_lookup() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = AppState::from_gcx(gcx).await;
+        let router = crate::http::routers::make_refact_http_server(app);
+        for (from, to, status) in [
+            ("project-browser:fixture", "chat-a", StatusCode::BAD_REQUEST),
+            ("chat-a", "project-browser:fixture", StatusCode::BAD_REQUEST),
+            ("chat-a", "chat-b", StatusCode::NOT_FOUND),
+        ] {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::post("/v1/browser/handoff")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({ "from_chat_id": from, "to_chat_id": to })
+                                .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), status);
+        }
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn test_browser_action_route_rejects_invalid_json() {

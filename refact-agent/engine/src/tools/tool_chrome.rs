@@ -25,7 +25,7 @@ use crate::integrations::browser_runtime::{
     BrowserGpuMode, BrowserLaunchOptions, BrowserProxyOptions, BrowserRuntime,
     find_runtime_by_chat_id, launch_with_lock_recovery, runtime_owner_record, transport_death_note,
     register_browser_runtime, get_browser_profile_dir, relaunch_lock_for_chat,
-    remove_browser_runtime, setup_recording_for_runtime, setup_recording_for_tab,
+    remove_browser_runtime, setup_recording_for_runtime, setup_recording_for_tab, project_browser,
 };
 
 use chrono::DateTime;
@@ -652,27 +652,63 @@ impl Tool for ToolChrome {
             }
         }
 
-        let (gcx, chat_id, current_model) = {
+        let (gcx, chat_id, current_model, project_scope) = {
             let ccx_lock = ccx.lock().await;
+            let project_scope = if uses_owned_chrome(&self.settings_chrome) {
+                project_browser::project_scope_for_context(
+                    &ccx_lock.app,
+                    ccx_lock.execution_scope.as_ref(),
+                    &ccx_lock.chat_id,
+                    &ccx_lock.root_chat_id,
+                )
+                .await
+                .ok()
+            } else {
+                None
+            };
             (
                 ccx_lock.app.gcx.clone(),
                 ccx_lock.chat_id.clone(),
                 ccx_lock.current_model.clone(),
+                project_scope,
             )
         };
         let image_policy = image_policy_for_model(gcx.clone(), &current_model).await;
 
         let session_hashmap_key = get_session_hashmap_key("chrome", &chat_id);
-        let mut tool_log = match setup_chrome_session(
-            gcx.clone(),
-            &self.settings_chrome,
-            &session_hashmap_key,
-            &chat_id,
-        )
-        .await
-        {
+        let setup = match &project_scope {
+            Some(scope) => {
+                setup_project_chrome_session(
+                    gcx.clone(),
+                    &self.settings_chrome,
+                    &session_hashmap_key,
+                    scope,
+                )
+                .await
+            }
+            None => setup_chrome_session(
+                gcx.clone(),
+                &self.settings_chrome,
+                &session_hashmap_key,
+                &chat_id,
+            )
+            .await
+            .map_err(project_browser::EnsureError::Failed),
+        };
+        let mut tool_log = match setup {
             Ok(log) => log,
-            Err(e) => {
+            Err(project_browser::EnsureError::DecisionRequired {
+                candidate_count,
+            }) => {
+                return Ok((
+                    true,
+                    vec![project_decision_required_message(
+                        tool_call_id,
+                        candidate_count,
+                    )],
+                ));
+            }
+            Err(project_browser::EnsureError::Failed(e)) => {
                 crate::buddy::actor::report_error_persisted(
                     crate::app_state::AppState::from_gcx(gcx.clone()).await,
                     "browser_error",
@@ -709,9 +745,13 @@ impl Tool for ToolChrome {
         let mut typed_content: Option<Vec<MultimodalElement>> = None;
         let mut browser_extra = None;
         let mut tool_failed = false;
+        let mut open_project_browser_tab = false;
 
         if let Some(request) = preflight_request {
             let steps_requested = request.steps.len();
+            let project_default = project_scope.is_some()
+                && request.session
+                    == crate::integrations::browser_models::SessionPolicy::SharedDefault;
             let retrieval_only = request.steps.iter().all(|step| {
                 matches!(
                     step,
@@ -749,6 +789,7 @@ impl Tool for ToolChrome {
             {
                 Ok(report) => {
                     tool_failed = !report.ok;
+                    open_project_browser_tab = project_default && report.ok;
                     let mut content = execution_report_to_multimodal_with_request(
                         &report,
                         &image_policy,
@@ -844,6 +885,12 @@ impl Tool for ToolChrome {
         let mut extra = serde_json::Map::new();
         if let Some(browser_extra) = browser_extra {
             extra.insert("browser".to_string(), browser_extra);
+        }
+        if open_project_browser_tab {
+            extra.insert(
+                "browser_project".to_string(),
+                serde_json::json!({ "open_browser_tab": true }),
+            );
         }
         let msg = ContextEnum::ChatMessage(ChatMessage {
             role: "tool".to_string(),
@@ -1392,6 +1439,31 @@ mod tests {
     }
 
     #[test]
+    fn project_decision_message_signals_the_browser_tab_without_chat_ids_or_paths() {
+        let ContextEnum::ChatMessage(message) = project_decision_required_message("call-1", 2)
+        else {
+            panic!("expected a chat message");
+        };
+        assert_eq!(message.tool_call_id, "call-1");
+        assert_eq!(
+            message.extra["browser_project"],
+            serde_json::json!({"decision_required": true, "candidate_count": 2, "open_browser_tab": true})
+        );
+        let ChatContent::SimpleText(text) = &message.content else {
+            panic!("expected text content");
+        };
+        assert!(text.contains("no browser was started"), "{text}");
+        assert!(!text.contains('/'), "{text}");
+        assert!(uses_owned_chrome(&SettingsChrome::default()));
+        for remote in ["ws://127.0.0.1:9222/devtools", "container://chrome:9222"] {
+            assert!(!uses_owned_chrome(&SettingsChrome {
+                chrome_path: remote.into(),
+                ..Default::default()
+            }));
+        }
+    }
+
+    #[test]
     fn artifact_only_screenshot_payload_is_still_attached_and_keeps_its_path() {
         const TINY_PNG_BASE64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
         let data = serde_json::json!({
@@ -1563,12 +1635,95 @@ mod tests {
     }
 }
 
+fn uses_owned_chrome(settings: &SettingsChrome) -> bool {
+    !settings.chrome_path.starts_with("ws://") && !settings.chrome_path.starts_with("container://")
+}
+
+fn project_decision_required_message(tool_call_id: &str, candidate_count: usize) -> ContextEnum {
+    let mut extra = serde_json::Map::new();
+    extra.insert(
+        "browser_project".to_string(),
+        serde_json::json!({
+            "decision_required": true,
+            "candidate_count": candidate_count,
+            "open_browser_tab": true,
+        }),
+    );
+    ContextEnum::ChatMessage(ChatMessage {
+        role: "tool".to_string(),
+        content: ChatContent::SimpleText(
+            project_browser::EnsureError::DecisionRequired { candidate_count }.to_string()
+                + "; no browser was started and no action was run. Ask the user to choose in the Browser tab, then retry.",
+        ),
+        tool_calls: None,
+        tool_call_id: tool_call_id.to_string(),
+        extra,
+        ..Default::default()
+    })
+}
+
+/// The default browser of a chat is its project's shared runtime; the per-chat session only
+/// tracks which runtime generation this chat last drove.
+async fn setup_project_chrome_session(
+    gcx: Arc<GlobalContext>,
+    args: &SettingsChrome,
+    session_hashmap_key: &String,
+    scope: &project_browser::ProjectBrowserScope,
+) -> Result<Vec<String>, project_browser::EnsureError> {
+    let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
+    let launch_options = args.launch_options();
+    let idle_timeout = launch_options.idle_timeout_or_default();
+    let ensured = project_browser::ensure_project_runtime(
+        &app,
+        scope,
+        launch_options,
+        Instant::now() + project_browser::PROJECT_ENSURE_TIMEOUT,
+    )
+    .await?;
+    let mut setup_log = vec![if ensured.launched {
+        "Started the project browser (shared by this project's chats; cookies and storage persist)."
+            .to_string()
+    } else {
+        "Reusing the project browser (shared by this project's chats).".to_string()
+    }];
+    let existing = gcx
+        .integration_sessions
+        .lock()
+        .await
+        .get(session_hashmap_key)
+        .cloned();
+    if let Some(session) = existing {
+        let mut locked = session.lock().await;
+        if let Some(chrome) = locked.as_any_mut().downcast_mut::<ChromeSession>() {
+            if chrome.runtime_id == ensured.runtime_id {
+                chrome.touch();
+                return Ok(setup_log);
+            }
+        }
+    }
+    if ensured.launched {
+        setup_log.push("No opened tabs at this moment.".to_string());
+    }
+    let command_session: Box<dyn IntegrationSession> = Box::new(ChromeSession {
+        runtime_id: ensured.runtime_id,
+        tabs: HashMap::new(),
+        idle_timeout,
+        last_activity: Instant::now(),
+    });
+    gcx.integration_sessions.lock().await.insert(
+        session_hashmap_key.clone(),
+        Arc::new(AMutex::new(command_session)),
+    );
+    Ok(setup_log)
+}
+
 async fn setup_chrome_session(
     gcx: Arc<GlobalContext>,
     args: &SettingsChrome,
     session_hashmap_key: &String,
     chat_id: &str,
 ) -> Result<Vec<String>, String> {
+    crate::chat::trajectories::validate_trajectory_id(chat_id).map_err(|error| error.message)?;
     let mut setup_log = vec![];
     let launch_lock = relaunch_lock_for_chat(chat_id);
     let _launch_guard = launch_lock.lock().await;
@@ -1679,6 +1834,9 @@ async fn setup_chrome_session(
     } else {
         let cache_dir = gcx.cache_dir.clone();
         let profile_dir = get_browser_profile_dir(&cache_dir, chat_id);
+        crate::integrations::browser_runtime::validate_legacy_profile_args(
+            &launch_options.extra_args,
+        )?;
         let mode = launch_options.mode_label();
         let runtime = launch_with_lock_recovery(profile_dir, launch_options, dead_pid)
             .await

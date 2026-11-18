@@ -1,5 +1,5 @@
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Condvar, Mutex};
+use std::sync::{Condvar, Mutex, RwLock, RwLockReadGuard};
 use std::time::{Duration, Instant};
 
 use base64::Engine;
@@ -96,6 +96,7 @@ struct WebSocketState {
     events: VecDeque<WebSocketEvent>,
     report_cursor: u64,
     routes: Vec<RegisteredWebSocketRoute>,
+    armed_tabs: std::collections::HashSet<String>,
     routed_sockets: HashMap<String, RoutedSocket>,
     commands: Vec<(String, Value)>,
 }
@@ -104,6 +105,7 @@ struct WebSocketState {
 pub struct WebSocketRegistry {
     state: Mutex<WebSocketState>,
     changed: Condvar,
+    router_epoch: RwLock<u64>,
 }
 
 impl WebSocketRegistry {
@@ -141,6 +143,30 @@ impl WebSocketRegistry {
 
     pub fn route_count(&self) -> usize {
         self.state.lock().unwrap().routes.len()
+    }
+
+    pub(crate) fn prepare_reconnect(&self) {
+        let mut epoch = self.router_epoch.write().unwrap();
+        *epoch += 1;
+        self.state.lock().unwrap().armed_tabs.clear();
+    }
+
+    fn lock_router_epoch(&self, epoch: u64) -> Option<RwLockReadGuard<'_, u64>> {
+        let current_epoch = self.router_epoch.read().unwrap();
+        (*current_epoch == epoch).then_some(current_epoch)
+    }
+
+    /// Records that a tab's page-world mock is armed. Returns `false` if it already was.
+    pub fn mark_armed(&self, tab_target_id: &str) -> bool {
+        self.state
+            .lock()
+            .unwrap()
+            .armed_tabs
+            .insert(tab_target_id.to_string())
+    }
+
+    pub fn unmark_armed(&self, tab_target_id: &str) {
+        self.state.lock().unwrap().armed_tabs.remove(tab_target_id);
     }
 
     pub fn top_level_navigation(&self, tab_target_id: &str) -> usize {
@@ -684,13 +710,20 @@ fn classify_flush_result(result: &Result<(), String>, failure_reported: bool) ->
     }
 }
 
-fn spawn_command_flusher(tab: &std::sync::Arc<Tab>, registry: std::sync::Arc<WebSocketRegistry>) {
+fn spawn_command_flusher(
+    tab: &std::sync::Arc<Tab>,
+    registry: std::sync::Arc<WebSocketRegistry>,
+    epoch: u64,
+) {
     let target_id = tab.get_target_id().to_string();
     let flusher_tab = std::sync::Arc::downgrade(tab);
     std::thread::spawn(move || {
         let mut failure_reported = false;
         loop {
             let pending = registry.wait_for_pending_commands(&target_id, FLUSH_POLL_INTERVAL);
+            let Some(epoch_guard) = registry.lock_router_epoch(epoch) else {
+                return;
+            };
             let Some(tab) = flusher_tab.upgrade() else {
                 return;
             };
@@ -712,6 +745,7 @@ fn spawn_command_flusher(tab: &std::sync::Arc<Tab>, registry: std::sync::Arc<Web
                 FlushDecision::Retry {
                     report,
                 } => {
+                    drop(epoch_guard);
                     if report {
                         tracing::warn!(
                             "WebSocket command dispatch failed: {}",
@@ -730,22 +764,34 @@ fn spawn_command_flusher(tab: &std::sync::Arc<Tab>, registry: std::sync::Arc<Web
     });
 }
 
+/// Arms one tab with the page-world WebSocket mock. Only called when a route exists;
+/// default browsing never installs it. Idempotent per tab target on the current transport.
 pub fn install_websocket_router(
     tab: &std::sync::Arc<Tab>,
     registry: std::sync::Arc<WebSocketRegistry>,
 ) -> Result<(), String> {
     let target_id = tab.get_target_id().to_string();
-    spawn_command_flusher(tab, registry.clone());
+    if !registry.mark_armed(&target_id) {
+        return Ok(());
+    }
+    let epoch = *registry.router_epoch.read().unwrap();
+    let binding_registry = registry.clone();
+    let binding_target = target_id.clone();
     tab.expose_function(
         WEBSOCKET_BINDING,
         std::sync::Arc::new(move |payload: Value| {
-            let Some(event) = websocket_event_from_binding_payload(&payload) else {
+            let Some(_epoch_guard) = binding_registry.lock_router_epoch(epoch) else {
                 return;
             };
-            registry.handle_page_event(&target_id, &event);
+            if let Some(event) = websocket_event_from_binding_payload(&payload) {
+                binding_registry.handle_page_event(&binding_target, &event);
+            }
         }),
     )
-    .map_err(|error| format!("Failed to expose WebSocket route binding: {error}"))?;
+    .map_err(|error| {
+        registry.unmark_armed(&target_id);
+        format!("Failed to expose WebSocket route binding: {error}")
+    })?;
     let script = websocket_mock_script();
     tab.call_method(Page::AddScriptToEvaluateOnNewDocument {
         source: script.clone(),
@@ -753,10 +799,16 @@ pub fn install_websocket_router(
         include_command_line_api: None,
         run_immediately: Some(true),
     })
-    .map_err(|error| format!("Failed to install WebSocket route script: {error}"))?;
-    tab.evaluate(&script, false)
-        .map(|_| ())
-        .map_err(|error| format!("Failed to activate WebSocket route script: {error}"))
+    .map_err(|error| {
+        registry.unmark_armed(&target_id);
+        format!("Failed to install WebSocket route script: {error}")
+    })?;
+    tab.evaluate(&script, false).map(|_| ()).map_err(|error| {
+        registry.unmark_armed(&target_id);
+        format!("Failed to activate WebSocket route script: {error}")
+    })?;
+    spawn_command_flusher(tab, registry, epoch);
+    Ok(())
 }
 
 fn websocket_mock_script() -> String {
@@ -942,6 +994,45 @@ mod tests {
             &json!({"type": "created", "id": "route-1", "url": url, "protocols": protocols}),
         );
         registry.take_commands();
+    }
+
+    #[test]
+    fn reconnect_rearms_existing_targets_and_retires_old_router_workers() {
+        let pattern = UrlPattern::Text("ws://fixture.invalid/echo".to_string());
+        let registry = routed_registry(
+            &pattern,
+            WebSocketRouteMode::Intercept,
+            WebSocketMessageAction::Forward,
+            WebSocketMessageAction::Forward,
+        );
+        let old_epoch = *registry.router_epoch.read().unwrap();
+        assert!(registry.mark_armed("tab-1"));
+        assert!(!registry.mark_armed("tab-1"));
+        assert!(registry.lock_router_epoch(old_epoch).is_some());
+        created(&registry, "ws://fixture.invalid/echo", json!([]));
+        assert_eq!(
+            registry
+                .send_to_page(&pattern, "queued before reconnect")
+                .unwrap(),
+            1
+        );
+
+        registry.prepare_reconnect();
+
+        assert!(registry.lock_router_epoch(old_epoch).is_none());
+        let new_epoch = *registry.router_epoch.read().unwrap();
+        assert!(registry.lock_router_epoch(new_epoch).is_some());
+        assert!(registry.mark_armed("tab-1"));
+        assert!(!registry.mark_armed("tab-1"));
+        assert_eq!(registry.route_count(), 1);
+        assert_eq!(
+            registry.send_to_page(&pattern, "after reconnect").unwrap(),
+            1
+        );
+        let commands = registry.take_commands_for("tab-1");
+        assert_eq!(commands.len(), 2);
+        assert_eq!(commands[0]["data"], json!("queued before reconnect"));
+        assert_eq!(commands[1]["data"], json!("after reconnect"));
     }
 
     #[test]

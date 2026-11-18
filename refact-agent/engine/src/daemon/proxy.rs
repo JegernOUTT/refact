@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use axum::body::Body;
 use axum::extract::{Path as AxumPath, State};
-use axum::http::header::{CONNECTION, CONTENT_TYPE, COOKIE, HeaderName, HeaderValue};
+use axum::http::header::{self, CONNECTION, CONTENT_TYPE, COOKIE, HeaderName, HeaderValue};
 use axum::http::{HeaderMap, Request, Response, StatusCode, Uri};
 use futures::StreamExt;
 use hyper::body::HttpBody;
@@ -14,6 +14,7 @@ use serde_json::json;
 use crate::daemon::projects::ProjectEntry;
 use crate::daemon::state::DaemonState;
 use crate::daemon::supervisor::{WorkerInfo, WorkerState};
+use crate::http::routers::v1::v1_browser_project::{self, PROJECT_HEADER};
 
 pub const PROXY_BODY_LIMIT: usize = 15 * 1024 * 1024;
 #[cfg(not(test))]
@@ -24,7 +25,6 @@ const PROXY_WORKER_READY_TIMEOUT: Duration = Duration::from_secs(120);
 const PROXY_STREAM_HEADER_TIMEOUT: Duration = Duration::from_secs(30);
 #[cfg(test)]
 const PROXY_STREAM_HEADER_TIMEOUT: Duration = Duration::from_secs(5);
-const PROJECT_HEADER: &str = "x-refact-project-id";
 const HOP_BY_HOP_HEADERS: &[&str] = &[
     "connection",
     "keep-alive",
@@ -47,7 +47,79 @@ pub async fn proxy_v1(
     request: Request<Body>,
 ) -> Response<Body> {
     let worker_path = worker_v1_path(&path.project_id, request.uri());
-    proxy_to_worker(state, path.project_id, worker_path, request).await
+    // Classify the same normalized path that the HTTP client will send, before project lookup,
+    // worker startup, or reading the request body.
+    let Ok(target) = reqwest::Url::parse(&target_url(1, &worker_path, request.uri().query()))
+    else {
+        return json_response(
+            StatusCode::BAD_REQUEST,
+            json!({"error":"invalid worker request URL"}),
+        );
+    };
+    let browser_token = if v1_browser_project::is_worker_path(target.path()) {
+        match authorize_project_browser(&state, &path.project_id, &request) {
+            Ok(token) => Some(token),
+            Err(status) => {
+                let mut response = json_response(
+                    status,
+                    json!({
+                        "error":"Project Browser requires an authenticated Refact daemon project session"
+                    }),
+                );
+                response
+                    .headers_mut()
+                    .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+                return response;
+            }
+        }
+    } else {
+        None
+    };
+    proxy_to_worker(state, path.project_id, worker_path, request, browser_token).await
+}
+
+fn authorize_project_browser(
+    state: &DaemonState,
+    project_id: &str,
+    request: &Request<Body>,
+) -> Result<String, StatusCode> {
+    use crate::daemon::auth::{self, DaemonAuthPolicy};
+
+    if !state.config.auth.enabled
+        || auth::requested_project_id(request.uri().path()) != Some(project_id)
+    {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    let policy = DaemonAuthPolicy {
+        token: state.auth_token.clone(),
+        username: state.config.auth.username.clone(),
+        password: state.config.auth.password.clone(),
+        ..DaemonAuthPolicy::default()
+    };
+    if !v1_browser_project::gui_origin_allowed(request.headers()) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let origin = request.headers()[header::ORIGIN]
+        .to_str()
+        .map_err(|_| StatusCode::FORBIDDEN)?;
+    let authorized = if auth::origin_is_trusted_ide_webview(origin) {
+        // IDE fetches explicitly carry a daemon bearer; never accept ambient HTTP auth here.
+        state
+            .auth_token
+            .as_deref()
+            .filter(|token| !token.trim().is_empty())
+            .zip(auth::bearer_token_from_headers(request.headers()))
+            .is_some_and(|(expected, provided)| auth::token_matches(provided, expected))
+    } else {
+        auth::remote_authorized(request, &policy)
+    };
+    if !authorized {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    state
+        .supervisor
+        .project_browser_worker_token(project_id)
+        .ok_or(StatusCode::UNAUTHORIZED)
 }
 
 async fn proxy_to_worker(
@@ -55,6 +127,7 @@ async fn proxy_to_worker(
     project_id: String,
     worker_path: String,
     request: Request<Body>,
+    browser_token: Option<String>,
 ) -> Response<Body> {
     if is_upgrade_request(&request) {
         return json_response(
@@ -113,6 +186,7 @@ async fn proxy_to_worker(
         &parts,
         body,
         crate::daemon::hooks::worker_forward_token(&state),
+        browser_token.as_deref(),
     ) {
         Ok(request) => request,
         Err(response) => return response,
@@ -149,6 +223,7 @@ fn worker_request(
     parts: &axum::http::request::Parts,
     body: hyper::body::Bytes,
     token: Option<&str>,
+    browser_token: Option<&str>,
 ) -> Result<reqwest::RequestBuilder, Response<Body>> {
     let method =
         reqwest::Method::from_bytes(parts.method.as_str().as_bytes()).map_err(|error| {
@@ -164,12 +239,28 @@ fn worker_request(
                 json!({"error": "invalid worker request URL"}),
             )
         })?;
-    let protected = requires_worker_authorization(&method, url.path());
+    let browser = v1_browser_project::is_worker_path(url.path());
+    let token = if browser {
+        Some(browser_token.ok_or_else(|| {
+            json_response(
+                StatusCode::UNAUTHORIZED,
+                json!({"error":"Project Browser proxy authorization required"}),
+            )
+        })?)
+    } else {
+        token.filter(|_| requires_worker_authorization(&method, url.path()))
+    };
+    let mut headers = request_headers(&parts.headers, project_id);
+    if browser {
+        headers.remove(reqwest::header::ORIGIN);
+        headers.remove(reqwest::header::HOST);
+        headers.remove(reqwest::header::COOKIE);
+    }
     let request = client
         .request(method, url)
-        .headers(request_headers(&parts.headers, project_id))
+        .headers(headers)
         .body(body.to_vec());
-    Ok(match token.filter(|_| protected) {
+    Ok(match token {
         Some(token) => request.bearer_auth(token),
         None => request,
     })
@@ -815,6 +906,7 @@ mod tests {
                     &parts,
                     hyper::body::Bytes::new(),
                     token,
+                    None,
                 )
                 .unwrap()
                 .build()
@@ -846,6 +938,214 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn browser_test_state(dir: &std::path::Path, enabled: bool) -> Arc<DaemonState> {
+        let mut config = DaemonConfig::default();
+        config.auth.enabled = enabled;
+        config.auth.username = Some("operator".into());
+        config.auth.password = Some("fixture-password".into());
+        DaemonState::new_with_daemon_dir(
+            config,
+            EventBus::new(dir.join("events.jsonl")),
+            Some("daemon-fixture".into()),
+            dir.to_path_buf(),
+            8488,
+        )
+    }
+
+    fn browser_request(
+        origin: Option<&str>,
+        cookie: Option<&str>,
+        bearer: Option<&str>,
+    ) -> Request<Body> {
+        let mut req = Request::builder()
+            .method(Method::POST)
+            .uri("/p/proj/v1/browser/project/frame")
+            .header(header::HOST, "127.0.0.1:8488")
+            .header(header::CONTENT_TYPE, "application/json");
+        if let Some(origin) = origin {
+            req = req.header(header::ORIGIN, origin);
+        }
+        if let Some(cookie) = cookie {
+            req = req.header(header::COOKIE, cookie);
+        }
+        if let Some(bearer) = bearer {
+            req = req.header(header::AUTHORIZATION, format!("Bearer {bearer}"));
+        }
+        let mut req = req.body(Body::empty()).unwrap();
+        req.extensions_mut().insert(axum::extract::ConnectInfo(
+            "127.0.0.1:1234".parse::<std::net::SocketAddr>().unwrap(),
+        ));
+        req
+    }
+
+    #[tokio::test]
+    async fn project_browser_proxy_requires_explicit_operator_authority_and_gui_origin() {
+        let tmp = tempdir().unwrap();
+        let state = browser_test_state(tmp.path(), true);
+        let local = Some("http://127.0.0.1:8488");
+        let ide = Some("vscode-webview://refact-view");
+        let valid = Some("refact_daemon_auth=project:proj:daemon-fixture");
+        for (origin, cookie, bearer, status) in [
+            (local, None, None, StatusCode::UNAUTHORIZED),
+            (
+                local,
+                Some("refact_daemon_auth=daemon-fixture"),
+                None,
+                StatusCode::UNAUTHORIZED,
+            ),
+            (
+                local,
+                Some("refact_daemon_auth=project:other:daemon-fixture"),
+                None,
+                StatusCode::UNAUTHORIZED,
+            ),
+            (local, None, Some("hook-fixture"), StatusCode::UNAUTHORIZED),
+            (None, valid, None, StatusCode::FORBIDDEN),
+            (Some("null"), valid, None, StatusCode::FORBIDDEN),
+            (
+                Some("https://example.test"),
+                valid,
+                None,
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                Some("http://127.0.0.1:7777"),
+                valid,
+                None,
+                StatusCode::FORBIDDEN,
+            ),
+            (ide, valid, None, StatusCode::UNAUTHORIZED),
+        ] {
+            assert_eq!(
+                authorize_project_browser(&state, "proj", &browser_request(origin, cookie, bearer)),
+                Err(status),
+                "{origin:?} {cookie:?} {bearer:?}"
+            );
+        }
+        for req in [
+            browser_request(local, valid, None),
+            browser_request(ide, None, Some("daemon-fixture")),
+        ] {
+            assert_eq!(
+                authorize_project_browser(&state, "proj", &req).ok(),
+                state.supervisor.project_browser_worker_token("proj")
+            );
+            assert!(authorize_project_browser(&state, "other", &req).is_err());
+        }
+        let mut duplicate = browser_request(local, valid, Some("daemon-fixture"));
+        duplicate.headers_mut().append(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer daemon-fixture"),
+        );
+        assert_eq!(
+            authorize_project_browser(&state, "proj", &duplicate),
+            Err(StatusCode::UNAUTHORIZED)
+        );
+        let mut basic = browser_request(local, None, None);
+        use base64::Engine;
+        let basic_value = base64::prelude::BASE64_STANDARD.encode("operator:fixture-password");
+        basic.headers_mut().insert(
+            header::AUTHORIZATION,
+            format!("Basic {basic_value}").parse().unwrap(),
+        );
+        assert!(authorize_project_browser(&state, "proj", &basic).is_ok());
+        basic.headers_mut().insert(
+            header::ORIGIN,
+            HeaderValue::from_static("vscode-webview://refact-view"),
+        );
+        assert_eq!(
+            authorize_project_browser(&state, "proj", &basic),
+            Err(StatusCode::UNAUTHORIZED)
+        );
+        let auth_disabled = browser_test_state(&tmp.path().join("disabled"), false);
+        assert_eq!(
+            authorize_project_browser(
+                &auth_disabled,
+                "proj",
+                &browser_request(local, valid, Some("daemon-fixture"))
+            ),
+            Err(StatusCode::UNAUTHORIZED)
+        );
+    }
+
+    #[tokio::test]
+    async fn project_browser_proxy_denies_before_worker_lookup_and_body_read() {
+        let tmp = tempdir().unwrap();
+        let state = browser_test_state(tmp.path(), true);
+        let mut req = browser_request(Some("http://127.0.0.1:8488"), None, None);
+        // A normalized worker path is protected even if its spelling changes in transit.
+        *req.uri_mut() = "/p/proj/v1/alternate/%2e%2e/browser/project/input"
+            .parse()
+            .unwrap();
+        *req.body_mut() = Body::wrap_stream(futures::stream::poll_fn(
+            |_| -> std::task::Poll<Option<Result<hyper::body::Bytes, io::Error>>> {
+                panic!("unauthenticated request body read")
+            },
+        ));
+        let response = proxy_v1(
+            State((state, 8488)),
+            AxumPath(ProxyV1Path {
+                project_id: "proj".into(),
+            }),
+            req,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+    }
+
+    #[test]
+    fn project_browser_worker_request_replaces_browser_credentials_with_scoped_proof() {
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let req = browser_request(
+            Some("http://127.0.0.1:8488"),
+            Some("refact_daemon_auth=project:proj:daemon-fixture"),
+            Some("daemon-fixture"),
+        );
+        let (mut parts, _) = req.into_parts();
+        parts.headers.insert(
+            PROJECT_HEADER,
+            HeaderValue::from_static("untrusted-client-project"),
+        );
+        let build = |path, proof| {
+            worker_request(
+                &client,
+                "proj",
+                1234,
+                path,
+                &parts,
+                hyper::body::Bytes::new(),
+                Some("daemon-fixture"),
+                proof,
+            )
+        };
+        assert_eq!(
+            build("/v1/browser/project/frame", None)
+                .unwrap_err()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        let outgoing = build("/v1/browser/project/frame", Some("scoped-proof"))
+            .unwrap()
+            .build()
+            .unwrap();
+        assert_eq!(
+            outgoing.headers()[reqwest::header::AUTHORIZATION],
+            "Bearer scoped-proof"
+        );
+        assert_eq!(outgoing.headers()[PROJECT_HEADER], "proj");
+        for name in ["cookie", "origin", "host"] {
+            assert!(!outgoing.headers().contains_key(name));
+        }
+        let unrelated = build("/v1/browser/status", Some("scoped-proof"))
+            .unwrap()
+            .build()
+            .unwrap();
+        assert!(!unrelated
+            .headers()
+            .contains_key(reqwest::header::AUTHORIZATION));
     }
 
     #[test]

@@ -32,7 +32,10 @@ type TabSurfaceKind =
   | "gitdiff"
   | MainSurfaceKind;
 
-const MAIN_SURFACE_INFO = { git: { title: "Git" } } as const;
+const MAIN_SURFACE_INFO = {
+  git: { title: "Git" },
+  browser: { title: "Browser" },
+} as const;
 
 const pathBasename = (path: string): string => {
   const normalized = path.replace(/\\/g, "/");

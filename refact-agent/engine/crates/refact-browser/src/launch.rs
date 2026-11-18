@@ -92,6 +92,8 @@ pub struct BrowserProxyOptions {
 #[serde(default)]
 pub struct BrowserLaunchOptions {
     pub headless: bool,
+    #[serde(skip)]
+    pub restore_last_session: bool,
     pub window_bounds: Option<WindowBounds>,
     pub chrome_path: Option<PathBuf>,
     pub idle_timeout: Option<Duration>,
@@ -109,6 +111,7 @@ impl Default for BrowserLaunchOptions {
     fn default() -> Self {
         Self {
             headless: false,
+            restore_last_session: false,
             window_bounds: None,
             chrome_path: None,
             idle_timeout: None,
@@ -147,7 +150,18 @@ impl BrowserLaunchOptions {
     }
 
     pub fn chrome_args(&self) -> Vec<OsString> {
-        let mut args: Vec<OsString> = MANDATORY_CHROME_ARGS.iter().map(OsString::from).collect();
+        let mut args: Vec<OsString> = MANDATORY_CHROME_ARGS
+            .iter()
+            .copied()
+            .filter(|arg| {
+                !self.restore_last_session
+                    || !matches!(*arg, "--no-restore-last-session" | "--no-startup-window")
+            })
+            .map(OsString::from)
+            .collect();
+        if self.restore_last_session {
+            args.push(OsString::from("--restore-last-session"));
+        }
         if let Some(bounds) = &self.window_bounds {
             args.push(OsString::from(format!(
                 "--window-position={},{}",

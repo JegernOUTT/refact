@@ -11,6 +11,9 @@ pub use refact_browser::*;
 #[path = "named_sessions.rs"]
 pub mod named_sessions;
 
+#[path = "project_browser.rs"]
+pub mod project_browser;
+
 use crate::http::routers::v1::browser_settings;
 
 /// Bound cancellable waits only: never use this around a launch worker or publication.
@@ -43,6 +46,25 @@ fn command_before<T>(deadline: Instant, execute: impl FnOnce() -> T) -> T {
 
 pub fn get_browser_profile_dir(gcx_cache_dir: &PathBuf, thread_id: &str) -> PathBuf {
     gcx_cache_dir.join("browser_profiles").join(thread_id)
+}
+
+pub(crate) fn validate_legacy_profile_args(args: &[String]) -> Result<(), String> {
+    if args.iter().any(|arg| {
+        let arg = arg.trim().split('=').next().unwrap_or_default();
+        let Some(switch) = arg
+            .strip_prefix("--")
+            .or_else(|| arg.strip_prefix('-'))
+            .or_else(|| arg.strip_prefix('/'))
+        else {
+            return false;
+        };
+        ["user-data-dir", "profile-directory"]
+            .iter()
+            .any(|reserved| switch.eq_ignore_ascii_case(reserved))
+    }) {
+        return Err("Browser launch arguments cannot override the legacy chat profile".into());
+    }
+    Ok(())
 }
 
 fn workspace_roots(app: &crate::app_state::AppState) -> Vec<PathBuf> {
@@ -122,8 +144,8 @@ pub async fn registered_runtime_owners(
         .collect()
 }
 
-/// Registers a runtime and keeps exactly one generation per owning chat: any other runtime
-/// still registered for the same chat is shut down first, so lookups can never pick a stale
+/// Registers a runtime and keeps exactly one generation per owner: any other runtime
+/// still registered for the same owner is shut down first, so lookups can never pick a stale
 /// generation while the chrome tool drives a fresh one.
 pub async fn register_browser_runtime(
     app: crate::app_state::AppState,
@@ -485,9 +507,16 @@ async fn take_browser_runtime_before_deadline(
     let Some(removed) = removed else {
         return Ok(None);
     };
+    let mut delete_profile = delete_profile;
     let (pid, profile_dir) = match unindex_runtime_owner(runtime_id) {
         Some(ownership) => {
             ownership.invalidate();
+            if ownership
+                .attached_chat_id()
+                .is_some_and(|owner| project_browser::is_project_owner_id(&owner))
+            {
+                delete_profile = false;
+            }
             (
                 ownership.process_id(),
                 ownership.profile_dir().to_path_buf(),
@@ -501,6 +530,12 @@ async fn take_browser_runtime_before_deadline(
         {
             Ok(rt) => {
                 rt.ownership.invalidate();
+                if rt
+                    .attached_chat_id()
+                    .is_some_and(|owner| project_browser::is_project_owner_id(&owner))
+                {
+                    delete_profile = false;
+                }
                 (rt.browser.get_process_id(), rt.profile_dir.clone())
             }
             Err(_) => {
@@ -913,7 +948,10 @@ impl ChatRuntimeLookup {
         .into_iter()
         .flatten()
         {
-            if !extra.is_empty() && !ids.iter().any(|id| id == extra) {
+            if !extra.is_empty()
+                && !project_browser::is_project_owner_id(extra)
+                && !ids.iter().any(|id| id == extra)
+            {
                 ids.push(extra.to_string());
             }
         }
@@ -934,6 +972,48 @@ pub struct RuntimeSelection {
     pub adopted: bool,
 }
 
+impl From<&Arc<RuntimeOwnership>> for RuntimeOwner {
+    fn from(record: &Arc<RuntimeOwnership>) -> Self {
+        let state = record.snapshot();
+        Self {
+            runtime_id: record.runtime_id().to_string(),
+            attached_chat_id: state.attached_chat_id,
+            connected: state.connected,
+        }
+    }
+}
+
+fn select_exact_runtime<'a>(
+    owners: &'a [RuntimeOwner],
+    owner_id: &str,
+) -> Option<&'a RuntimeOwner> {
+    owners
+        .iter()
+        .filter(|owner| owner.attached_chat_id.as_deref() == Some(owner_id))
+        .min_by_key(|owner| !owner.connected)
+}
+
+async fn find_runtime_by_exact_owner(
+    app: &crate::app_state::AppState,
+    owner_id: &str,
+) -> Option<(String, Arc<AMutex<BrowserRuntime>>)> {
+    let records = registered_runtime_owners(app).await;
+    let owners = records.iter().map(RuntimeOwner::from).collect::<Vec<_>>();
+    let selected = select_exact_runtime(&owners, owner_id)?;
+    let arc = app
+        .integrations
+        .browser_runtimes
+        .lock()
+        .await
+        .get(&selected.runtime_id)
+        .cloned()?;
+    let current = runtime_owner_record(&selected.runtime_id)?;
+    if !current.is_current_generation() || current.attached_chat_id().as_deref() != Some(owner_id) {
+        return None;
+    }
+    Some((selected.runtime_id.clone(), arc))
+}
+
 /// Picks the runtime for a chat from ownership facts alone. Exact ids (the chat, then its
 /// root chat, then its background agent) win, a connected generation beats a dead one, and
 /// only a runtime nobody owns can be adopted; a lexical prefix is never ancestry.
@@ -941,16 +1021,11 @@ pub fn select_runtime_for_chat(
     owners: &[RuntimeOwner],
     lookup: &ChatRuntimeLookup,
 ) -> Option<RuntimeSelection> {
+    if project_browser::is_project_owner_id(&lookup.chat_id) {
+        return None;
+    }
     for id in lookup.ordered_ids() {
-        let candidates = owners
-            .iter()
-            .filter(|owner| owner.attached_chat_id.as_deref() == Some(id.as_str()))
-            .collect::<Vec<_>>();
-        if let Some(owner) = candidates
-            .iter()
-            .find(|owner| owner.connected)
-            .or_else(|| candidates.first())
-        {
+        if let Some(owner) = select_exact_runtime(owners, &id) {
             return Some(RuntimeSelection {
                 runtime_id: owner.runtime_id.clone(),
                 adopted: id != lookup.chat_id,
@@ -974,26 +1049,23 @@ pub async fn find_runtime_for_chat(
     app: crate::app_state::AppState,
     lookup: &ChatRuntimeLookup,
 ) -> Option<(String, Arc<AMutex<BrowserRuntime>>)> {
+    if project_browser::is_project_owner_id(&lookup.chat_id) {
+        return None;
+    }
     let records = registered_runtime_owners(&app).await;
-    let owners = records
-        .iter()
-        .map(|record| {
-            let state = record.snapshot();
-            RuntimeOwner {
-                runtime_id: record.runtime_id().to_string(),
-                attached_chat_id: state.attached_chat_id,
-                connected: state.connected,
-            }
-        })
-        .collect::<Vec<_>>();
+    let owners = records.iter().map(RuntimeOwner::from).collect::<Vec<_>>();
     let selection = select_runtime_for_chat(&owners, lookup)?;
     let record = records
         .iter()
         .find(|record| record.runtime_id() == selection.runtime_id)?;
+    let selected_owner = owners
+        .iter()
+        .find(|owner| owner.runtime_id == selection.runtime_id)?;
     if selection.adopted
-        && record
-            .attached_chat_id()
-            .is_none_or(|owner| owner.is_empty())
+        && selected_owner
+            .attached_chat_id
+            .as_deref()
+            .is_none_or(str::is_empty)
     {
         if !record.claim_if_unowned(&lookup.chat_id) {
             return None;
@@ -1010,6 +1082,13 @@ pub async fn find_runtime_for_chat(
         .await
         .get(&selection.runtime_id)
         .cloned()?;
+    if !record.is_current_generation()
+        || !record
+            .attached_chat_id()
+            .is_some_and(|owner| lookup.ordered_ids().contains(&owner))
+    {
+        return None;
+    }
     Some((selection.runtime_id, arc))
 }
 
@@ -1095,6 +1174,9 @@ pub async fn ensure_frame_emitter(
     chat_id: &str,
     runtime_id: &str,
 ) {
+    if project_browser::is_project_owner_id(chat_id) {
+        return;
+    }
     let runtime_arc = {
         let browser_runtimes = app.integrations.browser_runtimes.clone();
         let browser_runtimes = browser_runtimes.lock().await;
@@ -1105,7 +1187,7 @@ pub async fn ensure_frame_emitter(
     };
     let should_spawn = {
         let mut rt = runtime_arc.lock().await;
-        if rt.frame_emitter_active {
+        if rt.frame_emitter_active || rt.attached_chat_id().as_deref() != Some(chat_id) {
             false
         } else {
             rt.frame_emitter_active = true;
@@ -1128,6 +1210,9 @@ pub async fn reconnect_runtime_for_chat(
     app: crate::app_state::AppState,
     chat_id: &str,
 ) -> Result<ReconnectOutcome, String> {
+    if project_browser::is_project_owner_id(chat_id) {
+        return Err("Reserved project browser owner is not a chat".into());
+    }
     reconnect_runtime_for_chat_before_deadline(
         app,
         chat_id,
@@ -1143,10 +1228,30 @@ pub async fn reconnect_runtime_for_chat_before_deadline(
 ) -> Result<ReconnectOutcome, String> {
     let lock = relaunch_lock_for_chat(chat_id);
     let _guard = before_deadline(deadline, lock.lock()).await?;
-    let (id, runtime) = before_deadline(deadline, find_runtime_by_chat_id(app, chat_id))
+    let (id, runtime) = before_deadline(deadline, find_runtime_for_recovery(&app, chat_id))
         .await?
         .ok_or("No browser runtime to reconnect")?;
-    let owner = runtime_owner_record(&id).ok_or("No browser ownership record")?;
+    reconnect_owned_runtime_before_deadline(&id, &runtime, chat_id, deadline).await
+}
+
+async fn find_runtime_for_recovery(
+    app: &crate::app_state::AppState,
+    owner_id: &str,
+) -> Option<(String, Arc<AMutex<BrowserRuntime>>)> {
+    if project_browser::is_project_owner_id(owner_id) {
+        find_runtime_by_exact_owner(app, owner_id).await
+    } else {
+        find_runtime_by_chat_id(app.clone(), owner_id).await
+    }
+}
+
+async fn reconnect_owned_runtime_before_deadline(
+    id: &str,
+    runtime: &AMutex<BrowserRuntime>,
+    expected_owner: &str,
+    deadline: Instant,
+) -> Result<ReconnectOutcome, String> {
+    let owner = runtime_owner_record(id).ok_or("No browser ownership record")?;
     if !owner.is_current_generation()
         || !owner.owns_browser_process()
         || !owner.process_id().is_some_and(pid_is_alive)
@@ -1159,6 +1264,9 @@ pub async fn reconnect_runtime_for_chat_before_deadline(
     )
     .await
     .map_err(|_| "Reconnect refused: runtime busy; live browser retained")?;
+    if runtime.attached_chat_id().as_deref() != Some(expected_owner) {
+        return Err("Reconnect refused: browser ownership changed".into());
+    }
     command_before(deadline, || runtime.reconnect_same_process())
 }
 
@@ -1169,6 +1277,9 @@ pub async fn relaunch_runtime_for_chat(
     launch_options: BrowserLaunchOptions,
     window_bounds: Option<refact_chat_api::WindowBounds>,
 ) -> Result<String, String> {
+    if project_browser::is_project_owner_id(chat_id) {
+        return Err("Reserved project browser owner is not a chat".into());
+    }
     relaunch_runtime_for_chat_before_deadline(
         app,
         chat_id,
@@ -1188,19 +1299,37 @@ pub async fn relaunch_runtime_for_chat_before_deadline(
     window_bounds: Option<refact_chat_api::WindowBounds>,
     deadline: Instant,
 ) -> Result<String, String> {
+    let relaunch_lock = relaunch_lock_for_chat(chat_id);
+    let _relaunch_guard = before_deadline(deadline, relaunch_lock.lock()).await?;
+    relaunch_owned_runtime_before_deadline(
+        app,
+        chat_id,
+        profile_dir,
+        launch_options,
+        window_bounds,
+        deadline,
+    )
+    .await
+}
+
+async fn relaunch_owned_runtime_before_deadline(
+    app: crate::app_state::AppState,
+    chat_id: &str,
+    profile_dir: PathBuf,
+    launch_options: BrowserLaunchOptions,
+    window_bounds: Option<refact_chat_api::WindowBounds>,
+    deadline: Instant,
+) -> Result<String, String> {
     check_deadline(deadline)?;
     let options = BrowserLaunchOptions {
         window_bounds: window_bounds.or(launch_options.window_bounds.clone()),
         ..launch_options
     };
 
-    let relaunch_lock = relaunch_lock_for_chat(chat_id);
-    let _relaunch_guard = before_deadline(deadline, relaunch_lock.lock()).await?;
-
     let mut previous_pid = None;
     let previous_emitter_active = match before_deadline(
         deadline,
-        find_runtime_by_chat_id(app.clone(), chat_id),
+        find_runtime_for_recovery(&app, chat_id),
     )
     .await?
     {
@@ -1218,6 +1347,9 @@ pub async fn relaunch_runtime_for_chat_before_deadline(
             .await
             {
                 Ok(mut rt) => {
+                    if rt.attached_chat_id().as_deref() != Some(chat_id) {
+                        return Err("Relaunch refused: browser ownership changed".into());
+                    }
                     let same_mode = rt.launch_options.headless == options.headless;
                     let process_alive = rt.ownership.process_id().is_none_or(pid_is_alive);
                     let usable = same_mode
@@ -1263,6 +1395,9 @@ pub async fn relaunch_runtime_for_chat_before_deadline(
             .await?;
             emitter_active
         }
+        None if project_browser::is_project_owner_id(chat_id) => {
+            return Err("No exact project browser runtime to relaunch".into());
+        }
         None => false,
     };
 
@@ -1297,6 +1432,8 @@ pub async fn relaunch_runtime_for_chat_before_deadline(
         return Err(error);
     }
     index_runtime_owner(&runtime.ownership);
+    let previous_emitter_active =
+        previous_emitter_active && !project_browser::is_project_owner_id(chat_id);
     if previous_emitter_active {
         runtime.frame_emitter_active = true;
     }
@@ -1535,6 +1672,7 @@ pub async fn browser_monitor_background_task(app: crate::app_state::AppState) {
                 }
             } => {
                 named_sessions::maintain_named_sessions(&app, true).await;
+                project_browser::shutdown_project_runtimes(&app).await;
                 return;
             }
         }
@@ -1598,6 +1736,13 @@ pub async fn browser_monitor_background_task(app: crate::app_state::AppState) {
                 RuntimeCheck::Healthy => continue,
                 RuntimeCheck::Inspected(health) => health,
             };
+
+            if chat_id
+                .as_deref()
+                .is_some_and(project_browser::is_project_owner_id)
+            {
+                continue;
+            }
 
             if was_connected && !still_connected {
                 info!(
@@ -1804,6 +1949,68 @@ mod tests {
             select_runtime_for_chat(&owners, &ChatRuntimeLookup::for_chat("chat-new")).unwrap();
         assert_eq!(selection.runtime_id, "rt-free");
         assert!(selection.adopted);
+    }
+
+    #[test]
+    fn reserved_owners_cannot_claim_unowned_runtimes_or_use_legacy_fallbacks() {
+        let project_owner = "project-browser:fixture-a";
+        let project = owner("rt-project", Some(project_owner));
+        let free = owner("rt-free", None);
+        let chat = owner("rt-chat", Some("chat-a"));
+        let reserved_lookup = ChatRuntimeLookup {
+            chat_id: project_owner.into(),
+            root_chat_id: Some("chat-a".into()),
+            background_agent_id: None,
+        };
+        for candidate in [&project, &chat, &free] {
+            assert_eq!(
+                select_runtime_for_chat(std::slice::from_ref(candidate), &reserved_lookup),
+                None
+            );
+        }
+        for (root, background) in [(Some(project_owner), None), (None, Some(project_owner))] {
+            let lookup = ChatRuntimeLookup {
+                chat_id: "ordinary-chat".into(),
+                root_chat_id: root.map(str::to_string),
+                background_agent_id: background.map(str::to_string),
+            };
+            assert_eq!(
+                select_runtime_for_chat(std::slice::from_ref(&project), &lookup),
+                None
+            );
+            assert_eq!(
+                select_runtime_for_chat(&[project.clone(), free.clone()], &lookup),
+                Some(RuntimeSelection {
+                    runtime_id: "rt-free".into(),
+                    adopted: true
+                }),
+            );
+        }
+    }
+
+    #[test]
+    fn project_recovery_selects_only_an_exact_owner_and_prefers_connected_generation() {
+        let project_owner = "project-browser:fixture-a";
+        let other = owner("rt-other", Some("project-browser:fixture-b"));
+        let similar = owner("rt-prefix", Some("project-browser:fixture-ab"));
+        let live = owner("rt-live", Some(project_owner));
+        let dead = RuntimeOwner {
+            connected: false,
+            ..owner("rt-dead", Some(project_owner))
+        };
+        let mut owners = vec![other, similar, owner("rt-free", None)];
+        assert_eq!(select_exact_runtime(&owners, project_owner), None);
+        owners.push(dead.clone());
+        assert_eq!(select_exact_runtime(&owners, project_owner), Some(&dead));
+        owners.push(live.clone());
+        assert_eq!(select_exact_runtime(&owners, project_owner), Some(&live));
+    }
+
+    #[test]
+    fn legacy_launch_arguments_cannot_redirect_profile_ownership() {
+        assert!(validate_legacy_profile_args(&["--lang=en".into()]).is_ok());
+        assert!(validate_legacy_profile_args(&["--user-data-dir=fixture".into()]).is_err());
+        assert!(validate_legacy_profile_args(&["--profile-directory=fixture".into()]).is_err());
     }
 
     #[test]

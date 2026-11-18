@@ -26,6 +26,7 @@ import {
   isSplittableSurface,
   makeSurfaceKey,
 } from "./surfaceKey";
+import { useProjectBrowserAutoOpen } from "./useProjectBrowserAutoOpen";
 import {
   consolidateWorkspaceTabs,
   openTab,
@@ -40,6 +41,7 @@ import styles from "./WorkspaceView.module.css";
 
 export function WorkspaceView() {
   useAppWorkspaceRestore();
+  useProjectBrowserAutoOpen();
   const dispatch = useAppDispatch();
   const [unsplitDragActive, setUnsplitDragActive] = useState(false);
   const activeTabId = useAppSelector(selectActiveTabId);
