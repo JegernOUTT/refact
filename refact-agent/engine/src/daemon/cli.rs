@@ -1124,19 +1124,27 @@ async fn run_ui(
     out: &mut dyn Write,
 ) -> Result<i32, CliError> {
     let daemon = ensure_daemon().await?;
-    let project_id = match path {
-        Some(path) => {
-            let value = open_project(&daemon, &path).await?;
-            Some(
-                value
-                    .get("project_id")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| {
-                        CliError::runtime("daemon project open response missing project_id")
-                    })?
-                    .to_string(),
-            )
+    #[cfg(target_os = "linux")]
+    if !json_output && !no_open && daemon.auth_token.is_none() {
+        if let Some(path) = path.as_deref() {
+            let root = canonicalize_existing_dir(path)?;
+            let project_id = opened_project_id(&open_project(&daemon, &root).await?)?;
+            let launch = client::request_browser_launch(&daemon, &project_id, &root)
+                .await
+                .map_err(CliError::runtime)?;
+            let mut opener = std::process::Command::new("xdg-open");
+            opener
+                .arg(launch.file)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            run_browser_command(opener).map_err(CliError::runtime)?;
+            writeln!(out, "{}", launch.url).map_err(write_error)?;
+            return Ok(0);
         }
+    }
+    let project_id = match path {
+        Some(path) => Some(opened_project_id(&open_project(&daemon, &path).await?)?),
         None => None,
     };
     let url = ui_url(
@@ -1160,6 +1168,14 @@ async fn run_ui(
         }
     }
     Ok(0)
+}
+
+fn opened_project_id(value: &Value) -> Result<String, CliError> {
+    value
+        .get("project_id")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| CliError::runtime("daemon project open response missing project_id"))
 }
 
 async fn open_project(daemon: &DaemonInfo, path: &Path) -> Result<Value, CliError> {

@@ -17,6 +17,7 @@ use crate::daemon::supervisor::{WorkerInfo, WorkerState};
 use crate::http::routers::v1::v1_browser_project::{self, PROJECT_HEADER};
 
 pub const PROXY_BODY_LIMIT: usize = 15 * 1024 * 1024;
+pub(crate) const BROWSER_LAUNCH_HEADER: &str = "x-refact-browser-launch";
 #[cfg(not(test))]
 const PROXY_WORKER_READY_TIMEOUT: Duration = Duration::from_secs(30);
 #[cfg(test)]
@@ -76,6 +77,43 @@ pub async fn proxy_v1(
         None
     };
     proxy_to_worker(state, path.project_id, worker_path, request, browser_token).await
+}
+
+#[cfg(target_os = "linux")]
+pub(super) async fn proxy_isolated_project(
+    state: Arc<DaemonState>,
+    project_id: String,
+    request: Request<Body>,
+    launch: &super::browser_launch::BrowserLaunch,
+) -> Response<Body> {
+    let worker_path = worker_v1_path(&project_id, request.uri());
+    let Ok(target) = reqwest::Url::parse(&target_url(1, &worker_path, request.uri().query()))
+    else {
+        return json_response(
+            StatusCode::BAD_REQUEST,
+            json!({"error":"invalid worker request URL"}),
+        );
+    };
+    if target.path() != "/v1" && !target.path().starts_with("/v1/") {
+        return json_response(
+            StatusCode::NOT_FOUND,
+            json!({"error":"invalid worker API path"}),
+        );
+    }
+    let browser_token = if v1_browser_project::is_worker_path(target.path()) {
+        if request.method() != axum::http::Method::POST
+            || !launch.authorize_browser(request.headers(), &project_id)
+        {
+            return json_response(
+                StatusCode::UNAUTHORIZED,
+                json!({"error":"Open this project again with refact ui to grant Project Browser access"}),
+            );
+        }
+        state.supervisor.project_browser_worker_token(&project_id)
+    } else {
+        None
+    };
+    proxy_to_worker(state, project_id, worker_path, request, browser_token).await
 }
 
 fn authorize_project_browser(
@@ -566,7 +604,7 @@ fn request_headers(headers: &HeaderMap, project_id: &str) -> reqwest::header::He
         if should_strip_header(name.as_str(), &connection_tokens) {
             continue;
         }
-        if name == axum::http::header::AUTHORIZATION {
+        if name == axum::http::header::AUTHORIZATION || name.as_str() == BROWSER_LAUNCH_HEADER {
             continue;
         }
         if name == COOKIE {
@@ -1109,6 +1147,10 @@ mod tests {
             PROJECT_HEADER,
             HeaderValue::from_static("untrusted-client-project"),
         );
+        parts.headers.insert(
+            BROWSER_LAUNCH_HEADER,
+            HeaderValue::from_static("document-proof"),
+        );
         let build = |path, proof| {
             worker_request(
                 &client,
@@ -1136,13 +1178,14 @@ mod tests {
             "Bearer scoped-proof"
         );
         assert_eq!(outgoing.headers()[PROJECT_HEADER], "proj");
-        for name in ["cookie", "origin", "host"] {
+        for name in ["cookie", "origin", "host", BROWSER_LAUNCH_HEADER] {
             assert!(!outgoing.headers().contains_key(name));
         }
         let unrelated = build("/v1/browser/status", Some("scoped-proof"))
             .unwrap()
             .build()
             .unwrap();
+        assert!(!unrelated.headers().contains_key(BROWSER_LAUNCH_HEADER));
         assert!(!unrelated
             .headers()
             .contains_key(reqwest::header::AUTHORIZATION));

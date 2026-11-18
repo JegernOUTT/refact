@@ -10,6 +10,8 @@ use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::Layer;
 
 pub mod auth;
+#[cfg(target_os = "linux")]
+mod browser_launch;
 pub mod buddy_reconciliation;
 pub mod buddy_wake;
 pub mod chat_client;
@@ -198,6 +200,18 @@ pub(crate) async fn run_daemon_entry_with_paths(
         actual_addr.port(),
     );
     state.load_projects(paths.projects_json_path.clone()).await;
+    #[cfg(target_os = "linux")]
+    let _browser_launch = if !config.auth.enabled {
+        match browser_launch::start(state.clone(), actual_addr.port()) {
+            Ok(runtime) => Some(runtime),
+            Err(error) => {
+                tracing::warn!("local Project Browser launcher unavailable: {error}");
+                None
+            }
+        }
+    } else {
+        None
+    };
     let info = state.daemon_info(actual_addr.port(), actual_addr.ip().to_string());
     if let Err(error) = state::write_daemon_info_atomic(&paths.daemon_json_path, &info).await {
         eprintln!("{error}");

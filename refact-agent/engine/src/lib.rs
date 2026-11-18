@@ -373,11 +373,12 @@ pub async fn run_with_cmdline(cmdline: global_context::CommandLine) {
         tracing::warn!("trajectory index coordinator shutdown flush failed: {error}");
     }
     background_tasks.abort().await;
-    if let Err(error) = integrations::browser_runtime::named_sessions::shutdown_named_sessions(
-        &crate::app_state::AppState::from_gcx(gcx.clone()).await,
-    )
-    .await
-    {
+    let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
+    let (_, named_cleanup) = tokio::join!(
+        integrations::browser_runtime::project_browser::shutdown_project_runtimes(&app),
+        integrations::browser_runtime::named_sessions::shutdown_named_sessions(&app),
+    );
+    if let Err(error) = named_cleanup {
         tracing::error!("named browser shutdown cleanup unconfirmed: {error}");
     }
     git::checkpoints::abort_init_shadow_repos(gcx.clone()).await;

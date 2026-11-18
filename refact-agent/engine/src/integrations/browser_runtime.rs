@@ -475,6 +475,83 @@ fn shutdown_runtime_process(pid: Option<u32>, profile_dir: &Path, delete_profile
     }
 }
 
+const PROJECT_CLOSE_LOCK_WAIT: Duration = Duration::from_millis(250);
+const PROJECT_CLOSE_GRACE: Duration = Duration::from_secs(3);
+const PROJECT_REAP_GRACE: Duration = Duration::from_millis(250);
+
+async fn shutdown_project_runtime_generation(
+    app: &crate::app_state::AppState,
+    runtime_id: &str,
+    owner_id: &str,
+) -> bool {
+    let (removed, pid, profile_dir) = {
+        let mut runtimes = app.integrations.browser_runtimes.lock().await;
+        let Some(ownership) = runtime_owner_record(runtime_id).filter(|record| {
+            record.is_current_generation()
+                && record.attached_chat_id().as_deref() == Some(owner_id)
+                && project_browser::is_project_owner_id(owner_id)
+        }) else {
+            return false;
+        };
+        let Some(removed) = runtimes.remove(runtime_id) else {
+            return false;
+        };
+        ownership.invalidate();
+        let _ = unindex_runtime_owner(runtime_id);
+        (
+            removed,
+            ownership.process_id(),
+            ownership.profile_dir().to_path_buf(),
+        )
+    };
+
+    let deadline = Instant::now() + PROJECT_CLOSE_GRACE;
+    let browser = tokio::time::timeout(PROJECT_CLOSE_LOCK_WAIT, removed.lock())
+        .await
+        .ok()
+        .and_then(|runtime| {
+            // Reconnect replaces this field with a non-owning transport; do not close it.
+            (pid.is_some() && runtime.browser.get_process_id() == pid)
+                .then(|| runtime.browser.clone())
+        });
+    if let Err(error) = tokio::task::spawn_blocking(move || {
+        let child = browser
+            .as_ref()
+            .and_then(headless_chrome::Browser::owned_process);
+        if let Some((browser, child)) = browser.as_ref().zip(child.as_ref()) {
+            // Chrome can disconnect before replying; only the exact child's exit is proof.
+            let close = browser.close_owned_before(deadline);
+            if child.wait_before(deadline).unwrap_or(false) {
+                let _ = clear_stale_profile_lock(&profile_dir);
+                return;
+            }
+            warn!(
+                pid = child.id(),
+                close_error = ?close.err(),
+                "Project browser did not exit after graceful close; trying process termination"
+            );
+        }
+        shutdown_runtime_process(pid, &profile_dir, false);
+        if let Some(child) = child {
+            if !matches!(
+                child.wait_before(Instant::now() + PROJECT_REAP_GRACE),
+                Ok(true)
+            ) {
+                warn!(
+                    "Project browser child {} exit could not be confirmed",
+                    child.id()
+                );
+            }
+        }
+    })
+    .await
+    {
+        warn!("Project browser shutdown task for runtime {runtime_id} failed: {error}");
+    }
+    release_runtime_off_thread(removed, runtime_id);
+    true
+}
+
 /// How long removal waits for a runtime's execution mutex before falling back to the
 /// ownership record; a wedged CDP call must never block eviction.
 pub const RUNTIME_LOCK_GRACE: Duration = Duration::from_secs(2);
@@ -1672,7 +1749,6 @@ pub async fn browser_monitor_background_task(app: crate::app_state::AppState) {
                 }
             } => {
                 named_sessions::maintain_named_sessions(&app, true).await;
-                project_browser::shutdown_project_runtimes(&app).await;
                 return;
             }
         }

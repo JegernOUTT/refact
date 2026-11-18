@@ -301,26 +301,27 @@ pub async fn stop_project_runtime(
     stopped
 }
 
-/// Engine shutdown: closes every project browser with SIGTERM so Chrome flushes cookies and
-/// session state into the durable profiles, which are kept.
+/// Worker shutdown, after request admission is drained and the browser monitor is stopped.
 pub async fn shutdown_project_runtimes(app: &crate::app_state::AppState) -> usize {
     let project_runtimes = registered_runtime_owners(app)
         .await
         .into_iter()
-        .filter(|record| {
+        .filter_map(|record| {
             record
                 .attached_chat_id()
-                .is_some_and(|owner| is_project_owner_id(&owner))
+                .filter(|owner| is_project_owner_id(owner))
+                .map(|owner| (record.runtime_id().to_string(), owner))
         })
-        .map(|record| record.runtime_id().to_string())
         .collect::<Vec<_>>();
-    let mut stopped = 0;
-    for runtime_id in project_runtimes {
-        if remove_browser_runtime(app.clone(), &runtime_id).await {
-            stopped += 1;
-        }
-    }
-    stopped
+    futures::future::join_all(
+        project_runtimes
+            .iter()
+            .map(|(runtime_id, owner)| shutdown_project_runtime_generation(app, runtime_id, owner)),
+    )
+    .await
+    .into_iter()
+    .filter(|removed| *removed)
+    .count()
 }
 
 fn profile_resolved(profile_dir: &Path) -> Result<bool, String> {
@@ -872,5 +873,109 @@ mod tests {
             .unwrap_err();
         assert!(error.contains("already exists"), "{error}");
         assert!(legacy_dir.exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn worker_shutdown_closes_and_reaps_the_exact_owned_child() {
+        use futures::{SinkExt, StreamExt};
+        use std::os::unix::fs::PermissionsExt;
+        use tokio::io::AsyncWriteExt;
+        use tokio_tungstenite::{accept_async, tungstenite::Message};
+
+        let fx = fixture();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = crate::app_state::AppState::from_gcx(gcx).await;
+        let profile = fx.scope.profile_dir(fx.cache.path());
+        std::fs::create_dir_all(&profile).unwrap();
+        let persisted = profile.join("persisted");
+        std::fs::write(&persisted, b"existing profile state").unwrap();
+        let marker = profile.join("voluntary-exit");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let control = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let executable = fx.cache.path().join("chrome-fixture");
+        std::fs::write(
+            &executable,
+            format!(
+                "#!/usr/bin/env python3\nimport socket,sys\ns=socket.create_connection(('127.0.0.1',{}))\nprint('DevTools listening on ws://{}/devtools/browser/fixture',file=sys.stderr,flush=True)\nassert s.recv(1)==b'x'\nopen({:?},'w').write('saved')\n",
+                control.local_addr().unwrap().port(),
+                listener.local_addr().unwrap(),
+                marker.to_str().unwrap(),
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut browser = accept_async(stream).await.unwrap();
+            let call: serde_json::Value =
+                serde_json::from_str(browser.next().await.unwrap().unwrap().to_text().unwrap())
+                    .unwrap();
+            assert_eq!(call["method"], "Target.setDiscoverTargets");
+            browser
+                .send(Message::text(
+                    serde_json::json!({"id": call["id"], "result": {}}).to_string(),
+                ))
+                .await
+                .unwrap();
+            let (stream, _) = listener.accept().await.unwrap();
+            let _downloads = accept_async(stream).await.unwrap();
+            let call: serde_json::Value =
+                serde_json::from_str(browser.next().await.unwrap().unwrap().to_text().unwrap())
+                    .unwrap();
+            assert_eq!(call["method"], "Browser.close");
+            drop(browser);
+            let (mut child, _) = control.accept().await.unwrap();
+            child.write_all(b"x").await.unwrap();
+        });
+        let mut runtime = tokio::task::spawn_blocking(move || {
+            let _deadline = headless_chrome::browser::transport::CommandDeadlineGuard::new(
+                Instant::now() + Duration::from_secs(5),
+            );
+            BrowserRuntime::launch(
+                profile,
+                BrowserLaunchOptions {
+                    chrome_path: Some(executable),
+                    chromium_sandbox: false,
+                    ..BrowserLaunchOptions::headless(true)
+                },
+            )
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        runtime.reattach(&fx.scope.owner_id());
+        let ownership = runtime.ownership.clone();
+        let pid = ownership.process_id().unwrap();
+        let id = register_browser_runtime(app.clone(), runtime).await;
+        let held_runtime = runtime_arc(&app, &id).await.unwrap();
+        assert!(pid_is_alive(pid) && !marker.exists());
+
+        assert!(!shutdown_project_runtime_generation(&app, &id, "project-browser:other").await);
+        assert!(ownership.is_current_generation());
+        let (first, second) = tokio::join!(
+            shutdown_project_runtimes(&app),
+            shutdown_project_runtimes(&app),
+        );
+        assert_eq!(first + second, 1);
+        assert!(!ownership.is_current_generation());
+        assert!(find_project_runtime(&app, &fx.scope).await.is_none());
+        // A zombie still answers signal 0 on Unix, so this also checks the child was reaped.
+        assert_eq!(unsafe { libc::kill(pid as libc::pid_t, 0) }, -1);
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
+        assert_eq!(std::fs::read(&marker).unwrap(), b"saved");
+        assert_eq!(
+            std::fs::read(&persisted).unwrap(),
+            b"existing profile state"
+        );
+        drop(held_runtime);
+        tokio::time::timeout(Duration::from_secs(5), server)
+            .await
+            .unwrap()
+            .unwrap();
     }
 }

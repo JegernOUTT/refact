@@ -377,12 +377,91 @@ fn project_gui_index_body(
     port: u16,
 ) -> Cow<'static, [u8]> {
     let candidates = daemon_origin_candidates(port, project_id);
-    let body = crate::http::routers::gui::inject_gui_origin_candidates(body, &candidates);
+    render_project_gui(body, project_id, &candidates)
+}
+
+fn render_project_gui(
+    body: Cow<'static, [u8]>,
+    project_id: &str,
+    candidates: &GuiPublicOriginCandidates,
+) -> Cow<'static, [u8]> {
+    let body = crate::http::routers::gui::inject_gui_origin_candidates(body, candidates);
     let Ok(html) = std::str::from_utf8(body.as_ref()) else {
         return body;
     };
-    let html = inject_daemon_gui_bootstrap(html, project_id, &candidates);
+    let html = inject_daemon_gui_bootstrap(html, project_id, candidates);
     Cow::Owned(inject_gui_bootstrap_config(&html, "workspace").into_bytes())
+}
+
+#[cfg(target_os = "linux")]
+pub(super) fn isolated_project_index(
+    project_id: &str,
+    host: &str,
+    proof: Option<&str>,
+) -> Response {
+    let Some(asset) = ChatGuiAsset::get(INDEX_PATH) else {
+        return html_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            missing_gui_index_html().as_bytes().into(),
+        );
+    };
+    let candidates = GuiPublicOriginCandidates {
+        origins: vec![format!("http://{host}{}", project_api_prefix(project_id))],
+    };
+    let mut body = render_project_gui(asset.data, project_id, &candidates);
+    if let Some(proof) = proof {
+        let Ok(html) = std::str::from_utf8(body.as_ref()) else {
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        };
+        let script = r#"<script>
+      (() => {
+        document.currentScript.remove();
+        let proof = __PROOF__;
+        const origin = location.origin;
+        const project = __PROJECT__;
+        const header = __HEADER__;
+        const request = window.fetch.bind(window);
+        window.fetch = (input, init) => {
+          if (proof) {
+            const url = new URL(input instanceof Request ? input.url : input, origin);
+            const method = (init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase();
+            if (url.origin === origin && method === "POST" &&
+                (url.pathname.startsWith("/v1/browser/project/") ||
+                 url.pathname.startsWith(project + "/v1/browser/project/"))) {
+              const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
+              headers.set(header, proof);
+              return request(input, { ...init, headers, mode: "cors", redirect: "error",
+                referrerPolicy: "same-origin" });
+            }
+          }
+          return request(input, init);
+        };
+        window.addEventListener("pagehide", () => {
+          const previous = proof;
+          proof = null;
+          request(origin + __REVOKE__, { method: "POST", mode: "cors", redirect: "error",
+            credentials: "omit", referrerPolicy: "same-origin",
+            headers: { [header]: previous }, keepalive: true }).catch(() => {});
+        }, { once: true });
+        history.replaceState(history.state, "", project + "/");
+      })();
+    </script>"#
+            .replace("__PROOF__", &json_for_script(&proof))
+            .replace("__PROJECT__", &json_for_script(&project_api_prefix(project_id)))
+            .replace("__HEADER__", &json_for_script(&super::proxy::BROWSER_LAUNCH_HEADER))
+            .replace("__REVOKE__", &json_for_script(&super::browser_launch::REVOKE_PATH));
+        body = Cow::Owned(insert_head_script(html, &script).into_bytes());
+    }
+    let Ok(html) = std::str::from_utf8(body.as_ref()) else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+    let nonce = crate::daemon::auth::generate_token();
+    let html = html.replace("<script>", &format!("<script nonce=\"{nonce}\">"));
+    let mut response = asset_response(INDEX_PATH, html.into_bytes().into(), StatusCode::OK);
+    response.headers_mut().insert(header::CONTENT_SECURITY_POLICY, HeaderValue::from_str(&format!(
+        "script-src 'self' 'nonce-{nonce}'; worker-src 'none'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+    )).expect("UUID CSP nonce is a valid header value"));
+    response
 }
 
 fn dashboard_gui_index_body(

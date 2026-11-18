@@ -2,7 +2,7 @@ import { chromium, type BrowserContext } from "@playwright/test";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
 import { readFileSync, readlinkSync } from "node:fs";
-import { access, mkdir, readFile, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { isAbsolute, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -99,6 +99,63 @@ export async function createProjectRoot(
   return root;
 }
 
+export type DesktopOpener = {
+  bin: string;
+  argumentCounts: string;
+  arguments: string;
+  profiles: string;
+  profilePaths: string;
+  pids: string;
+};
+
+export async function createDesktopOpener(
+  fixture: ReturnType<typeof fixtureEnvironment>,
+): Promise<DesktopOpener> {
+  const bin = join(fixture.scratch, "opener-bin");
+  const argumentCounts = join(fixture.scratch, "opener-argument-counts");
+  const argumentsPath = join(fixture.scratch, "opener-arguments");
+  const profiles = join(fixture.scratch, "desktop-chromium");
+  const profilePaths = join(fixture.scratch, "opener-profile-paths");
+  const pids = join(fixture.scratch, "opener-pids");
+  await mkdir(bin, { recursive: true, mode: 0o700 });
+  await mkdir(profiles, { recursive: true, mode: 0o700 });
+  const openerPath = join(bin, "xdg-open");
+  await writeFile(
+    openerPath,
+    `#!/bin/sh
+set -eu
+umask 077
+[ "$#" -eq 1 ] || exit 64
+case "$1" in /*) ;; *) exit 65 ;; esac
+printf '%s\\n' "$#" >> "$REFACT_PROJECT_BROWSER_OPEN_ARG_COUNTS"
+printf '%s\\n' "$1" >> "$REFACT_PROJECT_BROWSER_OPEN_ARGS"
+profile="$REFACT_PROJECT_BROWSER_OPEN_PROFILES/$(date +%s%N)"
+mkdir -m 700 "$profile"
+printf '%s\\n' "$profile" >> "$REFACT_PROJECT_BROWSER_OPEN_PROFILE_PATHS"
+(
+  attempts=0
+  until [ -f "$profile/fixture-ready" ]; do
+    [ "$attempts" -lt 200 ] || exit 1
+    attempts=$((attempts + 1))
+    sleep 0.1
+  done
+  exec "$CHROME" --headless=new --no-sandbox --disable-dev-shm-usage --no-first-run --no-default-browser-check --remote-debugging-port=0 --user-data-dir="$profile" "$1"
+) >/dev/null 2>&1 &
+printf '%s\\n' "$!" >> "$REFACT_PROJECT_BROWSER_OPEN_PIDS"
+`,
+    { mode: 0o700 },
+  );
+  await chmod(openerPath, 0o700);
+  return {
+    bin,
+    argumentCounts,
+    arguments: argumentsPath,
+    profiles,
+    profilePaths,
+    pids,
+  };
+}
+
 export class Daemon {
   readonly token = randomBytes(32).toString("hex");
   readonly dir: string;
@@ -108,13 +165,24 @@ export class Daemon {
     signal: NodeJS.Signals | null;
   }>;
   private daemonOutput = "";
+  private authEnabled = true;
   origin = "";
+  readonly fixtureEnv: ReturnType<typeof fixtureEnvironment>["env"];
+  readonly fixtureEngine: string;
+  uiEnv: NodeJS.ProcessEnv;
 
   constructor(private readonly fixture: ReturnType<typeof fixtureEnvironment>) {
     this.dir = join(fixture.scratch, "daemon");
+    this.fixtureEnv = fixture.env;
+    this.fixtureEngine = fixture.engine;
+    this.uiEnv = fixture.env;
   }
 
-  async start(siteOrigin: string) {
+  async start(
+    siteOrigin: string,
+    options: { authEnabled?: boolean; opener?: DesktopOpener } = {},
+  ) {
+    this.authEnabled = options.authEnabled ?? true;
     const engineConfig = join(this.fixture.home, ".config", "refact");
     const providers = join(engineConfig, "providers.d");
     await mkdir(providers, { recursive: true });
@@ -142,15 +210,35 @@ export class Daemon {
       join(this.dir, "daemon.yaml"),
       JSON.stringify({
         bind: "127.0.0.1",
-        auth: { enabled: true, token: this.token },
+        auth: {
+          enabled: this.authEnabled,
+          ...(this.authEnabled ? { token: this.token } : {}),
+        },
         mdns: { enabled: false },
       }),
       { mode: 0o600 },
     );
     const { engine, chrome, env, scratch } = this.fixture;
+    this.uiEnv = {
+      ...env,
+      ...(options.opener
+        ? {
+            PATH: `${options.opener.bin}:${env.PATH}`,
+            REFACT_PROJECT_BROWSER_OPEN_ARG_COUNTS:
+              options.opener.argumentCounts,
+            REFACT_PROJECT_BROWSER_OPEN_ARGS: options.opener.arguments,
+            REFACT_PROJECT_BROWSER_OPEN_PROFILES: options.opener.profiles,
+            REFACT_PROJECT_BROWSER_OPEN_PROFILE_PATHS:
+              options.opener.profilePaths,
+            REFACT_PROJECT_BROWSER_OPEN_PIDS: options.opener.pids,
+          }
+        : {}),
+      CHROME: chrome,
+      REFACT_DAEMON_DIR: this.dir,
+    };
     const child = spawn(engine, ["daemon", "--foreground", "--port", "0"], {
       cwd: scratch,
-      env: { ...env, CHROME: chrome, REFACT_DAEMON_DIR: this.dir },
+      env: this.uiEnv,
       stdio: ["ignore", "pipe", "pipe"],
     });
     this.child = child;
@@ -198,7 +286,7 @@ export class Daemon {
     const response = await fetch(`${this.origin}${path}`, {
       method,
       headers: {
-        Authorization: `Bearer ${this.token}`,
+        ...(this.authEnabled ? { Authorization: `Bearer ${this.token}` } : {}),
         "Content-Type": "application/json",
       },
       body: body === undefined ? undefined : JSON.stringify(body),
@@ -286,6 +374,10 @@ export class Daemon {
   diagnostics() {
     return this.daemonOutput.replaceAll(this.token, "[fixture token]");
   }
+
+  loggedToken() {
+    return this.daemonOutput.includes(this.token);
+  }
 }
 
 const styles = `body{margin:0;font:20px system-ui;color:white;background:rgb(20,30,40)}
@@ -294,6 +386,7 @@ form{position:absolute;left:16px;top:70px;display:flex;align-items:center;gap:12
 button{width:75px;height:34px}footer{height:900px;padding:15px;background:rgb(10,140,110);box-sizing:border-box}`;
 
 export async function startSite() {
+  let issuedLogin = false;
   const visits: {
     path: string;
     value: string | null;
@@ -334,11 +427,13 @@ export async function startSite() {
       "Content-Security-Policy",
       "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'",
     );
-    if (path === "/submit")
+    if (path === "/submit" && value && !issuedLogin) {
+      issuedLogin = true;
       res.setHeader(
         "Set-Cookie",
         "fixture_login=project-alpha; Max-Age=86400; Path=/; HttpOnly; SameSite=Strict",
       );
+    }
     if (path === "/seed-selected" || path === "/seed-unselected") {
       res.setHeader(
         "Set-Cookie",
