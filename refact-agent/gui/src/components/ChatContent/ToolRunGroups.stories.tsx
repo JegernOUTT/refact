@@ -378,6 +378,302 @@ const MULTI_STEP: ChatMessages = [
   },
 ];
 
+function notice(
+  id: string,
+  content: string,
+  source = "agents.push",
+  subkind = "system_notice",
+): ChatMessages[number] {
+  return {
+    role: "event",
+    message_id: id,
+    subkind,
+    source,
+    content,
+  };
+}
+
+function lifecycleReceipt(
+  agentId: string,
+  status: string,
+  accepted: boolean,
+): string {
+  return JSON.stringify({
+    action: "continue",
+    accepted,
+    agent_id: agentId,
+    child_chat_id: null,
+    status,
+    change_seq: 4,
+    run_generation: 1,
+    step_count: 12,
+    cap_stop: null,
+    can_resume: false,
+    max_steps: null,
+    resume_configuration_available: true,
+    original_scope_available: true,
+  });
+}
+
+const SCRIPT_CHECKS = [
+  "Count migrated invoices",
+  "Compare refund totals",
+  "Check currency rounding",
+  "Verify ledger balances",
+  "Scan for orphaned rows",
+  "Diff API fixtures",
+  "Check UI snapshot list",
+  "Validate webhook payloads",
+  "Measure migration time",
+  "Check index usage",
+  "Summarize agent diffs",
+];
+
+const SCRIPT_CALLS: CallSpec[] = SCRIPT_CHECKS.map((description, index) => ({
+  id: `b-py-${index}`,
+  name: "python",
+  args: { description, code: `# ${description}\nprint("ok")` },
+  at: [40_000 + index * 2_000, 41_500 + index * 2_000],
+}));
+
+const BUDDY: ChatMessages = [
+  {
+    role: "user",
+    content: "Ship the billing migration with the helper agents.",
+    message_id: "b-user",
+  },
+  notice("b-n1", "agent bgagent-3f2a: schema migration drafted"),
+  {
+    role: "assistant",
+    content: "",
+    message_id: "b-a1",
+    tool_calls: calls([
+      {
+        id: "b-status",
+        name: "shell",
+        args: { command: "git status --short", description: "Check tree" },
+        at: [0, 400],
+      },
+      { id: "b-list", name: "agent_list", args: {}, at: [500, 700] },
+      {
+        id: "b-overview",
+        name: "agents_overview",
+        args: {},
+        at: [800, 1_100],
+      },
+    ]),
+  },
+  result("b-status", " M src/billing/schema.sql"),
+  result("b-list", "bgagent-3f2a running\nbgagent-91c4 running"),
+  result(
+    "b-overview",
+    [
+      "- bgagent-3f2a — Schema migration — ✅ completed — step 12",
+      "- bgagent-91c4 — API rounding fix — 🔄 running — step 8",
+      "- bgagent-5d07 — UI update — 🔄 running — step 5",
+    ].join("\n"),
+  ),
+  notice("b-n2", "agent bgagent-91c4: API tests failing on currency rounding"),
+  notice(
+    "b-q1",
+    "[subagent question] agent bgagent-91c4 asks: should refunds round half-even?",
+  ),
+  {
+    role: "assistant",
+    content: "",
+    message_id: "b-thought",
+    reasoning_content:
+      "The API agent is blocked on rounding. Half-even matches the ledger, so answer it and let it continue.",
+  },
+  {
+    role: "assistant",
+    content: "",
+    message_id: "b-a2",
+    tool_calls: calls([
+      {
+        id: "b-message",
+        name: "agent_message",
+        args: {
+          to: "bgagent-91c4",
+          text: "Use half-even rounding to match the ledger.",
+        },
+        at: [9_000, 9_300],
+      },
+    ]),
+  },
+  result("b-message", "Message queued for bgagent-91c4"),
+  notice(
+    "b-approval",
+    "User approved 1 tool call (once)",
+    "agents.approval",
+    "tool_decision",
+  ),
+  {
+    role: "assistant",
+    content: "",
+    message_id: "b-a3",
+    tool_calls: calls([
+      {
+        id: "b-life-1",
+        name: "agent_lifecycle",
+        args: { agent_id: "bgagent-5d07", action: "continue" },
+        at: [10_000, 10_400],
+      },
+      {
+        id: "b-life-2",
+        name: "agent_lifecycle",
+        args: { agent_id: "bgagent-91c4", action: "continue" },
+        at: [10_500, 10_900],
+      },
+    ]),
+  },
+  result("b-life-1", lifecycleReceipt("bgagent-5d07", "failed", false)),
+  result("b-life-2", lifecycleReceipt("bgagent-91c4", "running", true)),
+  notice(
+    "b-goal",
+    "Goal pursuit nudge: 2 of 3 agents are still running",
+    "chat.goal_monitor",
+  ),
+  {
+    role: "assistant",
+    content: "",
+    message_id: "b-a4",
+    tool_calls: calls([
+      {
+        id: "b-wait-1",
+        name: "wait",
+        args: { target: { kind: "agents", agent_ids: ["bgagent-91c4"] } },
+        at: [11_000, 24_000],
+      },
+    ]),
+  },
+  result(
+    "b-wait-1",
+    JSON.stringify({ target: "agents", outcome: "interrupted" }),
+  ),
+  notice("b-n3", "agent bgagent-5d07: UI components updated"),
+  {
+    role: "assistant",
+    content: "",
+    message_id: "b-a5",
+    tool_calls: calls([
+      {
+        id: "b-wait-2",
+        name: "wait",
+        args: { target: { kind: "agents", agent_ids: ["bgagent-91c4"] } },
+        at: [24_500, 39_000],
+      },
+    ]),
+  },
+  result(
+    "b-wait-2",
+    JSON.stringify({ target: "agents", outcome: "interrupted" }),
+  ),
+  {
+    role: "assistant",
+    content: "",
+    message_id: "b-a6",
+    tool_calls: calls(SCRIPT_CALLS),
+  },
+  ...SCRIPT_CALLS.map((spec) => result(spec.id, "ok")),
+  notice("b-n4", "agent bgagent-3f2a: finished"),
+  {
+    role: "assistant",
+    content:
+      "All three agents finished: the schema migration, the half-even refund rounding fix and the UI update are merged, and the verification scripts pass.",
+    message_id: "b-final",
+  },
+];
+
+const CARDS: ChatMessages = [
+  {
+    role: "user",
+    content: "Refresh the billing context and summarize what changed.",
+    message_id: "c-user",
+  },
+  {
+    role: "assistant",
+    content: "",
+    message_id: "c-a1",
+    tool_calls: calls([
+      {
+        id: "c-cat",
+        name: "cat",
+        args: { paths: "src/billing/refunds.ts" },
+        at: [0, 300],
+      },
+    ]),
+  },
+  result("c-cat", "src/billing/refunds.ts\n1: export const refunds = {}"),
+  {
+    role: "context_file",
+    message_id: "c-memories",
+    tool_call_id: "knowledge_enrichment",
+    content: [
+      {
+        file_name: "2026-11-01_120000_a1b2c3_refund-rounding.md",
+        file_content: "Refunds round half-even to match the ledger.",
+        line1: 1,
+        line2: 1,
+      },
+    ],
+  },
+  {
+    role: "summarization",
+    message_id: "c-summary",
+    content: "Earlier turns about the schema migration were summarized.",
+    summarization_tier: "tier1_llm",
+    summarized_token_estimate: 1800,
+  },
+  {
+    role: "cd_instruction",
+    message_id: "c-skill",
+    content:
+      '💿 SKILL_ACTIVATED {"name":"billing-review","allowed_tools":["cat"]}\nReview billing changes before merging.',
+  },
+  {
+    role: "event",
+    message_id: "tool_job:c-job:1:0",
+    subkind: "system_notice",
+    source: "tool_job.completed",
+    content: "code_health: billing module health 8.4/10",
+    extra: {
+      event: {
+        subkind: "system_notice",
+        source: "tool_job.completed",
+        payload: { actor: "tool_completion", job_id: "c-job" },
+      },
+      tool_job_result: {
+        actor: "tool_completion",
+        job_id: "c-job",
+        revision: 1,
+        tool_name: "code_health",
+        tool_call_id: "c-health",
+        original_role: "tool",
+      },
+      delivery: { source: "tool_job.completed", id: "tool_job:c-job:1" },
+    },
+  },
+  {
+    role: "diff",
+    content: [
+      chunk(
+        "src/billing/refunds.ts",
+        "  rounding: 'half-even',\n",
+        "  rounding: 'half-up',\n",
+      ),
+    ],
+    tool_call_id: "c-external",
+    message_id: "c-diff",
+  },
+  {
+    role: "assistant",
+    content:
+      "Refunds now round half-even everywhere; the earlier schema discussion is summarized above.",
+    message_id: "c-final",
+  },
+];
+
 type ToolRunStoryProps = {
   messages: ChatMessages;
   runtime?: Partial<ThreadRuntime>;
@@ -432,6 +728,14 @@ export const OldHistory: Story = {
 
 export const MultiStep: Story = {
   args: { messages: MULTI_STEP },
+};
+
+export const BuddyNotices: Story = {
+  args: { messages: BUDDY },
+};
+
+export const FoldedCards: Story = {
+  args: { messages: CARDS },
 };
 
 export const AllCases: Story = {

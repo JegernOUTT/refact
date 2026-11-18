@@ -157,8 +157,8 @@ const _ToolRunGroup: React.FC<ToolRunGroupProps> = ({
     return computeCallFlags(group, threadId, results, paused, folded, agents);
   }, [group, threadId, results, ids, foldedList, pauseReasons, agents]);
   const summary = React.useMemo(
-    () => summarizeToolRun(calls, flags, group.diffsByToolId),
-    [calls, flags, group.diffsByToolId],
+    () => summarizeToolRun(calls, flags, group.diffsByToolId, group.cards),
+    [calls, flags, group.diffsByToolId, group.cards],
   );
   const pinned = React.useMemo(
     () =>

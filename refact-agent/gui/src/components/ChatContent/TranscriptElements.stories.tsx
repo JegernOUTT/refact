@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react";
+import { userEvent, within } from "@storybook/testing-library";
 import {
   COMPRESSED_USER_MESSAGE,
   COMPRESSION_REPORT,
@@ -90,8 +91,19 @@ export const ThinkingBlocks: Story = {
 
 export const InlineEvents: Story = {
   args: { messages: EVENT_MESSAGES },
-  play: ({ canvasElement }) => {
-    const rows = canvasElement.querySelectorAll('[data-testid="event-row"]');
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const groups = canvas.queryAllByTestId("tool-run-group");
+    if (groups.length !== 1) {
+      throw new Error("Expected the events folded into one group");
+    }
+    const summary = within(groups[0]).getByTestId("tool-run-summary");
+    if (summary.textContent !== "Received 3 notices") {
+      throw new Error(`Unexpected group summary: ${summary.textContent ?? ""}`);
+    }
+    await userEvent.click(within(groups[0]).getByTestId("tool-run-toggle"));
+    const members = await canvas.findByTestId("tool-run-members");
+    const rows = within(members).queryAllByTestId("event-row");
     if (rows.length !== 3) throw new Error("Expected three inline event rows");
     if (canvasElement.querySelector('[data-testid="event-log"]')) {
       throw new Error("Legacy event history rendered");

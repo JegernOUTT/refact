@@ -153,4 +153,19 @@ describe("isProcessStartCall", () => {
     );
     expect(isProcessStartCall("process_read", {})).toBe(false);
   });
+
+  test("reads service actions the way the engine does: trimmed and case-insensitive", () => {
+    expect(isProcessStartCall("shell_service", { action: " Start " })).toBe(
+      true,
+    );
+    expect(isProcessStartCall("shell_service", { action: "RESTART" })).toBe(
+      true,
+    );
+    expect(isProcessStartCall("shell_service", { action: " Stop " })).toBe(
+      false,
+    );
+    expect(isProcessStartCall("shell_service", { action: "LOGS" })).toBe(false);
+    expect(isProcessStartCall("shell_service", { action: "   " })).toBe(false);
+    expect(isProcessStartCall("shell_service", { action: 1 })).toBe(false);
+  });
 });

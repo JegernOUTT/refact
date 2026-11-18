@@ -7,11 +7,13 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "../../utils/test-utils";
 import type { ChatMessages, ToolCall } from "../../services/refact";
 import { buildDisplayItems, type DisplayItem } from "./ChatContentDisplayItems";
 import { groupToolRuns, type DisplayItemToolRun } from "./toolRunGroups";
 import { ToolRunGroup } from "./ToolRunGroup";
+import { EventRow } from "./EventRow";
 import { setToolUse } from "../../features/Chat/Thread/actions";
 import { CollapsibleStoreProvider } from "./useStoredOpen";
 import type { CollapsibleStore } from "./CollapsibleStore";
@@ -430,6 +432,78 @@ describe("ToolRunGroup", () => {
     });
     expect(toggle).toHaveAttribute("aria-expanded", "true");
     expect(scroll).not.toHaveBeenCalled();
+  });
+
+  it("summarizes folded notices and keeps their actions working when expanded", async () => {
+    const messages: ChatMessages = [
+      { role: "user", content: "go", message_id: "u1" },
+      {
+        role: "assistant",
+        content: "",
+        message_id: "a1",
+        tool_calls: [call("c-cat", "cat", { paths: "a.ts" })],
+      },
+      tool("c-cat", "a.ts"),
+      {
+        role: "event",
+        message_id: "ev-proc",
+        subkind: "process_completed",
+        source: "exec.registry",
+        content: "Build finished",
+        payload: { process_id: "proc-elsewhere", exit_code: 0 },
+      },
+      {
+        role: "event",
+        message_id: "ev-cron",
+        subkind: "cron_fire",
+        source: "scheduler.cron",
+        content: "Nightly run fired",
+        payload: { task_id: "task-1" },
+      },
+      { role: "assistant", content: "Done", message_id: "a2" },
+    ];
+    const chat = createDefaultChatState();
+    chat.threads[chat.current_thread_id].thread.messages = messages;
+    const onOpenOutput = vi.fn();
+    const renderWithEvents = (item: DisplayItem) =>
+      item.type === "event" ? (
+        <EventRow
+          event={item.event}
+          run={item.run}
+          onOpenProcessOutput={onOpenOutput}
+        />
+      ) : (
+        renderMember(item)
+      );
+    const { store, user } = render(
+      <ToolRunGroup
+        group={toolRunOf(messages)}
+        threadId={chat.current_thread_id}
+        renderMember={renderWithEvents}
+      />,
+      { preloadedState: { chat } },
+    );
+    const expected = "Read 1 file · Received 2 notices";
+    const toggle = screen.getByRole("button", { name: expected });
+    expect(toggle).toHaveAttribute("title", expected);
+    expect(screen.getByTestId("tool-run-summary")).toHaveTextContent(expected);
+    expect(screen.queryByTestId("event-row")).not.toBeInTheDocument();
+
+    await user.click(toggle);
+    const rows = within(screen.getByTestId("tool-run-members")).getAllByTestId(
+      "event-row",
+    );
+    expect(rows).toHaveLength(2);
+    for (const row of rows) {
+      await user.click(within(row).getByTestId("transcript-toggle"));
+    }
+    await user.click(screen.getByRole("button", { name: "Open output" }));
+    expect(onOpenOutput).toHaveBeenCalledWith("proc-elsewhere");
+    await user.click(screen.getByRole("button", { name: "Open scheduler" }));
+    expect(store.getState().pages.at(-1)).toEqual({
+      name: "scheduler",
+      taskId: "task-1",
+    });
   });
 
   it("does not re-derive call flags on unrelated store updates", () => {

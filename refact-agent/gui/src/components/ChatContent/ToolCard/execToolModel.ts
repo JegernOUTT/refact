@@ -422,7 +422,8 @@ export function isProcessStartCall(
   if (toolName === "shell") return isTruthyFlag(args.run_in_background);
   if (toolName !== "shell_service") return false;
   return (
-    typeof args.action === "string" && SERVICE_START_ACTIONS.has(args.action)
+    typeof args.action === "string" &&
+    SERVICE_START_ACTIONS.has(args.action.trim().toLowerCase())
   );
 }
 

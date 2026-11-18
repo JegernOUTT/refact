@@ -12,6 +12,7 @@ import {
   execStateTranscriptStatus,
   isBusyStatus,
   isExecToolName,
+  isProcessStartCall,
   parseProcessArgs,
   resolveExecState,
   type ExecState,
@@ -25,8 +26,11 @@ import {
 } from "../../services/refact/privacy";
 import { isAppToolName } from "./ToolCard/appToolModel";
 import { isRawTextDocToolCall } from "../Tools/types";
-import { isAgenticToolName } from "../Tools/AgenticTool/agenticFamilies";
-import { lookupAgenticFamily } from "../Tools/AgenticTool/agenticFamilies";
+import {
+  isAgenticToolName,
+  lookupAgenticFamily,
+  type AgenticFamily,
+} from "../Tools/AgenticTool/agenticFamilies";
 import { editToolFilePaths, getDiffStats } from "./ToolCard/DiffBlockStats";
 import { normalizeReadPaths } from "./ToolCard/readToolPaths";
 import {
@@ -40,26 +44,48 @@ import {
 type ToolRunCategory =
   | "edit"
   | "run"
+  | "script"
   | "read"
   | "search"
   | "browse"
+  | "analyze"
   | "agents"
-  | "other";
+  | "message"
+  | "check"
+  | "manage"
+  | "wait"
+  | "processes"
+  | "plan"
+  | "planRead"
+  | "memory"
+  | "other"
+  | "notice";
 
 const TOOL_RUN_CATEGORY_ORDER: readonly ToolRunCategory[] = [
   "edit",
   "run",
+  "script",
   "read",
   "search",
   "browse",
+  "analyze",
   "agents",
+  "message",
+  "check",
+  "manage",
+  "wait",
+  "processes",
+  "plan",
+  "planRead",
+  "memory",
   "other",
+  "notice",
 ];
 
-const RUN_TOOLS: ReadonlySet<string> = new Set([
+const RUN_TOOLS: ReadonlySet<ExecToolName> = new Set<ExecToolName>([
   "shell",
-  "shell_service",
   "process_start",
+  "exec",
 ]);
 
 const SEARCH_TOOLS: ReadonlySet<string> = new Set([
@@ -76,7 +102,66 @@ const BROWSE_TOOLS: ReadonlySet<string> = new Set([
   "web",
   "web_search",
   "chrome",
+  "ui_probe",
+  "contrast_audit",
+  "visual_diff",
+  "mark_elements",
+  "image_region",
 ]);
+
+const ANALYZE_TOOLS: ReadonlySet<string> = new Set([
+  "code_health",
+  "codegraph_overview",
+  "git_risk",
+  "pr_blast",
+  "dead_code",
+  "security_scan",
+  "code_map",
+  "code_why",
+  "code_duplication",
+  "design_system",
+]);
+
+const NAMED_CATEGORIES: Readonly<Partial<Record<string, ToolRunCategory>>> = {
+  mv: "edit",
+  python: "script",
+  cat: "read",
+  subagent: "agents",
+  check_agents: "check",
+  agent_pulse: "check",
+  agent_diff: "check",
+  board_discover: "check",
+  wait: "wait",
+  agent_wait: "wait",
+  wait_agents: "wait",
+  sleep: "wait",
+  tasks_set: "plan",
+  pause_goal: "plan",
+  snooze_goal: "plan",
+  get_goal: "planRead",
+  get_plan: "planRead",
+  create_knowledge: "memory",
+  task_mem_save: "memory",
+  agent_peer_grant: "manage",
+  schedule: "other",
+  pause: "other",
+  resume: "other",
+  task_board_authority: "other",
+};
+
+const FAMILY_CATEGORIES: Readonly<Record<AgenticFamily, ToolRunCategory>> = {
+  spawn: "agents",
+  message: "message",
+  overview: "check",
+  inspect: "check",
+  control: "manage",
+  goal: "plan",
+  plan: "plan",
+  progress: "other",
+  task: "other",
+  doc: "other",
+  memory: "other",
+};
 
 const BREAKER_TOOLS: ReadonlySet<string> = new Set([
   "ask_questions",
@@ -84,28 +169,12 @@ const BREAKER_TOOLS: ReadonlySet<string> = new Set([
   "agent_finish",
 ]);
 
-const MIN_GROUP_CALLS = 2;
+const VERIFIER_REPORT_SUBKIND = "verifier_report";
+
+const MIN_GROUP_STEPS = 2;
 
 function isToolRunBreaker(call: ToolCall): boolean {
   return BREAKER_TOOLS.has(normalizeToolName(call.function.name) ?? "");
-}
-
-function toolRunCategory(name: string | undefined): ToolRunCategory {
-  const normalized = normalizeToolName(name) ?? "";
-  if (EDIT_TOOLS.has(normalized) || normalized === "mv") return "edit";
-  if (RUN_TOOLS.has(normalized)) return "run";
-  if (normalized === "cat") return "read";
-  if (SEARCH_TOOLS.has(normalized)) return "search";
-  if (BROWSE_TOOLS.has(normalized) || normalized.startsWith("chrome_")) {
-    return "browse";
-  }
-  if (
-    normalized === "subagent" ||
-    lookupAgenticFamily(normalized)?.family === "spawn"
-  ) {
-    return "agents";
-  }
-  return "other";
 }
 
 function parseArgs(raw: string): Record<string, unknown> {
@@ -119,6 +188,35 @@ function parseArgs(raw: string): Record<string, unknown> {
   } catch {
     return {};
   }
+}
+
+function execCategory(name: ExecToolName, call: ToolCall): ToolRunCategory {
+  if (name === "process_wait") return "wait";
+  if (name === "shell_service") {
+    return isProcessStartCall(name, parseArgs(call.function.arguments))
+      ? "run"
+      : "processes";
+  }
+  return RUN_TOOLS.has(name) ? "run" : "processes";
+}
+
+function toolRunCategory(call: ToolCall): ToolRunCategory {
+  const name = normalizeToolName(call.function.name) ?? "";
+  if (EDIT_TOOLS.has(name)) return "edit";
+  if (isExecToolName(name)) return execCategory(name, call);
+  if (BROWSE_TOOLS.has(name) || name.startsWith("chrome_")) return "browse";
+  if (SEARCH_TOOLS.has(name)) return "search";
+  if (ANALYZE_TOOLS.has(name)) return "analyze";
+  if (name === "agent_lifecycle") {
+    const action = parseArgs(call.function.arguments).action;
+    return typeof action === "string" && action.trim() === "inspect"
+      ? "check"
+      : "manage";
+  }
+  const named = NAMED_CATEGORIES[name];
+  if (named) return named;
+  const family = lookupAgenticFamily(name)?.family;
+  return family ? FAMILY_CATEGORIES[family] : "other";
 }
 
 function editedPaths(call: ToolCall, diffs: readonly DiffChunk[]): string[] {
@@ -153,6 +251,13 @@ export type ToolRunCallState = {
   failed: boolean;
   busy: boolean;
 };
+
+export type ToolRunCards = {
+  notices: number;
+  diffs: readonly DiffChunk[];
+};
+
+const NO_CARDS: ToolRunCards = { notices: 0, diffs: [] };
 
 function plural(count: number, one: string, many: string): string {
   return `${count} ${count === 1 ? one : many}`;
@@ -196,77 +301,96 @@ export function formatToolRunDuration(ms: number): string {
   return minutes === 0 ? `${hours}h` : `${hours}h ${minutes}m`;
 }
 
-function categoryPart(
-  category: ToolRunCategory,
+function editPart(
   list: readonly ToolCall[],
   diffsByToolId: Readonly<Record<string, readonly DiffChunk[] | undefined>>,
+  cardDiffs: readonly DiffChunk[],
 ): ToolRunSummaryPart {
-  const count = list.length;
+  const callDiffs = (call: ToolCall) =>
+    call.id ? diffsByToolId[call.id] ?? [] : [];
+  const diffs = [...list.flatMap(callDiffs), ...cardDiffs];
+  const files = uniqueCount(
+    [
+      ...list.flatMap((call) => editedPaths(call, callDiffs(call))),
+      ...cardDiffs.map((diff) => diff.file_name),
+    ],
+    list.length + (cardDiffs.length > 0 ? 1 : 0),
+  );
+  const rest = plural(files, "file", "files");
+  const stats = diffs.length > 0 ? getDiffStats(diffs) : null;
+  return stats && !stats.limited
+    ? {
+        category: "edit",
+        verb: "Edited",
+        rest,
+        stats: { added: stats.added, removed: stats.removed },
+      }
+    : { category: "edit", verb: "Edited", rest };
+}
+
+type CountedCategory = Exclude<ToolRunCategory, "edit">;
+
+type CategoryLabel = {
+  verb: string;
+  noun?: readonly [string, string];
+};
+
+const CATEGORY_LABELS: Readonly<Record<CountedCategory, CategoryLabel>> = {
+  run: { verb: "Ran", noun: ["command", "commands"] },
+  script: { verb: "Ran", noun: ["script", "scripts"] },
+  read: { verb: "Read", noun: ["file", "files"] },
+  search: { verb: "Searched" },
+  browse: { verb: "Browsed" },
+  analyze: { verb: "Analyzed code" },
+  agents: { verb: "Started", noun: ["agent", "agents"] },
+  message: { verb: "Sent", noun: ["message", "messages"] },
+  check: { verb: "Checked agents" },
+  manage: { verb: "Managed agents" },
+  wait: { verb: "Waited" },
+  processes: { verb: "Managed processes" },
+  plan: { verb: "Updated plan" },
+  planRead: { verb: "Checked plan" },
+  memory: { verb: "Saved", noun: ["memory", "memories"] },
+  other: { verb: "Used", noun: ["other tool", "other tools"] },
+  notice: { verb: "Received", noun: ["notice", "notices"] },
+};
+
+function categoryCount(
+  category: CountedCategory,
+  list: readonly ToolCall[],
+  cards: ToolRunCards,
+): number {
   switch (category) {
-    case "edit": {
-      const diffs = list.flatMap((call) =>
-        call.id ? diffsByToolId[call.id] ?? [] : [],
-      );
-      const files = uniqueCount(
-        list.flatMap((call) =>
-          editedPaths(call, call.id ? diffsByToolId[call.id] ?? [] : []),
-        ),
-        count,
-      );
-      const rest = plural(files, "file", "files");
-      const stats = diffs.length > 0 ? getDiffStats(diffs) : null;
-      return stats && !stats.limited
-        ? {
-            category,
-            verb: "Edited",
-            rest,
-            stats: { added: stats.added, removed: stats.removed },
-          }
-        : { category, verb: "Edited", rest };
-    }
-    case "run":
-      return {
-        category,
-        verb: "Ran",
-        rest: plural(count, "command", "commands"),
-      };
     case "read":
-      return {
-        category,
-        verb: "Read",
-        rest: plural(
-          uniqueCount(list.flatMap(readPaths), count),
-          "file",
-          "files",
-        ),
-      };
-    case "search":
-      return { category, verb: "Searched", rest: `${count}×` };
-    case "browse":
-      return { category, verb: "Browsed", rest: `${count}×` };
-    case "agents":
-      return {
-        category,
-        verb: "Started",
-        rest: plural(count, "agent", "agents"),
-      };
-    case "other":
-      return {
-        category,
-        verb: "Used",
-        rest: plural(count, "other tool", "other tools"),
-      };
+      return uniqueCount(list.flatMap(readPaths), list.length);
+    case "notice":
+      return cards.notices;
+    default:
+      return list.length;
   }
+}
+
+function countedPart(
+  category: CountedCategory,
+  count: number,
+): ToolRunSummaryPart {
+  const { verb, noun } = CATEGORY_LABELS[category];
+  return {
+    category,
+    verb,
+    rest: noun ? plural(count, noun[0], noun[1]) : `${count}×`,
+  };
 }
 
 export function summarizeToolRun(
   calls: readonly ToolCall[],
   states: ReadonlyMap<string, ToolRunCallState>,
   diffsByToolId: Readonly<Record<string, readonly DiffChunk[] | undefined>>,
+  cards: ToolRunCards = NO_CARDS,
 ): ToolRunSummary {
   const byCategory = new Map<ToolRunCategory, ToolCall[]>();
   for (const call of calls) {
-    const category = toolRunCategory(call.function.name);
+    const category = toolRunCategory(call);
     const list = byCategory.get(category) ?? [];
     list.push(call);
     byCategory.set(category, list);
@@ -274,8 +398,15 @@ export function summarizeToolRun(
 
   const parts: ToolRunSummaryPart[] = [];
   for (const category of TOOL_RUN_CATEGORY_ORDER) {
-    const list = byCategory.get(category);
-    if (list) parts.push(categoryPart(category, list, diffsByToolId));
+    const list = byCategory.get(category) ?? [];
+    if (category === "edit") {
+      if (list.length > 0 || cards.diffs.length > 0) {
+        parts.push(editPart(list, diffsByToolId, cards.diffs));
+      }
+      continue;
+    }
+    const count = categoryCount(category, list, cards);
+    if (count > 0) parts.push(countedPart(category, count));
   }
 
   const failed = calls.filter(
@@ -455,6 +586,7 @@ export type DisplayItemToolRun = {
   members: readonly DisplayItem[];
   owners: readonly ToolRunOwner[];
   diffsByToolId: Readonly<Record<string, readonly DiffChunk[] | undefined>>;
+  cards: ToolRunCards;
 };
 
 export type TranscriptDisplayItem = DisplayItem | DisplayItemToolRun;
@@ -462,18 +594,12 @@ export type TranscriptDisplayItem = DisplayItem | DisplayItemToolRun;
 type Piece = {
   item: DisplayItem;
   work: boolean;
-  calls: number;
+  steps: number;
 };
 
 type ToolChunk =
   | { kind: "work"; calls: ToolCall[] }
   | { kind: "breaker"; call: ToolCall };
-
-const ATTACHMENT_EXCLUDED_IDS: ReadonlySet<string> = new Set([
-  "knowledge_enrichment",
-  "project_context",
-  "buddy_project_memory_pulse",
-]);
 
 function hasReasoning(item: DisplayItemAssistant): boolean {
   const message = item.message;
@@ -540,12 +666,12 @@ function chunkPiece(
       view: { ...EMPTY_VIEW, toolCalls: calls, ...extra },
     },
     work: chunk.kind === "work",
-    calls: calls.length,
+    steps: calls.length,
   };
 }
 
 function wholePiece(item: DisplayItemAssistant, work: boolean): Piece[] {
-  return [{ item, work, calls: 0 }];
+  return [{ item, work, steps: 0 }];
 }
 
 function buildAssistantPieces(item: DisplayItemAssistant): Piece[] {
@@ -567,7 +693,7 @@ function buildAssistantPieces(item: DisplayItemAssistant): Piece[] {
           view: { ...EMPTY_VIEW, reasoning: true },
         },
         work: true,
-        calls: 0,
+        steps: 0,
       });
     }
     pieces.push({
@@ -581,7 +707,7 @@ function buildAssistantPieces(item: DisplayItemAssistant): Piece[] {
         },
       },
       work: false,
-      calls: 0,
+      steps: 0,
     });
     chunks.forEach((chunk, index) => {
       pieces.push(
@@ -599,7 +725,7 @@ function buildAssistantPieces(item: DisplayItemAssistant): Piece[] {
       pieces.push({
         item: { ...item, view: { ...EMPTY_VIEW, reasoning: true } },
         work: true,
-        calls: 0,
+        steps: 0,
       });
     }
     chunks.forEach((chunk, index) => {
@@ -629,7 +755,7 @@ const piecesCache = new WeakMap<DisplayItemAssistant, Piece[]>();
 const pieceSource = new WeakMap<DisplayItem, DisplayItemAssistant>();
 
 function assistantPieces(item: DisplayItemAssistant): Piece[] {
-  if (item.view) return [{ item, work: !item.view.prose, calls: 0 }];
+  if (item.view) return [{ item, work: !item.view.prose, steps: 0 }];
   const cached = piecesCache.get(item);
   if (cached) return cached;
   const pieces = buildAssistantPieces(item);
@@ -640,12 +766,25 @@ function assistantPieces(item: DisplayItemAssistant): Piece[] {
   return pieces;
 }
 
-function isAttachment(item: DisplayItem): boolean {
-  if (item.type === "diff_group") return true;
-  return (
-    item.type === "context_files" &&
-    !ATTACHMENT_EXCLUDED_IDS.has(item.toolCallId ?? "")
-  );
+function isWorkCard(item: DisplayItem): boolean {
+  switch (item.type) {
+    case "event":
+      return item.event.subkind !== VERIFIER_REPORT_SUBKIND;
+    case "tool_job_result":
+    case "context_files":
+    case "diff_group":
+    case "summarization":
+    case "skill_activated":
+      return true;
+    default:
+      return false;
+  }
+}
+
+function cardPiece(item: DisplayItem): Piece {
+  return isWorkCard(item)
+    ? { item, work: true, steps: 1 }
+    : { item, work: false, steps: 0 };
 }
 
 function groupOwners(members: readonly DisplayItem[]): ToolRunOwner[] {
@@ -669,6 +808,19 @@ function groupDiffs(
     if (chunks) diffs[call.id] = chunks;
   }
   return diffs;
+}
+
+function groupCards(members: readonly DisplayItem[]): ToolRunCards {
+  return {
+    notices: members.filter(
+      (member) => member.type !== "assistant" && member.type !== "diff_group",
+    ).length,
+    diffs: members.flatMap((member) =>
+      member.type === "diff_group"
+        ? member.diffs.flatMap((message) => message.content)
+        : [],
+    ),
+  };
 }
 
 const memberCache = new WeakMap<DisplayItemAssistant, DisplayItemAssistant>();
@@ -695,40 +847,90 @@ function groupMember(item: DisplayItem): DisplayItem {
   return member;
 }
 
-const groupCache = new WeakMap<DisplayItem, DisplayItemToolRun>();
+const MEMBER_COMPARE_DEPTH = 3;
 
-function toolRunItem(segmentItems: DisplayItem[]): DisplayItemToolRun {
+function isList(value: unknown): value is readonly unknown[] {
+  return Array.isArray(value);
+}
+
+function sameContent(left: unknown, right: unknown, depth: number): boolean {
+  if (Object.is(left, right)) return true;
+  if (depth === 0) return false;
+  if (isList(left) || isList(right)) {
+    return (
+      isList(left) &&
+      isList(right) &&
+      left.length === right.length &&
+      left.every((value, index) => sameContent(value, right[index], depth - 1))
+    );
+  }
+  if (!isRecord(left) || !isRecord(right)) return false;
+  const keys = Object.keys(left);
+  return (
+    keys.length === Object.keys(right).length &&
+    keys.every(
+      (key) =>
+        Object.prototype.hasOwnProperty.call(right, key) &&
+        sameContent(left[key], right[key], depth - 1),
+    )
+  );
+}
+
+function sameMembers(
+  previous: readonly DisplayItem[],
+  members: readonly DisplayItem[],
+): boolean {
+  return sameContent(previous, members, MEMBER_COMPARE_DEPTH + 1);
+}
+
+function previousGroups(
+  previous: readonly TranscriptDisplayItem[],
+): ReadonlyMap<string, DisplayItemToolRun> {
+  const groups = new Map<string, DisplayItemToolRun>();
+  for (const item of previous) {
+    if (item.type === "tool_run") groups.set(item.key, item);
+  }
+  return groups;
+}
+
+function toolRunItem(
+  segmentItems: DisplayItem[],
+  reusable: ReadonlyMap<string, DisplayItemToolRun>,
+): DisplayItemToolRun {
   const members = segmentItems.map(groupMember);
   const first = members[0];
-  const cached = groupCache.get(first);
-  if (
-    cached?.members.length === members.length &&
-    cached.members.every((member, index) => member === members[index])
-  ) {
-    return cached;
-  }
+  const key = `run:${first.key}`;
+  const previous = reusable.get(key);
+  if (previous && sameMembers(previous.members, members)) return previous;
   const owners = groupOwners(members);
-  const group: DisplayItemToolRun = {
+  return {
     type: "tool_run",
-    key: `run:${first.key}`,
+    key,
     messageIndex: first.messageIndex,
     members,
     owners,
     diffsByToolId: groupDiffs(owners),
+    cards: groupCards(members),
   };
-  groupCache.set(first, group);
-  return group;
 }
 
-export function groupToolRuns(items: DisplayItem[]): TranscriptDisplayItem[] {
+export function groupToolRuns(
+  items: DisplayItem[],
+  previous: readonly TranscriptDisplayItem[] = [],
+): TranscriptDisplayItem[] {
   const output: TranscriptDisplayItem[] = [];
+  const groups = previousGroups(previous);
   let segment: Piece[] = [];
-  let inAssistantChain = false;
 
   const close = (followed: boolean) => {
-    const calls = segment.reduce((total, piece) => total + piece.calls, 0);
-    if (followed && calls >= MIN_GROUP_CALLS) {
-      output.push(toolRunItem(segment.map((piece) => piece.item)));
+    const steps = segment.reduce((total, piece) => total + piece.steps, 0);
+    if (followed && steps >= MIN_GROUP_STEPS) {
+      output.push(
+        toolRunItem(
+          segment.map((piece) => piece.item),
+          groups,
+        ),
+      );
     } else {
       for (const piece of segment) output.push(piece.item);
     }
@@ -736,16 +938,8 @@ export function groupToolRuns(items: DisplayItem[]): TranscriptDisplayItem[] {
   };
 
   for (const item of items) {
-    let pieces: Piece[];
-    if (item.type === "assistant") {
-      pieces = assistantPieces(item);
-      inAssistantChain = pieces.at(-1)?.work ?? false;
-    } else if (inAssistantChain && isAttachment(item)) {
-      pieces = [{ item, work: true, calls: 0 }];
-    } else {
-      pieces = [{ item, work: false, calls: 0 }];
-      inAssistantChain = false;
-    }
+    const pieces =
+      item.type === "assistant" ? assistantPieces(item) : [cardPiece(item)];
     for (const piece of pieces) {
       if (piece.work) {
         segment.push(piece);

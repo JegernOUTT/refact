@@ -301,6 +301,10 @@ export const ChatContent: React.FC<ChatContentProps> = ({
   const prevChatIdRef = useRef(renderChatId);
   const prevDisplayMessagesRef = useRef<ChatMessages | null>(null);
   const prevDisplayItemsRef = useRef<DisplayItem[] | null>(null);
+  const prevTranscriptRef = useRef<{
+    chatId: string;
+    items: TranscriptDisplayItem[];
+  } | null>(null);
   const [visibleCompression, setVisibleCompression] =
     useState(compressionActive);
   const compressionVisibleSinceRef = useRef<number | null>(
@@ -474,10 +478,15 @@ export const ChatContent: React.FC<ChatContentProps> = ({
     return nextItems;
   }, [messages, isStreaming]);
 
-  const transcriptItems = useMemo(
-    () => groupToolRuns(displayItems),
-    [displayItems],
-  );
+  const transcriptItems = useMemo(() => {
+    const previous = prevTranscriptRef.current;
+    const items = groupToolRuns(
+      displayItems,
+      previous?.chatId === renderChatId ? previous.items : [],
+    );
+    prevTranscriptRef.current = { chatId: renderChatId, items };
+    return items;
+  }, [displayItems, renderChatId]);
 
   const initialScrollIndex = useMemo(() => {
     return transcriptItems.length > 0 ? transcriptItems.length - 1 : undefined;
