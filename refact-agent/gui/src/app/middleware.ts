@@ -135,6 +135,7 @@ import {
 } from "../events/hostDecisionTracker";
 import { upsertToolCallIntoHistory } from "../features/History/historySlice";
 import {
+  extractExecMetadata,
   getEventMetadata,
   isDiffChunk,
   isEventMessage,
@@ -228,8 +229,11 @@ import { selectActiveGitRoot } from "../features/Workspace/GitPanel/gitPanelSlic
 import { gitReadApi } from "../services/refact/gitRead";
 import {
   clearTerminalChatState,
+  completedSessionsReconciled,
+  MAX_RECENTLY_CLOSED_PROCESSES,
+  selectTerminalSessions,
   sessionAdded,
-  sessionStatusChanged,
+  sessionRemoved,
   terminalSessionFromProcess,
 } from "../features/Workspace/TerminalPanel/terminalSlice";
 
@@ -1517,6 +1521,32 @@ startListening({
   },
 });
 
+function isSettledExecStatus(status: string): boolean {
+  return (
+    status === "exited" ||
+    status === "failed" ||
+    status === "killed" ||
+    status === "timed_out" ||
+    status === "sandbox_launcher_failed"
+  );
+}
+
+function settledProcessId(message: ChatMessage): string | undefined {
+  const completion = readRecoveredProcessCompletion(message);
+  if (completion && isSettledExecStatus(completion.status)) {
+    return completion.processId;
+  }
+  if (!isToolMessage(message)) return;
+  const exec =
+    extractExecMetadata(message.extra) ??
+    ("exec" in message
+      ? extractExecMetadata({ exec: message.exec })
+      : undefined);
+  if (exec?.process_id && exec.status && isSettledExecStatus(exec.status)) {
+    return exec.process_id;
+  }
+}
+
 startListening({
   actionCreator: applyChatEvent,
   effect: (action, listenerApi) => {
@@ -1537,25 +1567,50 @@ startListening({
     }
     if (event.type === "process_completed") {
       const { status } = event;
-      if (
-        status !== "starting" &&
-        status !== "running" &&
-        status !== "exited" &&
-        status !== "failed" &&
-        status !== "killed" &&
-        status !== "timed_out"
-      ) {
-        return;
+      if (isSettledExecStatus(status)) {
+        listenerApi.dispatch(
+          sessionRemoved({
+            chatId: event.chat_id,
+            processId: event.process_id,
+          }),
+        );
       }
-      listenerApi.dispatch(
-        sessionStatusChanged({
-          chatId: event.chat_id,
-          processId: event.process_id,
-          status,
-          exit_code: event.exit_code,
-          ended_at_ms: Date.now(),
-        }),
+    }
+    if (event.type === "message_added" || event.type === "message_updated") {
+      const processId = settledProcessId(event.message);
+      if (processId) {
+        listenerApi.dispatch(
+          sessionRemoved({ chatId: event.chat_id, processId }),
+        );
+      }
+    }
+    if (event.type === "snapshot") {
+      const sessions = selectTerminalSessions(
+        listenerApi.getState(),
+        event.chat_id,
       );
+      const openIds = new Set(sessions.map((session) => session.process_id));
+      const completedIds = new Set<string>();
+      const recentIds = new Set<string>();
+      for (let index = event.messages.length - 1; index >= 0; index -= 1) {
+        const processId = settledProcessId(event.messages[index]);
+        if (!processId) continue;
+        if (openIds.delete(processId)) completedIds.add(processId);
+        if (recentIds.size < MAX_RECENTLY_CLOSED_PROCESSES)
+          recentIds.add(processId);
+        if (
+          openIds.size === 0 &&
+          recentIds.size === MAX_RECENTLY_CLOSED_PROCESSES
+        ) {
+          break;
+        }
+      }
+      const processIds = [...completedIds, ...Array.from(recentIds).reverse()];
+      if (processIds.length > 0) {
+        listenerApi.dispatch(
+          completedSessionsReconciled({ chatId: event.chat_id, processIds }),
+        );
+      }
     }
     if (event.type === "ide_tool_required") {
       listenerApi.dispatch(

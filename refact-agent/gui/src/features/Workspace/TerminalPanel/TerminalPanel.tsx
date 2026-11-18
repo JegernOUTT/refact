@@ -41,19 +41,16 @@ import {
 } from "../workspaceSlice";
 import {
   activeSessionChanged,
-  expiredSessionsPruned,
   isFinishedStatus,
   selectActiveTerminalProcessId,
   selectTerminalSessions,
   selectTerminalWorkbenchOpen,
   sessionAdded,
-  sessionExpiresAt,
   sessionRemoved,
   sessionsReattached,
   sessionStatusChanged,
   setTerminalWorkbenchOpen,
   terminalSessionFromProcess,
-  type TerminalSessionMetadata,
 } from "./terminalSlice";
 import styles from "./TerminalPanel.module.css";
 
@@ -72,36 +69,6 @@ type TerminalPanelStyle = CSSProperties & {
 
 function viewportHeight(): number {
   return typeof window === "undefined" ? Number.NaN : window.innerHeight;
-}
-
-function isRunning(status: ExecStatus): boolean {
-  return status === "running" || status === "starting";
-}
-
-type SessionTone = "running" | "error" | "success" | "idle";
-
-function sessionTone({
-  status,
-  exit_code: exitCode,
-}: TerminalSessionMetadata): SessionTone {
-  if (isRunning(status)) return "running";
-  if (status === "failed" || status === "timed_out" || status === "killed") {
-    return "error";
-  }
-  if (status === "exited" && typeof exitCode === "number") {
-    return exitCode === 0 ? "success" : "error";
-  }
-  return "idle";
-}
-
-function sessionStatusLabel({
-  status,
-  exit_code: exitCode,
-}: TerminalSessionMetadata): string {
-  if (status === "exited" && typeof exitCode === "number") {
-    return `exit ${exitCode}`;
-  }
-  return status.replace(/_/g, " ");
 }
 
 export function TerminalPanel({ chatId }: { chatId: string }) {
@@ -131,7 +98,6 @@ function ChatTerminalPanel({ chatId }: { chatId: string }) {
   const [listAttempt, setListAttempt] = useState(0);
   const [dragging, setDragging] = useState(false);
   const lastFittedRef = useRef<{ rows: number; cols: number } | null>(null);
-  const latestSessionsRef = useRef(sessions);
   const panelRef = useRef<HTMLElement>(null);
   const liveHeightRef = useRef(drawer.height);
   const dragCleanupRef = useRef<(() => void) | null>(null);
@@ -165,7 +131,6 @@ function ChatTerminalPanel({ chatId }: { chatId: string }) {
       config.lspUrl,
     ],
   );
-  latestSessionsRef.current = sessions;
   const height = clampDrawerHeight(drawer.height, viewportHeight());
   liveHeightRef.current = height;
   const activeSession =
@@ -182,27 +147,10 @@ function ChatTerminalPanel({ chatId }: { chatId: string }) {
         if (cancelled) return;
         setDisabled(false);
         setError(null);
-        const now = Date.now();
-        const reattachedSessions = response.processes.map((process) =>
-          terminalSessionFromProcess({
-            ...process,
-            ended_at_ms:
-              process.ended_at_ms ??
-              (isFinishedStatus(process.status) ? now : undefined),
-          }),
-        );
-        const reattachedProcessIds = new Set(
-          reattachedSessions.map((session) => session.process_id),
-        );
         dispatch(
           sessionsReattached({
             chatId,
-            sessions: [
-              ...reattachedSessions,
-              ...latestSessionsRef.current.filter(
-                (session) => !reattachedProcessIds.has(session.process_id),
-              ),
-            ],
+            sessions: response.processes.map(terminalSessionFromProcess),
           }),
         );
       })
@@ -265,7 +213,7 @@ function ChatTerminalPanel({ chatId }: { chatId: string }) {
 
   const handleCloseSession = useCallback(
     async (processId: string, status: ExecStatus) => {
-      const running = isRunning(status);
+      const running = !isFinishedStatus(status);
       if (
         running &&
         !window.confirm("This terminal is still running. Stop and close it?")
@@ -284,40 +232,11 @@ function ChatTerminalPanel({ chatId }: { chatId: string }) {
   );
 
   const handleStatusChange = useCallback(
-    (
-      processId: string,
-      status: ExecStatus,
-      exitCode?: number | null,
-      endedAtMs?: number | null,
-    ) => {
-      dispatch(
-        sessionStatusChanged({
-          chatId,
-          processId,
-          status,
-          ...(exitCode === undefined ? {} : { exit_code: exitCode }),
-          ...(endedAtMs === undefined ? {} : { ended_at_ms: endedAtMs }),
-        }),
-      );
+    (processId: string, status: ExecStatus) => {
+      dispatch(sessionStatusChanged({ chatId, processId, status }));
     },
     [chatId, dispatch],
   );
-
-  useEffect(() => {
-    const keepProcessId = workbenchOpen ? activeProcessId : null;
-    const deadlines = sessions
-      .filter((session) => session.process_id !== keepProcessId)
-      .map(sessionExpiresAt)
-      .filter((expiresAt): expiresAt is number => expiresAt !== null);
-    if (deadlines.length === 0) return;
-    const delay = Math.max(0, Math.min(...deadlines) - Date.now());
-    const timer = setTimeout(() => {
-      dispatch(
-        expiredSessionsPruned({ chatId, now: Date.now(), keepProcessId }),
-      );
-    }, delay);
-    return () => clearTimeout(timer);
-  }, [activeProcessId, chatId, dispatch, sessions, workbenchOpen]);
 
   const handleSessionResize = useCallback(
     (_processId: string, rows: number, cols: number) => {
@@ -547,15 +466,12 @@ function ChatTerminalPanel({ chatId }: { chatId: string }) {
         >
           {sessions.map((session, index) => {
             const active = session.process_id === activeProcessId;
-            const tone = sessionTone(session);
-            const statusLabel = sessionStatusLabel(session);
             const tabId = `${tabListId}-tab-${index}`;
             const panelId = `${tabListId}-panel-${index}`;
             return (
               <div
                 key={session.process_id}
                 className={classNames(styles.tab, active && styles.tabActive)}
-                data-tone={tone}
               >
                 <button
                   type="button"
@@ -564,7 +480,7 @@ function ChatTerminalPanel({ chatId }: { chatId: string }) {
                   aria-controls={panelId}
                   aria-selected={active}
                   aria-expanded={workbenchOpen}
-                  aria-label={`${session.title}, ${statusLabel}`}
+                  aria-label={`${session.title}, ${session.status}`}
                   title={session.title}
                   className={styles.tabSelect}
                   onClick={(event) => {
@@ -588,9 +504,9 @@ function ChatTerminalPanel({ chatId }: { chatId: string }) {
                       : -1
                   }
                 >
-                  <StatusDot status={tone} pulse={tone === "running"} />
+                  <StatusDot status="running" pulse />
                   <span className={styles.tabTitle}>{session.label}</span>
-                  <span className={styles.tabStatus}>{statusLabel}</span>
+                  <span className={styles.tabStatus}>{session.status}</span>
                 </button>
                 <button
                   type="button"

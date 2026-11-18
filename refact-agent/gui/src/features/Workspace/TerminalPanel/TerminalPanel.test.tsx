@@ -1,10 +1,11 @@
 import { readFileSync } from "node:fs";
 
 import { screen, waitFor } from "@testing-library/react";
-import { act } from "react-dom/test-utils";
 import { http, HttpResponse } from "msw";
+import { act } from "react-dom/test-utils";
 import { beforeEach, describe, expect, test, vi } from "vitest";
 
+import type { ChatMessage } from "../../../services/refact/types";
 import { render } from "../../../utils/test-utils";
 import { server } from "../../../utils/mockServer";
 import { applyChatEvent, createChatWithId } from "../../Chat/Thread";
@@ -18,9 +19,8 @@ import {
 } from "../workspaceSlice";
 import { TerminalPanel } from "./TerminalPanel";
 import {
-  activeSessionChanged,
-  FINISHED_SESSION_TTL_MS,
-  sessionAdded,
+  selectActiveTerminalProcessId,
+  selectTerminalSessions,
   selectTerminalWorkbenchOpen,
   setTerminalWorkbenchOpen,
 } from "./terminalSlice";
@@ -112,6 +112,33 @@ function openWorkbench(
   chatId = "chat-a",
 ) {
   view.store.dispatch(setTerminalWorkbenchOpen({ chatId, open: true }));
+}
+
+function processCompleted(processId: string, description: string, seq: string) {
+  return applyChatEvent({
+    chat_id: "chat-a",
+    seq,
+    type: "message_added",
+    index: Number(seq) - 2,
+    message: {
+      message_id: `completed-${processId}`,
+      role: "event",
+      content: `Background process '${description}' exited (exit 0)`,
+      event: {
+        subkind: "process_completed",
+        source: "exec.registry",
+        payload: {
+          process_id: processId,
+          status: "exited",
+          exit_code: 0,
+          duration_ms: 1234,
+          short_description: description,
+          mode: "background",
+          push: "none",
+        },
+      },
+    } as ChatMessage,
+  });
 }
 
 describe("TerminalPanel", () => {
@@ -234,20 +261,29 @@ describe("TerminalPanel", () => {
     expect(screen.getByText("Read-only")).toBeVisible();
   });
 
-  test("adds spawned process tabs live and retains their exit status", async () => {
+  test("immediately closes completed process tabs, including the selected tab and a collapsed background tab", async () => {
     server.use(
-      http.get("*/v1/exec/list", () => HttpResponse.json({ processes: [] })),
-      http.get("*/v1/exec/tool-1234/read", () =>
+      http.get("*/v1/exec/list", () =>
         HttpResponse.json({
-          chunks: [{ seq: 0, stream: "combined", text: "live output" }],
-          next_seq: 1,
-          status: "running",
+          processes: [
+            { process_id: "hidden-task", command_preview: "hidden task" },
+            { process_id: "fallback-task", command_preview: "fallback task" },
+          ].map((process) => ({
+            ...process,
+            status: "running",
+            created_at_ms: 1,
+            tty: false,
+            service_name: null,
+          })),
         }),
+      ),
+      http.get("*/v1/exec/:processId/read", () =>
+        HttpResponse.json({ chunks: [], next_seq: 0, status: "running" }),
       ),
     );
     const view = renderTerminalPanel();
-    openWorkbench(view);
-    await screen.findByText("No terminal sessions");
+    const fallback = await screen.findByRole("tab", { name: /fallback task/i });
+    const hidden = screen.getByRole("tab", { name: /hidden task/i });
 
     view.store.dispatch(
       applyChatEvent({
@@ -257,7 +293,7 @@ describe("TerminalPanel", () => {
         process: {
           process_id: "tool-1234",
           command_preview: "git status",
-          mode: "foreground",
+          mode: "background",
           tty: false,
           status: "running",
           started_at: 1,
@@ -265,29 +301,84 @@ describe("TerminalPanel", () => {
       }),
     );
 
-    expect(
-      await screen.findByRole("tab", { name: /git status · tool-123/i }),
-    ).toHaveTextContent("running");
-    expect(screen.getByText("Read-only")).toBeVisible();
+    const selected = await screen.findByRole("tab", {
+      name: /git status · tool-123/i,
+    });
+    await view.user.click(selected);
+    expect(selected).toHaveAttribute("aria-selected", "true");
+    expect(selected).toHaveAttribute("aria-expanded", "true");
+    expect(selected).toHaveTextContent("running");
 
-    view.store.dispatch(
-      applyChatEvent({
-        chat_id: "chat-a",
-        seq: "2",
-        type: "process_completed",
-        process_id: "tool-1234",
-        status: "exited",
-        exit_code: 0,
-        short_description: "git status",
-        mode: "foreground",
-      }),
-    );
-
-    await waitFor(() =>
+    act(() => {
+      view.store.dispatch(processCompleted("tool-1234", "git status", "2"));
+      const state = view.store.getState();
       expect(
-        screen.getByRole("tab", { name: /git status · tool-123/i }),
-      ).toHaveTextContent("exit 0"),
+        selectTerminalSessions(state, "chat-a").map((s) => s.process_id),
+      ).not.toContain("tool-1234");
+      expect(selectActiveTerminalProcessId(state, "chat-a")).toBe(
+        "fallback-task",
+      );
+    });
+    expect(selected).not.toBeInTheDocument();
+    expect(fallback).toHaveAttribute("aria-selected", "true");
+    expect(fallback).toHaveAttribute("aria-expanded", "true");
+
+    await view.user.click(screen.getByRole("button", { name: /^Terminal$/ }));
+    expect(hidden).toHaveAttribute("aria-expanded", "false");
+    expect(hidden).toHaveAttribute("aria-selected", "false");
+    act(() => {
+      view.store.dispatch(processCompleted("hidden-task", "hidden task", "3"));
+    });
+    expect(hidden).not.toBeInTheDocument();
+    expect(fallback).toHaveAttribute("aria-selected", "true");
+    expect(fallback).toHaveAttribute("aria-expanded", "false");
+  });
+
+  test("immediately closes a collapsed foreground tab from the tool result", async () => {
+    server.use(
+      http.get("*/v1/exec/list", () =>
+        HttpResponse.json({
+          processes: [
+            {
+              process_id: "foreground-task",
+              status: "running",
+              command_preview: "pwd",
+              created_at_ms: 1,
+              tty: false,
+              service_name: null,
+            },
+          ],
+        }),
+      ),
     );
+    const { store } = renderTerminalPanel();
+    const tab = await screen.findByRole("tab", { name: /pwd · foregrou/i });
+    expect(tab).toHaveAttribute("aria-expanded", "false");
+
+    act(() => {
+      store.dispatch(
+        applyChatEvent({
+          chat_id: "chat-a",
+          seq: "1",
+          type: "message_added",
+          index: 0,
+          message: {
+            message_id: "result-foreground-task",
+            role: "tool",
+            tool_call_id: "call-foreground-task",
+            content: "/project",
+            exec: {
+              process_id: "foreground-task",
+              status: "exited",
+              mode: "foreground",
+              exit_code: 0,
+            },
+          } as ChatMessage,
+        }),
+      );
+      expect(selectTerminalSessions(store.getState(), "chat-a")).toEqual([]);
+    });
+    expect(tab).not.toBeInTheDocument();
   });
 
   test("keeps a live spawn when mount reconciliation resolves afterward", async () => {
@@ -301,7 +392,7 @@ describe("TerminalPanel", () => {
           }),
       ),
       http.get("*/v1/exec/quick-123/read", () =>
-        HttpResponse.json({ chunks: [], next_seq: 0, status: "exited" }),
+        HttpResponse.json({ chunks: [], next_seq: 0, status: "running" }),
       ),
     );
     const view = renderTerminalPanel();
@@ -326,11 +417,107 @@ describe("TerminalPanel", () => {
     await screen.findByRole("tab", { name: /pwd · quick-12/i });
 
     resolveList?.(HttpResponse.json({ processes: [] }));
+    await waitFor(() =>
+      expect(screen.queryByText("Finding terminal sessions…")).toBeNull(),
+    );
 
-    expect(
-      await screen.findByRole("tab", { name: /pwd · quick-12/i }),
-    ).toBeVisible();
+    expect(screen.getByRole("tab", { name: /pwd · quick-12/i })).toBeVisible();
   });
+
+  test.each(["live event", "snapshot"] as const)(
+    "does not resurrect a completed process from a %s when a stale list resolves",
+    async (source) => {
+      let resolveList: ((response: HttpResponse) => void) | undefined;
+      server.use(
+        http.get(
+          "*/v1/exec/list",
+          () =>
+            new Promise<HttpResponse>((resolve) => {
+              resolveList = resolve;
+            }),
+        ),
+      );
+      const view = renderTerminalPanel();
+      await waitFor(() => expect(resolveList).toBeDefined());
+
+      const completion = processCompleted("stale-task", "stale task", "2");
+      if (source === "live event") {
+        view.store.dispatch(
+          applyChatEvent({
+            chat_id: "chat-a",
+            seq: "1",
+            type: "exec_process_spawned",
+            process: {
+              process_id: "stale-task",
+              command_preview: "stale task",
+              mode: "background",
+              tty: false,
+              status: "running",
+              started_at: 1,
+            },
+          }),
+        );
+        await screen.findByRole("tab", { name: /stale task/i });
+      }
+      act(() => {
+        if (source === "live event") {
+          view.store.dispatch(completion);
+          return;
+        }
+        if (completion.payload.type !== "message_added")
+          throw new Error("Expected completion message");
+        view.store.dispatch(
+          applyChatEvent({
+            chat_id: "chat-a",
+            seq: "2",
+            type: "snapshot",
+            thread: {
+              id: "chat-a",
+              title: "Test",
+              model: "test-model",
+              mode: "AGENT",
+              tool_use: "agent",
+              boost_reasoning: false,
+              context_tokens_cap: null,
+              include_project_info: true,
+              checkpoints_enabled: true,
+              is_title_generated: false,
+            },
+            runtime: {
+              state: "idle",
+              paused: false,
+              error: null,
+              queue_size: 0,
+              pause_reasons: [],
+              queued_items: [],
+            },
+            messages: [completion.payload.message],
+            background_agents: [],
+          }),
+        );
+      });
+      expect(screen.queryByRole("tab", { name: /stale task/i })).toBeNull();
+
+      resolveList?.(
+        HttpResponse.json({
+          processes: [
+            { process_id: "stale-task", command_preview: "stale task" },
+            { process_id: "live-task", command_preview: "live task" },
+          ].map((process) => ({
+            ...process,
+            status: "running",
+            created_at_ms: 1,
+            tty: false,
+            service_name: null,
+          })),
+        }),
+      );
+      expect(
+        await screen.findByRole("tab", { name: /live task/i }),
+      ).toBeVisible();
+      expect(screen.queryByRole("tab", { name: /stale task/i })).toBeNull();
+    },
+  );
 
   test("closes transports while switching tabs and collapsing", async () => {
     server.use(
@@ -445,30 +632,31 @@ describe("TerminalPanel", () => {
     expect(await screen.findByLabelText("Terminal input")).toHaveFocus();
   });
 
-  test("reattaches every TTY status without opening hidden transports", async () => {
+  test("reattaches only live list entries without opening hidden transports", async () => {
+    const read = vi.fn(() =>
+      HttpResponse.json({ chunks: [], next_seq: 0, status: "running" }),
+    );
     server.use(
       http.get("*/v1/exec/list", () =>
         HttpResponse.json({
           processes: [
-            {
-              process_id: "starting-1234",
-              status: "starting",
-              command_preview: "starting-shell",
-              created_at_ms: 1,
-              tty: true,
-              service_name: null,
-            },
-            {
-              process_id: "exited-12345",
-              status: "exited",
-              command_preview: "finished-shell",
-              created_at_ms: 2,
-              tty: true,
-              service_name: null,
-            },
-          ],
+            "starting",
+            "running",
+            "exited",
+            "failed",
+            "killed",
+            "timed_out",
+          ].map((status) => ({
+            process_id: `${status}-1234`,
+            status,
+            command_preview: `${status}-shell`,
+            created_at_ms: 1,
+            tty: true,
+            service_name: null,
+          })),
         }),
       ),
+      http.get("*/v1/exec/:processId/read", read),
     );
 
     renderTerminalPanel();
@@ -476,14 +664,13 @@ describe("TerminalPanel", () => {
     expect(
       await screen.findByRole("tab", { name: /starting-shell · starting/i }),
     ).toBeVisible();
-    expect(
-      screen.getByRole("tab", { name: /finished-shell · exited/i }),
-    ).toBeVisible();
+    expect(screen.getByRole("tab", { name: /running-shell/i })).toBeVisible();
+    expect(screen.getAllByRole("tab")).toHaveLength(2);
+    expect(read).not.toHaveBeenCalled();
     expect(FakeEventSource.instances).toHaveLength(0);
   });
 
-  test("auto-closes finished sessions after ten minutes but keeps the viewed one", async () => {
-    const now = Date.now();
+  test("immediately closes an interactive tab on exit SSE", async () => {
     server.use(
       http.get("*/v1/exec/list", () =>
         HttpResponse.json({
@@ -496,90 +683,33 @@ describe("TerminalPanel", () => {
               tty: true,
               service_name: null,
             },
-            {
-              process_id: "old-task-1",
-              status: "exited",
-              command_preview: "old task",
-              created_at_ms: 2,
-              tty: false,
-              service_name: null,
-              exit_code: 0,
-              ended_at_ms: now - FINISHED_SESSION_TTL_MS - 1_000,
-            },
-            {
-              process_id: "recent-task",
-              status: "exited",
-              command_preview: "recent task",
-              created_at_ms: 3,
-              tty: false,
-              service_name: null,
-              exit_code: 1,
-              ended_at_ms: now,
-            },
           ],
         }),
       ),
-      http.get("*/v1/exec/:processId/read", ({ params }) =>
-        HttpResponse.json(
-          params.processId === "viewed-old"
-            ? {
-                chunks: [],
-                next_seq: 0,
-                status: "exited",
-                exit_code: 0,
-                ended_at_ms: now - FINISHED_SESSION_TTL_MS - 1_000,
-              }
-            : { chunks: [], next_seq: 0, status: "running" },
-        ),
+      http.get("*/v1/exec/live-shell-1/read", () =>
+        HttpResponse.json({ chunks: [], next_seq: 0, status: "running" }),
       ),
-      http.post("*/v1/exec/:processId/resize", () => HttpResponse.json({})),
+      http.post("*/v1/exec/live-shell-1/resize", () => HttpResponse.json({})),
     );
 
     const view = renderTerminalPanel();
-    await screen.findByRole("tab", { name: /recent task · recent-t/i });
-    await waitFor(() =>
-      expect(
-        screen.queryByRole("tab", { name: /old task · old-task/i }),
-      ).toBeNull(),
-    );
-    expect(
-      screen.getByRole("tab", { name: /recent task · recent-t/i }),
-    ).toHaveTextContent("exit 1");
-
     openWorkbench(view);
-    await screen.findByLabelText("Terminal input");
-    act(() => {
-      view.store.dispatch(
-        sessionAdded({
-          chatId: "chat-a",
-          session: {
-            process_id: "viewed-old",
-            label: "viewed task",
-            title: "viewed task · viewed-o",
-            status: "exited",
-            tty: false,
-            exit_code: 0,
-            ended_at_ms: now - FINISHED_SESSION_TTL_MS - 1_000,
-          },
-        }),
-      );
-    });
-    await screen.findByText("Read-only");
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    expect(
-      screen.getByRole("tab", { name: /viewed task · viewed-o/i }),
-    ).toBeVisible();
+    const tab = await screen.findByRole("tab", { name: /\/bin\/zsh/i });
+    await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
+    const source = FakeEventSource.instances[0];
 
     act(() => {
-      view.store.dispatch(
-        activeSessionChanged({ chatId: "chat-a", processId: "live-shell-1" }),
-      );
+      source.emit("exit", {
+        process_id: "live-shell-1",
+        status: "exited",
+        exit_code: 0,
+        ended_at_ms: Date.now(),
+      });
     });
-    await waitFor(() =>
-      expect(
-        screen.queryByRole("tab", { name: /viewed task · viewed-o/i }),
-      ).toBeNull(),
-    );
+
+    expect(tab).not.toBeInTheDocument();
+    expect(screen.getByText("No terminal sessions")).toBeVisible();
+    expect(source.close).toHaveBeenCalled();
   });
 
   test("keeps two explicit chat workbenches isolated", async () => {

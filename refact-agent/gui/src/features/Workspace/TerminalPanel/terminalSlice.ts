@@ -2,7 +2,7 @@ import { createSlice, type PayloadAction } from "@reduxjs/toolkit";
 
 import type { ExecStatus } from "../../../services/refact/exec";
 
-export const FINISHED_SESSION_TTL_MS = 10 * 60_000;
+export const MAX_RECENTLY_CLOSED_PROCESSES = 256;
 
 export function isFinishedStatus(status: ExecStatus): boolean {
   return status !== "starting" && status !== "running";
@@ -14,8 +14,6 @@ export type TerminalSessionMetadata = {
   title: string;
   status: ExecStatus;
   tty?: boolean;
-  exit_code?: number | null;
-  ended_at_ms?: number | null;
 };
 
 export function terminalSessionFromProcess({
@@ -23,15 +21,11 @@ export function terminalSessionFromProcess({
   command_preview: commandPreview,
   status,
   tty,
-  exit_code: exitCode,
-  ended_at_ms: endedAtMs,
 }: {
   process_id: string;
   command_preview?: string;
   status: ExecStatus;
   tty: boolean;
-  exit_code?: number | null;
-  ended_at_ms?: number | null;
 }): TerminalSessionMetadata {
   const preview = commandPreview?.trim();
   const label = preview && preview.length > 0 ? preview : "shell";
@@ -41,40 +35,21 @@ export function terminalSessionFromProcess({
     title: `${label} · ${processId.slice(0, 8)}`,
     status,
     tty,
-    ...(exitCode === undefined ? {} : { exit_code: exitCode }),
-    ...(endedAtMs === undefined ? {} : { ended_at_ms: endedAtMs }),
   };
-}
-
-export function sessionExpiresAt(
-  session: TerminalSessionMetadata,
-): number | null {
-  if (!isFinishedStatus(session.status)) return null;
-  if (typeof session.ended_at_ms !== "number") return null;
-  return session.ended_at_ms + FINISHED_SESSION_TTL_MS;
-}
-
-function nextActiveProcessId(
-  sessions: TerminalSessionMetadata[],
-  removedIndex: number,
-): string | null {
-  return (
-    sessions.at(removedIndex)?.process_id ??
-    sessions.at(removedIndex - 1)?.process_id ??
-    null
-  );
 }
 
 export type TerminalState = {
   sessionsByChat: Record<string, TerminalSessionMetadata[] | undefined>;
   activeProcessIdByChat: Record<string, string | null | undefined>;
   workbenchOpenByChat: Record<string, boolean | undefined>;
+  recentlyClosedByChat: Record<string, string[] | undefined>;
 };
 
 const initialState: TerminalState = {
   sessionsByChat: {},
   activeProcessIdByChat: {},
   workbenchOpenByChat: {},
+  recentlyClosedByChat: {},
 };
 
 type ChatSessionPayload = {
@@ -92,6 +67,28 @@ type ChatProcessPayload = {
   processId: string;
 };
 
+function closeSession(state: TerminalState, chatId: string, processId: string) {
+  const closed = (state.recentlyClosedByChat[chatId] ??= []);
+  if (!closed.includes(processId)) {
+    closed.push(processId);
+    if (closed.length > MAX_RECENTLY_CLOSED_PROCESSES) closed.shift();
+  }
+
+  const sessions = state.sessionsByChat[chatId];
+  if (!sessions) return;
+  const index = sessions.findIndex(
+    (session) => session.process_id === processId,
+  );
+  if (index < 0) return;
+  sessions.splice(index, 1);
+  if (state.activeProcessIdByChat[chatId] === processId) {
+    state.activeProcessIdByChat[chatId] =
+      sessions.at(index)?.process_id ??
+      sessions.at(index - 1)?.process_id ??
+      null;
+  }
+}
+
 export const terminalSlice = createSlice({
   name: "terminal",
   reducerPath: "terminal",
@@ -99,6 +96,13 @@ export const terminalSlice = createSlice({
   reducers: {
     sessionAdded: (state, action: PayloadAction<ChatSessionPayload>) => {
       const { chatId, session } = action.payload;
+      if (isFinishedStatus(session.status)) {
+        closeSession(state, chatId, session.process_id);
+        return;
+      }
+      if (state.recentlyClosedByChat[chatId]?.includes(session.process_id)) {
+        return;
+      }
       const sessions = (state.sessionsByChat[chatId] ??= []);
       const existing = sessions.find(
         (item) => item.process_id === session.process_id,
@@ -111,7 +115,28 @@ export const terminalSlice = createSlice({
       state.activeProcessIdByChat[chatId] = session.process_id;
     },
     sessionsReattached: (state, action: PayloadAction<ChatSessionsPayload>) => {
-      const { chatId, sessions: reattachedSessions } = action.payload;
+      const { chatId, sessions } = action.payload;
+      const knownIds = new Set(sessions.map((session) => session.process_id));
+      const closedIds = new Set(state.recentlyClosedByChat[chatId]);
+      const finishedIds = new Set(
+        sessions
+          .filter((session) => isFinishedStatus(session.status))
+          .map((session) => session.process_id),
+      );
+      for (const session of (state.sessionsByChat[chatId] ?? []).slice()) {
+        if (finishedIds.has(session.process_id))
+          closeSession(state, chatId, session.process_id);
+      }
+      const reattachedSessions = [
+        ...sessions.filter(
+          (session) =>
+            !isFinishedStatus(session.status) &&
+            !closedIds.has(session.process_id),
+        ),
+        ...(state.sessionsByChat[chatId] ?? []).filter(
+          (session) => !knownIds.has(session.process_id),
+        ),
+      ];
       const activeProcessId = state.activeProcessIdByChat[chatId];
       state.sessionsByChat[chatId] = reattachedSessions;
       state.activeProcessIdByChat[chatId] =
@@ -137,72 +162,29 @@ export const terminalSlice = createSlice({
     },
     sessionStatusChanged: (
       state,
-      action: PayloadAction<
-        ChatProcessPayload & {
-          status: ExecStatus;
-          exit_code?: number | null;
-          ended_at_ms?: number | null;
-        }
-      >,
+      action: PayloadAction<ChatProcessPayload & { status: ExecStatus }>,
     ) => {
-      const session = state.sessionsByChat[action.payload.chatId]?.find(
-        (item) => item.process_id === action.payload.processId,
-      );
-      if (session) {
-        session.status = action.payload.status;
-        if (action.payload.exit_code !== undefined) {
-          session.exit_code = action.payload.exit_code;
-        }
-        if (action.payload.ended_at_ms !== undefined) {
-          session.ended_at_ms = action.payload.ended_at_ms;
-        }
+      const { chatId, processId, status } = action.payload;
+      if (isFinishedStatus(status)) {
+        closeSession(state, chatId, processId);
+        return;
       }
+      const session = state.sessionsByChat[chatId]?.find(
+        (item) => item.process_id === processId,
+      );
+      if (session) session.status = status;
     },
     sessionRemoved: (state, action: PayloadAction<ChatProcessPayload>) => {
       const { chatId, processId } = action.payload;
-      const sessions = state.sessionsByChat[chatId];
-      if (!sessions) return;
-      const index = sessions.findIndex(
-        (session) => session.process_id === processId,
-      );
-      if (index === -1) return;
-      sessions.splice(index, 1);
-      if (state.activeProcessIdByChat[chatId] === processId) {
-        state.activeProcessIdByChat[chatId] = nextActiveProcessId(
-          sessions,
-          index,
-        );
-      }
+      closeSession(state, chatId, processId);
     },
-    expiredSessionsPruned: (
+    completedSessionsReconciled: (
       state,
-      action: PayloadAction<{
-        chatId: string;
-        now: number;
-        keepProcessId?: string | null;
-      }>,
+      action: PayloadAction<{ chatId: string; processIds: string[] }>,
     ) => {
-      const { chatId, now, keepProcessId } = action.payload;
-      const sessions = state.sessionsByChat[chatId];
-      if (!sessions) return;
-      for (let index = sessions.length - 1; index >= 0; index -= 1) {
-        const session = sessions[index];
-        const expiresAt = sessionExpiresAt(session);
-        if (
-          expiresAt === null ||
-          expiresAt > now ||
-          session.process_id === keepProcessId
-        ) {
-          continue;
-        }
-        sessions.splice(index, 1);
-        if (state.activeProcessIdByChat[chatId] === session.process_id) {
-          state.activeProcessIdByChat[chatId] = nextActiveProcessId(
-            sessions,
-            index,
-          );
-        }
-      }
+      const { chatId, processIds } = action.payload;
+      for (const processId of processIds)
+        closeSession(state, chatId, processId);
     },
     setTerminalWorkbenchOpen: (
       state,
@@ -226,9 +208,12 @@ export const terminalSlice = createSlice({
         state.activeProcessIdByChat;
       const { [action.payload]: _workbenchOpen, ...otherWorkbenchOpen } =
         state.workbenchOpenByChat;
+      const { [action.payload]: _closed, ...otherClosed } =
+        state.recentlyClosedByChat;
       state.sessionsByChat = otherSessions;
       state.activeProcessIdByChat = otherActiveProcessIds;
       state.workbenchOpenByChat = otherWorkbenchOpen;
+      state.recentlyClosedByChat = otherClosed;
     },
   },
 });
@@ -236,7 +221,7 @@ export const terminalSlice = createSlice({
 export const {
   activeSessionChanged,
   clearTerminalChatState,
-  expiredSessionsPruned,
+  completedSessionsReconciled,
   sessionAdded,
   sessionRemoved,
   sessionsReattached,

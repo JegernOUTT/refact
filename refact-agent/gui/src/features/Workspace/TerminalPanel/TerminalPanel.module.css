@@ -201,10 +201,6 @@
   white-space: nowrap;
 }
 
-.tab[data-tone="error"] .tabStatus {
-  color: var(--rf-color-danger);
-}
-
 .closeButton {
   display: inline-flex;
   flex: 0 0 auto;
@@ -424,9 +420,5 @@
 
   .tabStatus {
     display: none;
-  }
-
-  .tab[data-tone="error"] .tabStatus {
-    display: inline;
   }
 }
