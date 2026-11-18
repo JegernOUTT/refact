@@ -351,6 +351,15 @@ export function VirtualizedChatList<T extends { key: string }>({
         );
 
         if (!wheelHandledByNestedScroller) {
+          if (
+            event.deltaY !== 0 &&
+            !event.ctrlKey &&
+            !event.shiftKey &&
+            !event.defaultPrevented
+          ) {
+            cancelAnchorRestoreRef.current?.();
+            cancelAnchorRestoreRef.current = null;
+          }
           markUserInput();
           if (event.deltaY < 0) {
             autoFollowRef.current = false;

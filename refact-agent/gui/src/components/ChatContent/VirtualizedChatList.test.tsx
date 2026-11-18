@@ -654,111 +654,171 @@ describe("VirtualizedChatList", () => {
     expect(captureScrollAnchor(scroller)).toBeNull();
   });
 
-  test("ToolCard expansion preserves the visible scroll anchor", () => {
-    const animationFrames: FrameRequestCallback[] = [];
-    vi.stubGlobal(
-      "requestAnimationFrame",
-      vi.fn((callback: FrameRequestCallback) => {
-        animationFrames.push(callback);
-        return animationFrames.length;
-      }),
-    );
-    vi.stubGlobal("cancelAnimationFrame", vi.fn());
+  test.each([
+    { input: "no wheel", target: null, deltaY: 0, expectedTop: 336 },
+    {
+      input: "transcript wheel up",
+      target: "chat-virtuoso-scroller",
+      deltaY: -166,
+      expectedTop: 138,
+    },
+    {
+      input: "transcript wheel down",
+      target: "chat-virtuoso-scroller",
+      deltaY: 166,
+      expectedTop: 470,
+    },
+    {
+      input: "nested wheel up",
+      target: "nested-tool-output",
+      deltaY: -16,
+      expectedTop: 336,
+    },
+    {
+      input: "horizontal wheel",
+      target: "chat-virtuoso-scroller",
+      deltaY: 0,
+      expectedTop: 336,
+    },
+  ])(
+    "anchors ToolCard expansion appropriately with $input",
+    ({ target, deltaY, expectedTop }) => {
+      vi.useFakeTimers();
 
-    let expanded = false;
+      const initialScrollTop = 240;
+      let expansionHeight = 0;
 
-    function ExpandableToolList() {
-      const [open, setOpen] = useState(false);
-      return (
-        <VirtualizedChatList
-          items={items}
-          renderItem={(item) => {
-            if (item.key === "k-0") {
-              return (
-                <ToolCard
-                  icon={null}
-                  summary="Expandable tool"
-                  status="success"
-                  isOpen={open}
-                  onToggle={() => {
-                    expanded = !expanded;
-                    setOpen((current) => !current);
-                  }}
-                >
-                  <div style={{ height: 64 }}>Expanded</div>
-                </ToolCard>
-              );
-            }
-            return <div>{item.text}</div>;
-          }}
-        />
+      function ExpandableToolList() {
+        const [open, setOpen] = useState(false);
+        return (
+          <VirtualizedChatList
+            items={items}
+            renderItem={(item) => {
+              if (item.key === "k-0") {
+                return (
+                  <ToolCard
+                    icon={null}
+                    summary="Expandable tool"
+                    status="success"
+                    isOpen={open}
+                    onToggle={() => {
+                      expansionHeight = 64;
+                      setOpen(true);
+                    }}
+                  >
+                    <div style={{ height: 64 }}>Expanded</div>
+                  </ToolCard>
+                );
+              }
+              if (item.key === "k-1") {
+                return (
+                  <div
+                    data-testid="nested-tool-output"
+                    style={{ overflowY: "auto" }}
+                  >
+                    <span>{item.text}</span>
+                  </div>
+                );
+              }
+              return <div>{item.text}</div>;
+            }}
+          />
+        );
+      }
+
+      render(
+        <div style={{ height: 400 }}>
+          <ExpandableToolList />
+        </div>,
       );
-    }
 
-    render(
-      <div style={{ height: 400 }}>
-        <ExpandableToolList />
-      </div>,
-    );
+      const scroller = screen.getByTestId("chat-virtuoso-scroller");
+      const nested = screen.getByTestId("nested-tool-output");
+      Object.defineProperties(nested, {
+        scrollTop: { configurable: true, value: 40, writable: true },
+        scrollHeight: { configurable: true, value: 80 },
+        clientHeight: { configurable: true, value: 20 },
+      });
+      Object.defineProperties(scroller, {
+        scrollTop: {
+          configurable: true,
+          value: initialScrollTop,
+          writable: true,
+        },
+        clientHeight: { configurable: true, value: 300 },
+        scrollHeight: { configurable: true, value: 900 },
+      });
+      scroller.getBoundingClientRect = vi.fn(() => ({
+        x: 0,
+        y: 0,
+        width: 320,
+        height: 300,
+        top: 0,
+        right: 320,
+        bottom: 300,
+        left: 0,
+        toJSON: () => ({}),
+      }));
 
-    const scroller = screen.getByTestId("chat-virtuoso-scroller");
-    Object.defineProperties(scroller, {
-      scrollTop: { configurable: true, value: 120, writable: true },
-      clientHeight: { configurable: true, value: 300 },
-      scrollHeight: { configurable: true, value: 900 },
-    });
-    scroller.getBoundingClientRect = vi.fn(() => ({
-      x: 0,
-      y: 0,
-      width: 320,
-      height: 300,
-      top: 0,
-      right: 320,
-      bottom: 300,
-      left: 0,
-      toJSON: () => ({}),
-    }));
-
-    const rows = screen.getAllByTestId("chat-virtuoso-item");
-    rows.forEach((row, index) => {
-      row.getBoundingClientRect = vi.fn(() => {
-        if (index === 0) {
+      const rows = screen.getAllByTestId("chat-virtuoso-item");
+      rows.forEach((row, index) => {
+        row.getBoundingClientRect = vi.fn(() => {
+          if (index === 0) {
+            return {
+              x: 0,
+              y: -140,
+              width: 320,
+              height: 80,
+              top: -140,
+              right: 320,
+              bottom: -60,
+              left: 0,
+              toJSON: () => ({}),
+            };
+          }
+          const top =
+            40 +
+            (index - 1) * 80 +
+            expansionHeight -
+            (scroller.scrollTop - initialScrollTop);
           return {
             x: 0,
-            y: -140,
+            y: top,
             width: 320,
             height: 80,
-            top: -140,
+            top,
             right: 320,
-            bottom: -60,
+            bottom: top + 80,
             left: 0,
             toJSON: () => ({}),
           };
-        }
-        const top = 40 + (index - 1) * 80 + (expanded ? 64 : 0);
-        return {
-          x: 0,
-          y: top,
-          width: 320,
-          height: 80,
-          top,
-          right: 320,
-          bottom: top + 80,
-          left: 0,
-          toJSON: () => ({}),
-        };
+        });
       });
-    });
 
-    fireEvent.click(screen.getByRole("button", { name: /expandable tool/i }));
-    expect(animationFrames.length).toBeGreaterThanOrEqual(1);
+      fireEvent.click(screen.getByRole("button", { name: /expandable tool/i }));
+      act(() => {
+        vi.advanceTimersToNextFrame();
+      });
+      expect(scroller.scrollTop).toBe(304);
 
-    act(() => {
-      animationFrames[0](performance.now());
-    });
-
-    expect(scroller.scrollTop).toBe(184);
-  });
+      expansionHeight += 32;
+      if (target) {
+        const wheelTarget = screen.getByTestId(target);
+        expect(
+          fireEvent.wheel(wheelTarget, {
+            deltaX: deltaY === 0 ? 40 : 0,
+            deltaY,
+          }),
+        ).toBe(true);
+        // Apply the browser's default movement before the next paint or scroll event.
+        wheelTarget.scrollTop += deltaY;
+      }
+      act(() => {
+        vi.advanceTimersToNextFrame();
+      });
+      expect(scroller.scrollTop).toBe(expectedTop);
+    },
+  );
 
   test("prepared ToolCard anchor expires before later toggles", () => {
     vi.useFakeTimers();
