@@ -60,6 +60,10 @@
   outline: none;
 }
 
+.row:has(.pill, .quickAction) .toggle {
+  min-width: var(--rf-space-6);
+}
+
 .icon {
   display: grid;
   flex: 0 0 auto;
@@ -153,7 +157,8 @@
 
 .pill {
   display: inline-flex;
-  flex: 0 0 auto;
+  flex: 0 1 auto;
+  min-width: 0;
   align-items: center;
   height: var(--rf-control-h-sm);
   padding: 0 var(--rf-space-2);
@@ -166,6 +171,11 @@
   white-space: nowrap;
   opacity: var(--rf-motion-opacity-visible);
   transform: scale(var(--rf-motion-scale-active));
+}
+
+.pillLabel {
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .pill[data-visible="false"] {

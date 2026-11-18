@@ -222,7 +222,7 @@ export function TranscriptItem({
       id={pillId}
       data-visible={pillVisible}
     >
-      {pillText}
+      <span className={styles.pillLabel}>{pillText}</span>
     </span>
   );
 

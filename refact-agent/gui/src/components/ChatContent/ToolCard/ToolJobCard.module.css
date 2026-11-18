@@ -1,12 +1,3 @@
-.action {
-  font: inherit;
-  cursor: pointer;
-}
-
-.action:disabled {
-  cursor: default;
-}
-
 .detail {
   font-size: var(--font-size-1);
   color: var(--gray-11);

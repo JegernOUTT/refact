@@ -12,6 +12,8 @@ import {
 import type { ToolCall } from "../../../services/refact/types";
 import { ToolCard } from "./ToolCard";
 import { Badge } from "../../ui/Badge";
+import { Button } from "../../ui/Button";
+import type { TranscriptStatus } from "../TranscriptItem/statusVocabulary";
 import { ArgumentsView } from "./GenericTool";
 import { describeToolCall, parseToolArgs } from "./genericToolTitle";
 import { ToolJobResultsContext } from "./ToolJobResultsContext";
@@ -28,6 +30,16 @@ const labels: Record<ToolJobStatus, string> = {
   failed: "Failed",
   cancelled: "Cancelled",
   unknown: "Outcome unknown",
+};
+
+const transcriptStatuses: Record<ToolJobStatus, TranscriptStatus> = {
+  accepted: "waiting",
+  running: "running",
+  cancel_requested: "waiting",
+  succeeded: "done",
+  failed: "failed",
+  cancelled: "cancelled",
+  unknown: "unknown",
 };
 
 export function ToolJobCompletionCard({
@@ -48,6 +60,7 @@ export function ToolJobCompletionCard({
           : "idle"
       }
       statusLabel={labels[receipt.status]}
+      transcriptStatus={transcriptStatuses[receipt.status]}
       isOpen={false}
       onToggle={() => undefined}
       collapsible={false}
@@ -108,6 +121,7 @@ export function ToolJobCard({
   if (!terminal && matching && isTerminalToolJob(status)) setTerminal(true);
   const visibleStatus =
     cancelRequested && !isTerminalToolJob(status) ? "cancel_requested" : status;
+  const statusUnavailable = !delivered && (sourceChanged || isError);
   const onCancel = async () => {
     setCancelError(false);
     try {
@@ -135,18 +149,19 @@ export function ToolJobCard({
           : "idle"
       }
       statusLabel={
-        !delivered && (sourceChanged || isError)
-          ? "Status unavailable"
-          : labels[visibleStatus]
+        statusUnavailable ? "Status unavailable" : labels[visibleStatus]
+      }
+      transcriptStatus={
+        statusUnavailable ? "unknown" : transcriptStatuses[visibleStatus]
       }
       isOpen={open}
       onToggle={() => setOpen((value) => !value)}
       toolCall={toolCall}
       actions={
         !isTerminalToolJob(status) ? (
-          <button
-            type="button"
-            className={styles.action}
+          <Button
+            size="sm"
+            variant="ghost"
             disabled={
               sourceChanged ||
               isError ||
@@ -159,7 +174,7 @@ export function ToolJobCard({
             aria-label={`Cancel ${receipt.tool_name} background job`}
           >
             Cancel
-          </button>
+          </Button>
         ) : undefined
       }
     >

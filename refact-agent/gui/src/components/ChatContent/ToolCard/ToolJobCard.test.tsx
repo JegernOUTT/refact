@@ -28,23 +28,6 @@ vi.mock("../../../services/refact/toolJobs", async (importOriginal) => ({
   }),
   useCancelToolJobMutation: () => [mocks.cancel, { isLoading: false }],
 }));
-vi.mock("./ToolCard", () => ({
-  ToolCard: ({
-    statusLabel,
-    actions,
-    children,
-  }: {
-    statusLabel: string;
-    actions: React.ReactNode;
-    children: React.ReactNode;
-  }) => (
-    <div>
-      <span>{statusLabel}</span>
-      {actions}
-      {children}
-    </div>
-  ),
-}));
 const receipt = {
   job_id: "job",
   chat_id: "chat",
@@ -187,7 +170,9 @@ describe("background tool job wire validation", () => {
     );
     const draft = screen.getByLabelText("draft");
     draft.focus();
-    expect(screen.getByText("Running in background")).toBeInTheDocument();
+    const pill = screen.getByTestId("transcript-status-pill");
+    expect(pill).toHaveTextContent("Running in background");
+    expect(pill).toHaveAttribute("data-tone", "running");
     mocks.status = "succeeded";
     rerender(
       <>
@@ -215,11 +200,17 @@ describe("background tool job wire validation", () => {
         Promise.resolve({ job_id: "job", status: "cancel_requested" }),
     });
     render(<ToolJobCard receipt={receipt} toolCall={toolCall} />);
-    fireEvent.click(screen.getByRole("button", { name: /cancel/i }));
+    const toggle = screen.getByTestId("transcript-toggle");
+    const cancel = screen.getByRole("button", {
+      name: "Cancel code_health background job",
+    });
+    expect(toggle).not.toContainElement(cancel);
+    fireEvent.click(cancel);
     expect(
       await screen.findByText("Cancellation requested"),
     ).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /cancel/i })).toBeDisabled();
+    expect(cancel).toBeDisabled();
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
     expect(mocks.cancel).toHaveBeenCalledTimes(1);
     expect(mocks.refetch).toHaveBeenCalledTimes(1);
   });
