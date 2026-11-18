@@ -340,6 +340,7 @@ export function normalizeTaskBoard(value: unknown): TaskBoard | null {
     ...(value as unknown as TaskBoard),
     cards: value.cards.filter(isBoardCard).map((card) => ({
       ...card,
+      target_files: Array.isArray(card.target_files) ? card.target_files : [],
       attention: normalizeCardAttention(card.attention),
       paused_at:
         typeof card.paused_at === "string" ? card.paused_at : undefined,
