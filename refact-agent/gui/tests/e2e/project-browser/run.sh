@@ -1,13 +1,14 @@
 #!/bin/sh
 set -eu
 
-if [ "$#" != 2 ]; then
-  echo 'usage: sh tests/e2e/project-browser/run.sh /absolute/path/to/refact /absolute/path/to/chrome' >&2
+if [ "$#" -lt 2 ]; then
+  echo 'usage: sh tests/e2e/project-browser/run.sh /absolute/path/to/refact /absolute/path/to/chrome [playwright args...]' >&2
   exit 2
 fi
 gui=$(cd "$(dirname "$0")/../../.." && pwd)
 engine=$(realpath "$1")
 chrome=$(realpath "$2")
+shift 2
 node=$(command -v node)
 test -x "$engine" && test -x "$chrome" && test -f "$gui/node_modules/@playwright/test/cli.js"
 mkdir -p "$gui/test-results"
@@ -30,6 +31,8 @@ env -i PATH=/usr/bin:/bin:/usr/sbin HOME="$scratch/home" \
     ip link set fixture0 up
     mount --bind "$TMPDIR" /tmp
     export TMPDIR=/tmp
+    node=$1
+    shift
     exec setpriv --bounding-set=-all --inh-caps=-all --ambient-caps=-all --no-new-privs \
-      "$1" node_modules/@playwright/test/cli.js test --config tests/e2e/project-browser/playwright.config.ts
-  ' sh "$node"
+      "$node" node_modules/@playwright/test/cli.js test --config tests/e2e/project-browser/playwright.config.ts "$@"
+  ' sh "$node" "$@"

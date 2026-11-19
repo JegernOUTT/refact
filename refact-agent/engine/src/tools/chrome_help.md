@@ -263,11 +263,18 @@ recorded or replayed.
 
 open_tab, close_tab, switch_tab, list_tabs.
 
-`open_tab` accepts optional `device`/`url`; `close_tab` accepts an optional `tab` and otherwise
-closes active. Closing active selects the preceding tab in adoption order, the next tab when closing
+`open_tab` accepts optional `device`/`url`/`name`; `close_tab` accepts an optional `tab` and
+otherwise closes active. Closing active selects the preceding tab in adoption order, the next tab when closing
 the first, or leaves no active tab.
 
 `target` on the request and `tab` on a step take `{"type":"active"}` or `{"type":"id","id":"..."}`.
+
+In the shared project browser each chat works in its own tab: without an explicit `target`, a call
+continues in the tab this chat used last, claims the active tab if no chat owns it yet, and otherwise
+opens a fresh tab for this chat. Other chats' tabs are only reached with an explicit
+`{"type":"id"}` target. Every report carries `tab_id`, the tab the batch ended on. Give a tab a
+short human name (1-64 characters, no control characters) with `name` on `open_tab` or with the
+request-level `tab_name`, which names the tab the call ends on; `list_tabs` shows the names.
 
 ## frames
 

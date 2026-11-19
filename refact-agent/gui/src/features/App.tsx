@@ -27,6 +27,7 @@ import {
   useResizeObserverOnRef,
 } from "../hooks";
 import { useBrowserOnlineStatus } from "../hooks/useBrowserOnlineStatus";
+import { useProjectBrowserAutoOpen } from "./Workspace/useProjectBrowserAutoOpen";
 import { useChatDeepLink } from "../hooks/useChatDeepLink";
 import { useContentRouting } from "../hooks/useContentRouting";
 import { useInternalNavigation } from "../hooks/useInternalNavigation";
@@ -153,6 +154,7 @@ const WorkspaceApp: React.FC<AppProps> = ({ style }: AppProps) => {
   usePatchesAndDiffsEventsForIDE();
   useSidebarSubscription();
   useAllChatsSubscription();
+  useProjectBrowserAutoOpen();
   useBrowserOnlineStatus();
 
   const config = useConfig();

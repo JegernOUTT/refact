@@ -163,12 +163,14 @@ impl MouseState {
 
 pub struct CdpMouseDispatcher<'a> {
     tab: &'a Tab,
+    hold: Option<crate::tab_gate::TabDispatchHold>,
 }
 
 impl<'a> CdpMouseDispatcher<'a> {
     pub fn new(tab: &'a Tab) -> Self {
         Self {
             tab,
+            hold: None,
         }
     }
 
@@ -268,8 +270,19 @@ impl<'a> CdpMouseDispatcher<'a> {
     }
 }
 
+impl<T: MouseDispatcher + ?Sized> MouseDispatcher for &mut T {
+    fn dispatch(&mut self, event: MouseDispatch) -> Result<(), String> {
+        (**self).dispatch(event)
+    }
+}
+
 impl MouseDispatcher for CdpMouseDispatcher<'_> {
     fn dispatch(&mut self, event: MouseDispatch) -> Result<(), String> {
+        if self.hold.is_none() {
+            self.hold = Some(crate::tab_gate::hold_tab_for_dispatch(
+                self.tab.get_target_id(),
+            )?);
+        }
         match event {
             MouseDispatch::Mouse(payload) => {
                 self.tab

@@ -20,7 +20,7 @@ use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType
 
 use crate::integrations::browser_actions::{self, BrowserAction, DeviceType};
 use crate::integrations::browser_controller;
-use crate::integrations::browser_models::{ExecutionReport, parse_browser_action_request};
+use crate::integrations::browser_models::{ExecutionReport, parse_browser_tool_request};
 use crate::integrations::browser_runtime::{
     BrowserGpuMode, BrowserLaunchOptions, BrowserProxyOptions, BrowserRuntime,
     find_runtime_by_chat_id, launch_with_lock_recovery, runtime_owner_record, transport_death_note,
@@ -170,6 +170,7 @@ const CHROME_DESCRIPTION: &str = concat!(
     "`page_context` picks the page-changed context: `snapshot` (the default) attaches the ref-annotated ARIA snapshot and NO image, `screenshot` attaches a policy-sized image instead, `both` attaches each, `none` attaches only the page header. `attach_screenshot` is the tri-state override and wins over `page_context`: true = always attach, false = never attach, omitted = follow `page_context`. `network` controls per-request report volume: `summary` (the default) emits one `method url status bytes ms` line per request, `full` keeps headers, `none` drops per-request entries.\n",
     "Click, hover, fill, clear, check, and uncheck auto-wait for actionability. Never use `wait_seconds` for readiness; use `wait_for_response`, `wait_for_load_state`, `wait_for_selector`, or `wait_for_function`.\n",
     "Result: one JSON object with `tool`, `summary`, `completion` (steps_requested/reported, failed, unknown, skipped, incomplete) plus `ok`, `steps`, `page`. Under a tight budget it is reduced as JSON: failed and effect-unknown steps are prioritized, with explicit aggregate verdicts and omission counts when step details cannot fit. If even the minimum verdict cannot fit, delivery fails explicitly rather than reporting success. At most 64 steps per call; invalid requests are rejected before the browser starts.\n",
+    "Shared browser tabs: your calls default to your own tab; give it a short human name via the request-level `tab_name`.\n",
     "Recovery: if `recovery.state_lost` is true, nothing interrupted was retried; resend with `acknowledge_session_generation` set to the report's `session_generation`, then navigate again (old refs and tab ids are invalid).\n",
     "Large redacted reports may include `full_report.id`. Read it with `read_artifact` using that opaque id and byte `offset`/`limit` (default 8192, maximum 32768). The result's `content_base64` encodes the exact UTF-8 bytes; decode and concatenate chunks using `next_offset`. Retrieval is scoped to the current runtime, does not create another report artifact, and expired or evicted ids fail explicitly. Managed artifacts are bounded to 64 files, 32 MiB total, 8 MiB per file, with one-hour idle TTL. Secure managed storage is supported on Unix and Windows."
 );
@@ -424,6 +425,7 @@ fn browser_request_schema() -> serde_json::Value {
             "network": {"type": "string", "enum": ["none", "summary", "full"], "description": "summary (default) = one `method url status bytes ms` line per request, full keeps headers, none drops entries"},
             "block_service_workers": {"type": "boolean", "description": "Block service workers for this context (sticky until reset)"},
             "continue_on_error": {"type": "boolean", "description": "Run later steps after a failure (default false); ok stays false"},
+            "tab_name": {"type": "string", "minLength": 1, "maxLength": crate::integrations::browser_models::MAX_TAB_NAME_CHARS, "description": "Short human name for the tab this call ends on (last write wins)"},
             "target": tab_target_schema(),
             "steps": {
                 "type": "array",
@@ -543,7 +545,7 @@ impl Tool for ToolChrome {
             }
         }
 
-        if let Some(request) = preflight_request.as_ref() {
+        if let Some((request, _)) = preflight_request.as_ref() {
             use crate::integrations::browser_models::{BrowserStep, SessionPolicy};
             use crate::integrations::browser_runtime::named_sessions;
             let lifecycle = request.steps.first().is_some_and(|step| {
@@ -652,63 +654,32 @@ impl Tool for ToolChrome {
             }
         }
 
-        let (gcx, chat_id, current_model, project_scope) = {
+        let (app, chat_id, root_chat_id, current_model, execution_scope) = {
             let ccx_lock = ccx.lock().await;
-            let project_scope = if uses_owned_chrome(&self.settings_chrome) {
-                project_browser::project_scope_for_context(
-                    &ccx_lock.app,
-                    ccx_lock.execution_scope.as_ref(),
-                    &ccx_lock.chat_id,
-                    &ccx_lock.root_chat_id,
-                )
-                .await
-                .ok()
-            } else {
-                None
-            };
             (
-                ccx_lock.app.gcx.clone(),
+                ccx_lock.app.clone(),
                 ccx_lock.chat_id.clone(),
+                ccx_lock.root_chat_id.clone(),
                 ccx_lock.current_model.clone(),
-                project_scope,
+                ccx_lock.execution_scope.clone(),
             )
         };
+        let gcx = app.gcx.clone();
         let image_policy = image_policy_for_model(gcx.clone(), &current_model).await;
 
         let session_hashmap_key = get_session_hashmap_key("chrome", &chat_id);
-        let setup = match &project_scope {
-            Some(scope) => {
-                setup_project_chrome_session(
-                    gcx.clone(),
-                    &self.settings_chrome,
-                    &session_hashmap_key,
-                    scope,
-                )
-                .await
-            }
-            None => setup_chrome_session(
-                gcx.clone(),
-                &self.settings_chrome,
-                &session_hashmap_key,
-                &chat_id,
-            )
-            .await
-            .map_err(project_browser::EnsureError::Failed),
-        };
-        let mut tool_log = match setup {
-            Ok(log) => log,
-            Err(project_browser::EnsureError::DecisionRequired {
-                candidate_count,
-            }) => {
-                return Ok((
-                    true,
-                    vec![project_decision_required_message(
-                        tool_call_id,
-                        candidate_count,
-                    )],
-                ));
-            }
-            Err(project_browser::EnsureError::Failed(e)) => {
+        let setup = setup_call_session(
+            &self.settings_chrome,
+            &app,
+            execution_scope.as_ref(),
+            &chat_id,
+            &root_chat_id,
+            &session_hashmap_key,
+        )
+        .await;
+        let (mut tool_log, project_scope) = match setup {
+            Ok(setup) => setup,
+            Err(e) => {
                 crate::buddy::actor::report_error_persisted(
                     crate::app_state::AppState::from_gcx(gcx.clone()).await,
                     "browser_error",
@@ -745,13 +716,13 @@ impl Tool for ToolChrome {
         let mut typed_content: Option<Vec<MultimodalElement>> = None;
         let mut browser_extra = None;
         let mut tool_failed = false;
-        let mut open_project_browser_tab = false;
+        let mut browser_project_hint = None;
 
-        if let Some(request) = preflight_request {
+        if let Some((mut request, tab_name)) = preflight_request {
             let steps_requested = request.steps.len();
-            let project_default = project_scope.is_some()
-                && request.session
-                    == crate::integrations::browser_models::SessionPolicy::SharedDefault;
+            let shared_default = request.session
+                == crate::integrations::browser_models::SessionPolicy::SharedDefault;
+            let project_default = project_scope.is_some() && shared_default;
             let retrieval_only = request.steps.iter().all(|step| {
                 matches!(
                     step,
@@ -779,17 +750,59 @@ impl Tool for ToolChrome {
                 })?
             };
 
-            match browser_controller::execute_request_with_runtime_validated(
+            if project_default
+                && request.target == crate::integrations::browser_models::TabTarget::Active
+            {
+                let mut rt = runtime_arc.lock().await;
+                request.target = tokio::task::block_in_place(|| {
+                    let _deadline = headless_chrome::browser::transport::CommandDeadlineGuard::new(
+                        Instant::now() + CHAT_TAB_SETUP_DEADLINE,
+                    );
+                    project_browser::chat_default_target(&mut rt, &chat_id)
+                })?;
+            }
+            let request_tab = match &request.target {
+                crate::integrations::browser_models::TabTarget::Id {
+                    id,
+                } => Some(id.clone()),
+                crate::integrations::browser_models::TabTarget::Active => None,
+            };
+            match browser_controller::execute_request_with_project_chat(
                 runtime_arc.clone(),
                 request,
                 &image_policy,
                 gcx.clone(),
+                project_default.then_some(chat_id.as_str()),
             )
             .await
             {
                 Ok(report) => {
                     tool_failed = !report.ok;
-                    open_project_browser_tab = project_default && report.ok;
+                    if shared_default {
+                        let mut rt = runtime_arc.lock().await;
+                        let (new_tab_ids, used_tab_id) =
+                            chat_tab_use(&report, request_tab.as_deref(), &rt.known_tab_ids());
+                        refact_browser::record_chat_tab_use(
+                            &mut rt.tab_meta,
+                            &chat_id,
+                            &new_tab_ids,
+                            used_tab_id.as_deref(),
+                            tab_name.as_deref(),
+                            project_browser::now_ms(),
+                        );
+                        if project_default && report.ok {
+                            let name = used_tab_id
+                                .as_ref()
+                                .and_then(|id| rt.tab_meta.get(id))
+                                .and_then(|meta| meta.name.as_deref());
+                            browser_project_hint = project_browser_hint(
+                                &runtime_id,
+                                rt.ownership.is_current_generation(),
+                                used_tab_id.as_deref(),
+                                name,
+                            );
+                        }
+                    }
                     let mut content = execution_report_to_multimodal_with_request(
                         &report,
                         &image_policy,
@@ -886,11 +899,8 @@ impl Tool for ToolChrome {
         if let Some(browser_extra) = browser_extra {
             extra.insert("browser".to_string(), browser_extra);
         }
-        if open_project_browser_tab {
-            extra.insert(
-                "browser_project".to_string(),
-                serde_json::json!({ "open_browser_tab": true }),
-            );
+        if let Some(hint) = browser_project_hint {
+            extra.insert("browser_project".to_string(), hint);
         }
         let msg = ContextEnum::ChatMessage(ChatMessage {
             role: "tool".to_string(),
@@ -1294,6 +1304,124 @@ mod tests {
     }
 
     #[test]
+    fn tab_names_are_validated_before_any_browser_action() {
+        let (request, tab_name) = preflight_browser_request(&json!({
+            "tab_name": "  Docs  ",
+            "steps": [{"action": "open_tab", "name": "Search", "url": "https://example.com"}]
+        }))
+        .unwrap();
+        assert_eq!(tab_name.as_deref(), Some("Docs"));
+        assert!(matches!(
+            &request.steps[0],
+            crate::integrations::browser_models::BrowserStep::OpenTab { name: Some(name), .. } if name == "Search"
+        ));
+        assert_eq!(
+            preflight_browser_request(&json!({"steps": [{"action": "tab_log"}]}))
+                .unwrap()
+                .1,
+            None
+        );
+        for invalid in [
+            json!({"tab_name": "", "steps": [{"action": "tab_log"}]}),
+            json!({"tab_name": "a\u{0}b", "steps": [{"action": "tab_log"}]}),
+            json!({"tab_name": "x".repeat(65), "steps": [{"action": "tab_log"}]}),
+            json!({"tab_name": 5, "steps": [{"action": "tab_log"}]}),
+            json!({"session":"isolated-1","expected_session_id":"opaque","tab_name":"Docs","steps":[{"action":"tab_log"}]}),
+            json!({"tab_name": "Docs", "steps": [{"action": "list_sessions"}]}),
+        ] {
+            assert!(preflight_browser_request(&invalid).is_err(), "{invalid}");
+        }
+        let schema = chrome_input_schema();
+        assert_eq!(
+            schema["properties"]["request"]["properties"]["tab_name"]["maxLength"],
+            64
+        );
+        assert!(CHROME_DESCRIPTION.contains("`tab_name`"));
+        assert!(chrome_help_text(Some("tabs")).contains("`tab_name`"));
+    }
+
+    #[test]
+    fn open_tab_step_names_are_validated_before_any_browser_action() {
+        for name in [json!("   "), json!("a\u{7}b"), json!("x".repeat(65))] {
+            let request = json!({"steps": [
+                {"action": "tab_log"},
+                {"action": "open_tab", "name": name},
+            ]});
+            let error = preflight_browser_request(&request).unwrap_err();
+            assert!(
+                error.contains("step[1] (open_tab): name")
+                    && error.contains("No browser action was run"),
+                "{error}"
+            );
+        }
+        assert!(preflight_browser_request(&json!({"steps": [
+            {"action": "open_tab", "name": "x".repeat(64)},
+        ]}))
+        .is_ok());
+    }
+
+    #[test]
+    fn chat_tab_use_claims_only_live_tabs_the_call_used_or_created() {
+        use crate::integrations::browser_models::{ExecutionReport, StepResult, TabInfo, TabOpener};
+        let tab = |id: &str, opener: Option<&str>| TabInfo {
+            id: id.into(),
+            target_id: id.into(),
+            url: String::new(),
+            title: String::new(),
+            active: false,
+            opener: opener.map(|tab_id| TabOpener {
+                tab_id: tab_id.into(),
+                frame_id: None,
+            }),
+            opened_by_step: None,
+            name: None,
+        };
+        let report = ExecutionReport {
+            steps: vec![StepResult::success(0, "Opened").with_data(json!({"tab_id": "opened"}))],
+            new_tabs: vec![
+                tab("opened", None),
+                tab("popup", Some("mine")),
+                tab("peer-new", None),
+                tab("peer-popup", Some("peer")),
+                tab("closed-popup", Some("mine")),
+            ],
+            tab_id: Some("mine".into()),
+            ..Default::default()
+        };
+        let live = ["mine", "opened", "popup", "peer-new", "peer-popup", "peer"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        assert_eq!(
+            chat_tab_use(&report, Some("mine"), &live),
+            (
+                vec!["opened".to_string(), "popup".to_string()],
+                Some("mine".to_string())
+            )
+        );
+        let closed = ["opened"].into_iter().map(String::from).collect();
+        assert_eq!(
+            chat_tab_use(&report, Some("mine"), &closed),
+            (vec!["opened".to_string()], None)
+        );
+    }
+
+    #[test]
+    fn project_browser_hint_names_the_runtime_and_final_tab() {
+        assert_eq!(
+            project_browser_hint("rt-1", true, Some("tab-9"), Some("Docs")),
+            Some(
+                json!({"open_browser_tab": true, "runtime_id": "rt-1", "tab_id": "tab-9", "tab_name": "Docs"})
+            )
+        );
+        assert_eq!(project_browser_hint("rt-1", true, None, None), None);
+        assert_eq!(
+            project_browser_hint("rt-1", false, Some("tab-9"), None),
+            None
+        );
+    }
+
+    #[test]
     fn named_and_discovery_preflight_refuses_unsafe_contracts() {
         for invalid in [
             json!({"session":"named","steps":[{"action":"tab_log"}]}),
@@ -1438,22 +1566,113 @@ mod tests {
         );
     }
 
+    async fn managed_app(
+        pinned_root: &std::path::Path,
+    ) -> (Arc<GlobalContext>, crate::app_state::AppState) {
+        let mut gcx = crate::global_context::tests::make_test_gcx().await;
+        {
+            let cmdline = &mut Arc::get_mut(&mut gcx).unwrap().cmdline;
+            cmdline.daemon_endpoint = "http://127.0.0.1:8488".into();
+            cmdline.project_id = "project-a".into();
+            cmdline.workspace_folder = pinned_root.to_str().unwrap().into();
+        }
+        let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
+        (gcx, app)
+    }
+
+    async fn add_live_chat(
+        app: &crate::app_state::AppState,
+        chat_id: &str,
+        root: Option<&std::path::Path>,
+    ) {
+        let mut session = crate::chat::types::ChatSession::new(chat_id.into());
+        session.work_project_root = root.map(Into::into);
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(chat_id.into(), Arc::new(AMutex::new(session)));
+    }
+
+    async fn dispatch_without_chrome(
+        app: &crate::app_state::AppState,
+        chat_id: &str,
+        root_chat_id: &str,
+    ) -> String {
+        setup_call_session(
+            &SettingsChrome {
+                chrome_path: "/nonexistent/refact-test-chrome".into(),
+                ..Default::default()
+            },
+            app,
+            None,
+            chat_id,
+            root_chat_id,
+            &get_session_hashmap_key("chrome", chat_id),
+        )
+        .await
+        .unwrap_err()
+    }
+
+    async fn assert_no_browser(gcx: &Arc<GlobalContext>, chat_id: &str) {
+        let key = get_session_hashmap_key("chrome", chat_id);
+        assert!(gcx.integration_sessions.lock().await.get(&key).is_none());
+        assert!(gcx.browser_runtimes.lock().await.is_empty());
+    }
+
+    const PER_CHAT_LAUNCH: &str = "Failed to start chrome in";
+    const PROJECT_LAUNCH: &str = "Failed to start the project browser";
+
+    #[tokio::test]
+    async fn managed_worker_refuses_a_foreign_project_chat_without_any_browser() {
+        let project_a = tempfile::tempdir().unwrap();
+        let project_b = tempfile::tempdir().unwrap();
+        let (gcx, app) = managed_app(project_a.path()).await;
+        add_live_chat(&app, "on-b", Some(project_b.path())).await;
+        let error = dispatch_without_chrome(&app, "on-b", "on-b").await;
+        assert!(error.contains("different project"), "{error}");
+        assert_no_browser(&gcx, "on-b").await;
+    }
+
+    #[tokio::test]
+    async fn managed_worker_refuses_a_chat_whose_project_root_is_gone() {
+        let project_a = tempfile::tempdir().unwrap();
+        let (gcx, app) = managed_app(project_a.path()).await;
+        let gone = tempfile::tempdir().unwrap();
+        add_live_chat(&app, "on-gone", Some(gone.path())).await;
+        drop(gone);
+        let error = dispatch_without_chrome(&app, "on-gone", "on-gone").await;
+        assert!(error.contains("no longer accessible"), "{error}");
+        assert_no_browser(&gcx, "on-gone").await;
+
+        add_live_chat(&app, "on-pinned", Some(project_a.path())).await;
+        drop(project_a);
+        let error = dispatch_without_chrome(&app, "on-pinned", "on-pinned").await;
+        assert!(error.contains("no longer accessible"), "{error}");
+        assert!(!error.contains(PER_CHAT_LAUNCH), "{error}");
+        assert_no_browser(&gcx, "on-pinned").await;
+    }
+
+    #[tokio::test]
+    async fn managed_worker_gives_a_live_chat_without_a_root_the_pinned_project() {
+        let project_a = tempfile::tempdir().unwrap();
+        let (gcx, app) = managed_app(project_a.path()).await;
+        add_live_chat(&app, "rootless", None).await;
+        let error = dispatch_without_chrome(&app, "rootless", "rootless").await;
+        assert!(error.contains(PROJECT_LAUNCH), "{error}");
+        assert_no_browser(&gcx, "rootless").await;
+    }
+
+    #[tokio::test]
+    async fn sessionless_tool_contexts_keep_the_per_chat_browser() {
+        let project_a = tempfile::tempdir().unwrap();
+        let (_gcx, app) = managed_app(project_a.path()).await;
+        let error = dispatch_without_chrome(&app, "http-only", "").await;
+        assert!(error.contains(PER_CHAT_LAUNCH), "{error}");
+    }
+
     #[test]
-    fn project_decision_message_signals_the_browser_tab_without_chat_ids_or_paths() {
-        let ContextEnum::ChatMessage(message) = project_decision_required_message("call-1", 2)
-        else {
-            panic!("expected a chat message");
-        };
-        assert_eq!(message.tool_call_id, "call-1");
-        assert_eq!(
-            message.extra["browser_project"],
-            serde_json::json!({"decision_required": true, "candidate_count": 2, "open_browser_tab": true})
-        );
-        let ChatContent::SimpleText(text) = &message.content else {
-            panic!("expected text content");
-        };
-        assert!(text.contains("no browser was started"), "{text}");
-        assert!(!text.contains('/'), "{text}");
+    fn only_locally_launched_chrome_uses_the_project_browser() {
         assert!(uses_owned_chrome(&SettingsChrome::default()));
         for remote in ["ws://127.0.0.1:9222/devtools", "container://chrome:9222"] {
             assert!(!uses_owned_chrome(&SettingsChrome {
@@ -1635,31 +1854,87 @@ mod tests {
     }
 }
 
-fn uses_owned_chrome(settings: &SettingsChrome) -> bool {
-    !settings.chrome_path.starts_with("ws://") && !settings.chrome_path.starts_with("container://")
+const CHAT_TAB_SETUP_DEADLINE: Duration = Duration::from_secs(30);
+
+/// The live tabs a chat call may claim: new tabs it opened itself (by a step that reported
+/// them or as popups of a tab it used) and the tab it ended on.
+fn chat_tab_use(
+    report: &crate::integrations::browser_models::ExecutionReport,
+    request_tab: Option<&str>,
+    live: &std::collections::BTreeSet<String>,
+) -> (Vec<String>, Option<String>) {
+    let used = report
+        .steps
+        .iter()
+        .filter_map(|step| step.data.as_ref()?.get("tab_id")?.as_str())
+        .chain(request_tab)
+        .chain(report.tab_id.as_deref())
+        .collect::<std::collections::HashSet<_>>();
+    let new_tabs = report
+        .new_tabs
+        .iter()
+        .filter(|tab| live.contains(&tab.id))
+        .filter(|tab| {
+            used.contains(tab.id.as_str())
+                || tab
+                    .opener
+                    .as_ref()
+                    .is_some_and(|opener| used.contains(opener.tab_id.as_str()))
+        })
+        .map(|tab| tab.id.clone())
+        .collect();
+    let tab_id = report.tab_id.clone().filter(|id| live.contains(id));
+    (new_tabs, tab_id)
 }
 
-fn project_decision_required_message(tool_call_id: &str, candidate_count: usize) -> ContextEnum {
-    let mut extra = serde_json::Map::new();
-    extra.insert(
-        "browser_project".to_string(),
-        serde_json::json!({
-            "decision_required": true,
-            "candidate_count": candidate_count,
-            "open_browser_tab": true,
-        }),
-    );
-    ContextEnum::ChatMessage(ChatMessage {
-        role: "tool".to_string(),
-        content: ChatContent::SimpleText(
-            project_browser::EnsureError::DecisionRequired { candidate_count }.to_string()
-                + "; no browser was started and no action was run. Ask the user to choose in the Browser tab, then retry.",
-        ),
-        tool_calls: None,
-        tool_call_id: tool_call_id.to_string(),
-        extra,
-        ..Default::default()
-    })
+/// The open hint names a live tab of the current runtime generation, or is not emitted.
+fn project_browser_hint(
+    runtime_id: &str,
+    current_generation: bool,
+    tab_id: Option<&str>,
+    tab_name: Option<&str>,
+) -> Option<Value> {
+    let tab_id = tab_id.filter(|_| current_generation)?;
+    Some(serde_json::json!({
+        "open_browser_tab": true,
+        "runtime_id": runtime_id,
+        "tab_id": tab_id,
+        "tab_name": tab_name,
+    }))
+}
+
+/// Sets up the session of a non-named browser call and returns its log and project scope: the
+/// project browser for a locally owned call with a project scope, the per-chat browser when
+/// `project_scope_for_context` gives none or for an external Chrome. A managed worker's refusal stays an error and never
+/// falls back to a per-chat browser.
+async fn setup_call_session(
+    settings: &SettingsChrome,
+    app: &crate::app_state::AppState,
+    execution_scope: Option<&crate::worktrees::scope::ExecutionScope>,
+    chat_id: &str,
+    root_chat_id: &str,
+    session_hashmap_key: &String,
+) -> Result<(Vec<String>, Option<project_browser::ProjectBrowserScope>), String> {
+    let scope = if uses_owned_chrome(settings) {
+        project_browser::project_scope_for_context(app, execution_scope, chat_id, root_chat_id)
+            .await?
+    } else {
+        None
+    };
+    let log = match &scope {
+        Some(scope) => {
+            setup_project_chrome_session(app.gcx.clone(), settings, session_hashmap_key, scope)
+                .await?
+        }
+        None => {
+            setup_chrome_session(app.gcx.clone(), settings, session_hashmap_key, chat_id).await?
+        }
+    };
+    Ok((log, scope))
+}
+
+fn uses_owned_chrome(settings: &SettingsChrome) -> bool {
+    !settings.chrome_path.starts_with("ws://") && !settings.chrome_path.starts_with("container://")
 }
 
 /// The default browser of a chat is its project's shared runtime; the per-chat session only
@@ -1669,7 +1944,7 @@ async fn setup_project_chrome_session(
     args: &SettingsChrome,
     session_hashmap_key: &String,
     scope: &project_browser::ProjectBrowserScope,
-) -> Result<Vec<String>, project_browser::EnsureError> {
+) -> Result<Vec<String>, String> {
     let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
     let launch_options = args.launch_options();
     let idle_timeout = launch_options.idle_timeout_or_default();
@@ -1925,7 +2200,7 @@ async fn session_open_tab(
                         .clone()
                 };
                 let runtime_lock = runtime_arc.lock().await;
-                runtime_lock.browser.new_tab().map_err(|e| e.to_string())?
+                runtime_lock.open_tab()?
             };
             let current_settings = browser_settings::current();
             let browser_viewport = &current_settings.viewport;
@@ -2057,6 +2332,40 @@ async fn session_get_tab_arc(
     }
 }
 
+/// Runs a legacy command's blocking CDP work with the tab's dispatch gate available to it.
+async fn run_legacy_tab_dispatch<T>(
+    gcx: &Arc<GlobalContext>,
+    chrome_session: &Arc<AMutex<Box<dyn IntegrationSession>>>,
+    tab: &headless_chrome::Tab,
+    work: impl FnOnce() -> T,
+) -> Result<T, String> {
+    let runtime_id = {
+        let mut session_locked = chrome_session.lock().await;
+        session_locked
+            .as_any_mut()
+            .downcast_mut::<ChromeSession>()
+            .ok_or("Failed to downcast to ChromeSession")?
+            .runtime_id
+            .clone()
+    };
+    let runtime = gcx.browser_runtimes.lock().await.get(&runtime_id).cloned();
+    let target_id = tab.get_target_id().to_string();
+    let gate = match runtime {
+        Some(runtime) => Some(runtime.lock().await.tab_gate(&target_id)),
+        None => None,
+    };
+    let deadline = Instant::now() + LEGACY_DISPATCH_DEADLINE;
+    Ok(tokio::task::block_in_place(|| {
+        let _gates = refact_browser::tab_gate::enter_step_gates(
+            gate.map(|gate| (target_id, gate)).into_iter().collect(),
+            deadline,
+        );
+        work()
+    }))
+}
+
+const LEGACY_DISPATCH_DEADLINE: Duration = Duration::from_secs(300);
+
 async fn execute_via_controller(
     action: &BrowserAction,
     chrome_session: Arc<AMutex<Box<dyn IntegrationSession>>>,
@@ -2122,9 +2431,10 @@ async fn execute_via_controller(
         }
     }
 
-    let report = tokio::task::block_in_place(|| {
+    let report = run_legacy_tab_dispatch(&gcx, &chrome_session, &headless_tab, || {
         browser_controller::execute_steps(&headless_tab, &steps, image_policy)
-    });
+    })
+    .await?;
 
     {
         let runtime_id = {
@@ -2413,7 +2723,13 @@ const MAX_CHROME_BATCH_STEPS: usize = 64;
 
 fn preflight_browser_request(
     request_value: &Value,
-) -> Result<crate::integrations::browser_models::BrowserActionRequest, String> {
+) -> Result<
+    (
+        crate::integrations::browser_models::BrowserActionRequest,
+        Option<String>,
+    ),
+    String,
+> {
     if let Some(count) = request_value
         .get("steps")
         .and_then(Value::as_array)
@@ -2425,7 +2741,7 @@ fn preflight_browser_request(
             ));
         }
     }
-    let parsed = parse_browser_action_request(request_value.clone()).map_err(|e| {
+    let (parsed, tab_name) = parse_browser_tool_request(request_value.clone()).map_err(|e| {
         format!("argument `request` is invalid: {e}. No browser action was run; see {{\"steps\":[{{\"action\":\"help\"}}]}} for per-action fields.")
     })?;
     use crate::integrations::browser_models::{BrowserStep, SessionPolicy, valid_browser_session_name};
@@ -2475,6 +2791,9 @@ fn preflight_browser_request(
         }
         SessionPolicy::SharedDefault if parsed.expected_session_id.is_some() => {
             return Err("expected_session_id is only valid for named sessions".into())
+        }
+        SessionPolicy::Named(_) if tab_name.is_some() => {
+            return Err("tab_name is only valid for the shared default session".into())
         }
         _ => {}
     }
@@ -2537,7 +2856,7 @@ fn preflight_browser_request(
             _ => {}
         }
     }
-    Ok(parsed)
+    Ok((parsed, tab_name))
 }
 
 /// Completion accounting for the compact report envelope. `unknown` counts steps whose
@@ -3318,17 +3637,24 @@ async fn chrome_command_exec(
             };
             let log = {
                 let tab_lock = tab.lock().await;
-                match {
-                    let mapped_point = Point {
-                        x: x / tab_lock.screenshot_scale_factor,
-                        y: y / tab_lock.screenshot_scale_factor,
-                    };
-                    tab_lock
-                        .headless_tab
-                        .click_point(mapped_point)
-                        .map_err(|e| e.to_string())?;
-                    Ok::<(), String>(())
-                } {
+                let mapped_point = Point {
+                    x: x / tab_lock.screenshot_scale_factor,
+                    y: y / tab_lock.screenshot_scale_factor,
+                };
+                let headless_tab = tab_lock.headless_tab.clone();
+                let clicked = run_legacy_tab_dispatch(&gcx, &chrome_session, &headless_tab, || {
+                    refact_browser::tab_gate::with_tab_dispatch(
+                        headless_tab.get_target_id(),
+                        || {
+                            headless_tab
+                                .click_point(mapped_point)
+                                .map(|_| ())
+                                .map_err(|e| e.to_string())
+                        },
+                    )
+                })
+                .await?;
+                match clicked {
                     Ok(_) => {
                         format!("clicked `{} {}` at {}", x, y, tab_lock.state_string())
                     }
@@ -3359,7 +3685,20 @@ async fn chrome_command_exec(
             };
             let log = {
                 let tab_lock = tab.lock().await;
-                match tab_lock.headless_tab.type_str(text.as_str()) {
+                let headless_tab = tab_lock.headless_tab.clone();
+                let typed = run_legacy_tab_dispatch(&gcx, &chrome_session, &headless_tab, || {
+                    refact_browser::tab_gate::with_tab_dispatch(
+                        headless_tab.get_target_id(),
+                        || {
+                            headless_tab
+                                .type_str(text.as_str())
+                                .map(|_| ())
+                                .map_err(|e| e.to_string())
+                        },
+                    )
+                })
+                .await?;
+                match typed {
                     Ok(_) => {
                         format!("type `{}` at {}", text, tab_lock.state_string())
                     }

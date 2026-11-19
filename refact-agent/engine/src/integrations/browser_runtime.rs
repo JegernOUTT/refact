@@ -288,13 +288,42 @@ fn user_data_dir_arg(arg: &str) -> Option<&Path> {
 
 /// A process owns a profile only when one of its arguments is exactly `--user-data-dir=<profile>`;
 /// a sibling profile whose path merely starts with this one (`…/abc-sub`) is someone else's.
-fn process_owns_profile(pid: u32, profile_dir: &Path) -> bool {
-    let Some(args) = process_args(pid) else {
-        return false;
-    };
-    args.iter()
-        .filter_map(|arg| user_data_dir_arg(arg))
-        .any(|dir| dir == profile_dir)
+/// `None` when the process arguments cannot be read on this platform.
+fn process_owns_profile(pid: u32, profile_dir: &Path) -> Option<bool> {
+    let args = process_args(pid)?;
+    Some(
+        args.iter()
+            .filter_map(|arg| user_data_dir_arg(arg))
+            .any(|dir| dir == profile_dir),
+    )
+}
+
+fn lock_owner_unverified(pid_alive: bool, owns_profile: Option<bool>) -> bool {
+    pid_alive && owns_profile.is_none()
+}
+
+/// Fail-closed check for moving a profile: besides a live or foreign lock, a lock that cannot
+/// be read or parsed, a `SingletonLock` that is not a symlink, or a live pid that cannot be
+/// matched to the profile counts as in use.
+pub fn profile_possibly_in_use(profile_dir: &Path) -> bool {
+    lock_state_possibly_in_use(read_profile_lock_state(profile_dir), profile_dir)
+}
+
+fn lock_state_possibly_in_use(
+    state: std::io::Result<ProfileLockState>,
+    profile_dir: &Path,
+) -> bool {
+    match state {
+        Ok(ProfileLockState::Absent) => false,
+        Ok(ProfileLockState::Stale(lock)) => lock_owner_unverified(
+            pid_is_alive(lock.pid),
+            process_owns_profile(lock.pid, profile_dir),
+        ),
+        Ok(ProfileLockState::Unparseable(_))
+        | Ok(ProfileLockState::Live(_))
+        | Ok(ProfileLockState::Foreign(_))
+        | Err(_) => true,
+    }
 }
 
 /// Which process a removed runtime is allowed to terminate. Only the generation being removed
@@ -336,12 +365,6 @@ pub fn parse_profile_lock(target: &str) -> Option<ProfileLock> {
     })
 }
 
-fn read_profile_lock(profile_dir: &Path) -> Option<Result<ProfileLock, String>> {
-    let target = std::fs::read_link(profile_dir.join("SingletonLock")).ok()?;
-    let target = target.to_string_lossy().into_owned();
-    Some(parse_profile_lock(&target).ok_or(target))
-}
-
 pub fn local_hostname() -> String {
     hostname::get()
         .map(|name| name.to_string_lossy().into_owned())
@@ -372,16 +395,42 @@ impl ProfileLockState {
     }
 }
 
+/// A lock that exists but cannot be read stays absent here, as launch has always treated it.
 pub fn profile_lock_state(profile_dir: &Path) -> ProfileLockState {
-    match read_profile_lock(profile_dir) {
-        None => ProfileLockState::Absent,
-        Some(Err(target)) => ProfileLockState::Unparseable(target),
-        Some(Ok(lock)) if lock.host != local_hostname() => ProfileLockState::Foreign(lock),
-        Some(Ok(lock)) if pid_is_alive(lock.pid) && process_owns_profile(lock.pid, profile_dir) => {
+    read_profile_lock_state(profile_dir).unwrap_or(ProfileLockState::Absent)
+}
+
+/// Classifies the `SingletonLock` from one `read_link`: only a missing lock is absent, any
+/// other read failure is returned as an error.
+fn read_profile_lock_state(profile_dir: &Path) -> std::io::Result<ProfileLockState> {
+    lock_state_from_link(
+        std::fs::read_link(profile_dir.join("SingletonLock")),
+        profile_dir,
+    )
+}
+
+fn lock_state_from_link(
+    link: std::io::Result<PathBuf>,
+    profile_dir: &Path,
+) -> std::io::Result<ProfileLockState> {
+    let target = match link {
+        Ok(target) => target.to_string_lossy().into_owned(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(ProfileLockState::Absent)
+        }
+        Err(error) => return Err(error),
+    };
+    Ok(match parse_profile_lock(&target) {
+        None => ProfileLockState::Unparseable(target),
+        Some(lock) if lock.host != local_hostname() => ProfileLockState::Foreign(lock),
+        Some(lock)
+            if pid_is_alive(lock.pid)
+                && process_owns_profile(lock.pid, profile_dir) == Some(true) =>
+        {
             ProfileLockState::Live(lock)
         }
-        Some(Ok(lock)) => ProfileLockState::Stale(lock),
-    }
+        Some(lock) => ProfileLockState::Stale(lock),
+    })
 }
 
 /// Removes singleton artifacts left by a dead Chrome on this host. Never touches a profile
@@ -2369,6 +2418,31 @@ mod tests {
                 assert_eq!(live, owns.then_some(pid), "--user-data-dir={user_data_dir}");
             }
         }
+    }
+
+    #[test]
+    fn one_lock_read_decides_and_only_a_missing_lock_is_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = lock_state_from_link(Err(std::io::ErrorKind::NotFound.into()), dir.path());
+        assert_eq!(missing.unwrap(), ProfileLockState::Absent);
+        assert!(!lock_state_possibly_in_use(
+            Ok(ProfileLockState::Absent),
+            dir.path()
+        ));
+        for kind in [
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::InvalidInput,
+            std::io::ErrorKind::Other,
+        ] {
+            let state = lock_state_from_link(Err(kind.into()), dir.path());
+            assert!(state.is_err(), "{kind:?}");
+            assert!(lock_state_possibly_in_use(state, dir.path()), "{kind:?}");
+        }
+        let unparseable = lock_state_from_link(Ok("garbage".into()), dir.path()).unwrap();
+        assert_eq!(unparseable, ProfileLockState::Unparseable("garbage".into()));
+        std::fs::write(dir.path().join("SingletonLock"), b"").unwrap();
+        assert_eq!(profile_lock_state(dir.path()), ProfileLockState::Absent);
+        assert!(profile_possibly_in_use(dir.path()));
     }
 
     #[test]

@@ -177,6 +177,12 @@ fn trusted_click(
     handle: &ElementHandle,
     action: ActionKind,
 ) -> Result<(), ActionabilityDiagnostic> {
+    let _dispatch =
+        crate::tab_gate::hold_tab_for_dispatch(tab.get_target_id()).map_err(|description| {
+            ActionabilityDiagnostic::PrecheckFailed {
+                description,
+            }
+        })?;
     let dispatcher = CdpMouseDispatcher::new(tab);
     let point = dispatcher.clickable_point(handle).map_err(|error| {
         ActionabilityDiagnostic::PrecheckFailed {
@@ -356,6 +362,10 @@ pub fn fill(
     let target = control.as_ref().unwrap_or(handle);
     let outcome =
         run_actionability(tab, world, target, ActionKind::Fill, false).and_then(|actionability| {
+            let _dispatch =
+                crate::tab_gate::hold_tab_for_dispatch(tab.get_target_id()).map_err(|error| {
+                    FormError::new(error).with_actionability(Some(actionability.clone()))
+                })?;
             let mut executor = CdpFillExecutor {
                 tab,
                 world,
@@ -830,6 +840,8 @@ fn call_mutating_json(
     function: &str,
     arguments: Vec<Value>,
 ) -> Result<Value, FormError> {
+    let _dispatch =
+        crate::tab_gate::hold_tab_for_dispatch(tab.get_target_id()).map_err(FormError::new)?;
     let value = world
         .call_function_on(tab, handle, function, arguments)
         .map_err(|error| {

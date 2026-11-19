@@ -1,3 +1,4 @@
+import { createAction } from "@reduxjs/toolkit";
 import { createApi, fetchBaseQuery } from "@reduxjs/toolkit/query/react";
 import type { FetchArgs, FetchBaseQueryError } from "@reduxjs/toolkit/query";
 import { RootState } from "../../app/store";
@@ -662,24 +663,17 @@ export const BROWSER_PROJECT_NAVIGATE = "/v1/browser/project/navigate";
 export const BROWSER_PROJECT_INPUT = "/v1/browser/project/input";
 export const BROWSER_PROJECT_RESIZE = "/v1/browser/project/resize";
 export const BROWSER_PROJECT_FRAME = "/v1/browser/project/frame";
-export const BROWSER_PROJECT_MIGRATION_CANDIDATES =
-  "/v1/browser/project/migration/candidates";
-export const BROWSER_PROJECT_MIGRATION_ADOPT =
-  "/v1/browser/project/migration/adopt";
-export const BROWSER_PROJECT_MIGRATION_SKIP =
-  "/v1/browser/project/migration/skip";
 
 export type ProjectBrowserTab = {
   tab_id: string;
   url: string;
   title: string;
+  active: boolean;
+  name: string | null;
+  opened_by_chat: string | null;
+  last_chat: string | null;
+  last_used_ms: number | null;
 };
-
-export type ProjectBrowserMigrationState =
-  | "not_needed"
-  | "available"
-  | "resolved"
-  | "unknown";
 
 export type ProjectBrowserViewport = { width: number; height: number };
 
@@ -691,12 +685,12 @@ export type ProjectBrowserStatus = {
   busy: boolean;
   active_tab: string | null;
   tabs: ProjectBrowserTab[];
-  migration: { state: ProjectBrowserMigrationState };
+  new_tab_id: string | null;
 };
 
 export type ProjectBrowserTabRequest =
-  | { op: "select" | "close"; tab_id: string }
-  | { op: "new"; url?: string };
+  | { op: "close"; tab_id: string }
+  | { op: "new"; url?: string; chat_id?: string };
 
 export type ProjectBrowserNavigateRequest =
   | { url: string; tab_id?: string }
@@ -714,6 +708,15 @@ export type ProjectBrowserInputRequest = ProjectBrowserInputFence &
     | { kind: "wheel"; x: number; y: number; dx: number; dy: number }
   );
 
+export type ProjectBrowserResizeRequest = ProjectBrowserViewport & {
+  tab_id?: string;
+};
+
+export type ProjectBrowserFrameRequest = {
+  max_side?: number;
+  tab_id?: string;
+};
+
 export type ProjectBrowserFrame = {
   runtime_id: string;
   mime: string;
@@ -724,17 +727,6 @@ export type ProjectBrowserFrame = {
   width: number;
   height: number;
   viewport: ProjectBrowserViewport;
-};
-
-export type ProjectBrowserMigrationCandidate = {
-  legacy_chat_id: string;
-  modified_ms: number | null;
-  active: boolean;
-};
-
-export type ProjectBrowserMigrationCandidates = {
-  state: ProjectBrowserMigrationState;
-  candidates: ProjectBrowserMigrationCandidate[];
 };
 
 const PROJECT_BROWSER_FRAME_MIMES = ["image/jpeg", "image/png", "image/webp"];
@@ -752,18 +744,38 @@ const optionalString = (value: unknown): string | null | undefined =>
       ? value
       : undefined;
 
-function normalizeMigrationState(value: unknown): ProjectBrowserMigrationState {
-  return value === "not_needed" || value === "available" || value === "resolved"
-    ? value
-    : "unknown";
-}
+const optionalNonEmptyString = (value: unknown): string | null | undefined => {
+  const text = optionalString(value);
+  return text === "" ? null : text;
+};
 
 function normalizeProjectBrowserTab(value: unknown): ProjectBrowserTab | null {
   if (!isRecord(value)) return null;
-  const { tab_id, url, title } = value;
+  const { tab_id, url, title, last_used_ms } = value;
   if (typeof tab_id !== "string" || tab_id.length === 0) return null;
   if (typeof url !== "string" || typeof title !== "string") return null;
-  return { tab_id, url, title };
+  const name = optionalNonEmptyString(value.name);
+  const openedByChat = optionalNonEmptyString(value.opened_by_chat);
+  const lastChat = optionalNonEmptyString(value.last_chat);
+  if (
+    name === undefined ||
+    openedByChat === undefined ||
+    lastChat === undefined
+  )
+    return null;
+  return {
+    tab_id,
+    url,
+    title,
+    active: value.active === true,
+    name,
+    opened_by_chat: openedByChat,
+    last_chat: lastChat,
+    last_used_ms:
+      typeof last_used_ms === "number" && Number.isFinite(last_used_ms)
+        ? last_used_ms
+        : null,
+  };
 }
 
 export function normalizeProjectBrowserStatus(
@@ -772,14 +784,16 @@ export function normalizeProjectBrowserStatus(
   if (!isRecord(value)) return null;
   if (typeof value.running !== "boolean") return null;
   if (typeof value.connected !== "boolean") return null;
-  if (!Array.isArray(value.tabs) || !isRecord(value.migration)) return null;
+  if (!Array.isArray(value.tabs)) return null;
   const runtimeId = optionalString(value.runtime_id);
   const activeTab = optionalString(value.active_tab);
   const projectId = optionalString(value.project_id);
+  const newTabId = optionalNonEmptyString(value.new_tab_id);
   if (
     runtimeId === undefined ||
     activeTab === undefined ||
-    projectId === undefined
+    projectId === undefined ||
+    newTabId === undefined
   )
     return null;
   const tabs: ProjectBrowserTab[] = [];
@@ -796,7 +810,7 @@ export function normalizeProjectBrowserStatus(
     busy: value.busy === true,
     active_tab: activeTab,
     tabs,
-    migration: { state: normalizeMigrationState(value.migration.state) },
+    new_tab_id: newTabId,
   };
 }
 
@@ -832,29 +846,6 @@ export function normalizeProjectBrowserFrame(
   };
 }
 
-export function normalizeProjectBrowserMigrationCandidates(
-  value: unknown,
-): ProjectBrowserMigrationCandidates | null {
-  if (!isRecord(value) || !Array.isArray(value.candidates)) return null;
-  const candidates: ProjectBrowserMigrationCandidate[] = [];
-  for (const entry of value.candidates) {
-    if (!isRecord(entry)) return null;
-    const { legacy_chat_id, last_used_ms, locked } = entry;
-    if (typeof legacy_chat_id !== "string" || legacy_chat_id.length === 0)
-      return null;
-    if (typeof locked !== "boolean") return null;
-    candidates.push({
-      legacy_chat_id,
-      modified_ms:
-        typeof last_used_ms === "number" && Number.isFinite(last_used_ms)
-          ? last_used_ms
-          : null,
-      active: locked,
-    });
-  }
-  return { state: normalizeMigrationState(value.state), candidates };
-}
-
 export function projectBrowserErrorMessage(error: unknown): string {
   if (isRecord(error)) {
     const data = error.data;
@@ -870,6 +861,12 @@ export function projectBrowserErrorMessage(error: unknown): string {
   }
   return "Browser request failed";
 }
+
+export const isProjectBrowserConflict = (error: unknown): boolean =>
+  isRecord(error) && error.status === 409;
+
+export const isProjectBrowserTabGone = (error: unknown): boolean =>
+  isRecord(error) && error.status === 410;
 
 type ProjectBrowserQueryResult =
   | { data: unknown; error?: undefined }
@@ -905,6 +902,33 @@ async function postProjectBrowser<T>(
 }
 
 const acceptAnyBody = (): true => true;
+
+export const projectBrowserStatusPublishing = createAction<string>(
+  "browserApi/projectBrowserStatusPublishing",
+);
+
+async function publishProjectBrowserStatus(
+  _args: unknown,
+  {
+    dispatch,
+    queryFulfilled,
+    requestId,
+  }: {
+    dispatch: (action: unknown) => unknown;
+    queryFulfilled: Promise<{ data: ProjectBrowserStatus }>;
+    requestId: string;
+  },
+) {
+  try {
+    const { data } = await queryFulfilled;
+    dispatch(projectBrowserStatusPublishing(requestId));
+    dispatch(
+      browserApi.util.upsertQueryData("projectBrowserStatus", undefined, data),
+    );
+  } catch {
+    return;
+  }
+}
 
 export const browserApi = createApi({
   reducerPath: "browserApi",
@@ -1185,7 +1209,7 @@ export const browserApi = createApi({
         return { data: response.data as BrowserActionResponse };
       },
     }),
-    projectBrowserStatus: builder.mutation<ProjectBrowserStatus, undefined>({
+    projectBrowserStatus: builder.query<ProjectBrowserStatus, undefined>({
       queryFn: (_args, api, _extraOptions, baseQuery) =>
         postProjectBrowser(
           api,
@@ -1204,6 +1228,7 @@ export const browserApi = createApi({
           {},
           normalizeProjectBrowserStatus,
         ),
+      onQueryStarted: publishProjectBrowserStatus,
     }),
     projectBrowserTab: builder.mutation<
       ProjectBrowserStatus,
@@ -1217,6 +1242,7 @@ export const browserApi = createApi({
           args,
           normalizeProjectBrowserStatus,
         ),
+      onQueryStarted: publishProjectBrowserStatus,
     }),
     projectBrowserNavigate: builder.mutation<
       ProjectBrowserStatus,
@@ -1230,6 +1256,7 @@ export const browserApi = createApi({
           args,
           normalizeProjectBrowserStatus,
         ),
+      onQueryStarted: publishProjectBrowserStatus,
     }),
     projectBrowserInput: builder.mutation<true, ProjectBrowserInputRequest>({
       queryFn: (args, api, _extraOptions, baseQuery) =>
@@ -1241,7 +1268,7 @@ export const browserApi = createApi({
           acceptAnyBody,
         ),
     }),
-    projectBrowserResize: builder.mutation<true, ProjectBrowserViewport>({
+    projectBrowserResize: builder.mutation<true, ProjectBrowserResizeRequest>({
       queryFn: (args, api, _extraOptions, baseQuery) =>
         postProjectBrowser(
           api,
@@ -1253,7 +1280,7 @@ export const browserApi = createApi({
     }),
     projectBrowserFrame: builder.mutation<
       ProjectBrowserFrame,
-      { max_side?: number }
+      ProjectBrowserFrameRequest
     >({
       queryFn: (args, api, _extraOptions, baseQuery) =>
         postProjectBrowser(
@@ -1262,42 +1289,6 @@ export const browserApi = createApi({
           BROWSER_PROJECT_FRAME,
           args,
           normalizeProjectBrowserFrame,
-        ),
-    }),
-    projectBrowserMigrationCandidates: builder.mutation<
-      ProjectBrowserMigrationCandidates,
-      undefined
-    >({
-      queryFn: (_args, api, _extraOptions, baseQuery) =>
-        postProjectBrowser(
-          api,
-          baseQuery,
-          BROWSER_PROJECT_MIGRATION_CANDIDATES,
-          {},
-          normalizeProjectBrowserMigrationCandidates,
-        ),
-    }),
-    projectBrowserMigrationAdopt: builder.mutation<
-      true,
-      { legacy_chat_id: string }
-    >({
-      queryFn: (args, api, _extraOptions, baseQuery) =>
-        postProjectBrowser(
-          api,
-          baseQuery,
-          BROWSER_PROJECT_MIGRATION_ADOPT,
-          { legacy_chat_id: args.legacy_chat_id, confirm: true },
-          acceptAnyBody,
-        ),
-    }),
-    projectBrowserMigrationSkip: builder.mutation<true, undefined>({
-      queryFn: (_args, api, _extraOptions, baseQuery) =>
-        postProjectBrowser(
-          api,
-          baseQuery,
-          BROWSER_PROJECT_MIGRATION_SKIP,
-          { confirm: true },
-          acceptAnyBody,
         ),
     }),
   }),

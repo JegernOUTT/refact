@@ -947,7 +947,7 @@
     },
     "name": {
       "type": "string",
-      "description": "Locator handler, device, cookie, or matcher property name"
+      "description": "Locator handler, device, cookie, or matcher property name; on open_tab a short human name for the new tab"
     },
     "times": {
       "type": "integer",

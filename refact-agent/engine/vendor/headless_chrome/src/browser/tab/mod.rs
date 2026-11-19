@@ -288,6 +288,12 @@ impl Tab {
         info.url.clone()
     }
 
+    /// The title from the browser's latest target info event; sends no command.
+    pub fn get_target_title(&self) -> String {
+        let info = self.target_info.lock().unwrap();
+        info.title.clone()
+    }
+
     /// Allows overriding user agent with the given string.
     pub fn set_user_agent(
         &self,

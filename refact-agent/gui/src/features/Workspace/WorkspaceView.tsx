@@ -22,11 +22,10 @@ import {
 import { GroupSplitView } from "./GroupSplitView";
 import { SurfacePane } from "./SurfacePane";
 import {
-  isAppSurface,
+  isChatBoundSurface,
   isSplittableSurface,
   makeSurfaceKey,
 } from "./surfaceKey";
-import { useProjectBrowserAutoOpen } from "./useProjectBrowserAutoOpen";
 import {
   consolidateWorkspaceTabs,
   openTab,
@@ -41,7 +40,6 @@ import styles from "./WorkspaceView.module.css";
 
 export function WorkspaceView() {
   useAppWorkspaceRestore();
-  useProjectBrowserAutoOpen();
   const dispatch = useAppDispatch();
   const [unsplitDragActive, setUnsplitDragActive] = useState(false);
   const activeTabId = useAppSelector(selectActiveTabId);
@@ -76,7 +74,7 @@ export function WorkspaceView() {
     const workspaceTabs = tabs.filter(
       (key) =>
         isSplittableSurface(key) &&
-        !isAppSurface(key) &&
+        !isChatBoundSurface(key) &&
         !collectTabIds(
           groups[key]?.root ?? {
             kind: "leaf",
@@ -84,7 +82,7 @@ export function WorkspaceView() {
             tabIds: [],
             activeTabId: null,
           },
-        ).some(isAppSurface),
+        ).some(isChatBoundSurface),
     );
     if (
       workspaceTabs.length > 1 ||

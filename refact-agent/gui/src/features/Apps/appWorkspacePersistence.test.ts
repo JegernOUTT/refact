@@ -14,7 +14,7 @@ import {
   closePaneTab,
   addSurfaceToPane,
 } from "../Workspace/workspaceSlice";
-import { collectTabIds } from "../ChatPanes/panesTree";
+import { collectTabIds, findLeafByTab } from "../ChatPanes/panesTree";
 import type { AppWorkspace } from "./appWorkspace";
 import { paneToAppLayout } from "./appLayout";
 import { AppWindow, Calendar } from "lucide-react";
@@ -362,7 +362,7 @@ describe("app workspace coordinator", () => {
     store.dispatch({ type: "test/snapshot", payload: remoteWorkspace(7) });
     store.dispatch(openTab("file:/also-keep"));
     const root = store.getState().workspace.groups["chat:a"]!.root;
-    const leaf = root.kind === "split" ? root.children[0] : root;
+    const leaf = findLeafByTab(root, "chat:a")!;
     store.dispatch(
       addSurfaceToPane({
         tabId: "chat:a",

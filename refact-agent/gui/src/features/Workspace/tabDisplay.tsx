@@ -1,5 +1,12 @@
 import { useAppSelector } from "../../hooks";
 import {
+  browserTabTitle,
+  nonBlank,
+  type BrowserTabTitleSource,
+} from "../Browser/browserTabTitle";
+import { selectBrowserTabHintNames } from "../Browser/browserViews";
+import { selectProjectBrowserStatus } from "../Browser/useProjectBrowserStatus";
+import {
   selectAllThreads,
   selectTabsDisplayData,
   type TabDisplayData,
@@ -22,6 +29,7 @@ import {
 
 type TabSurfaceKind =
   | "app"
+  | "browser"
   | "chat"
   | "task"
   | "buddy"
@@ -34,7 +42,6 @@ type TabSurfaceKind =
 
 const MAIN_SURFACE_INFO = {
   git: { title: "Git" },
-  browser: { title: "Browser" },
 } as const;
 
 const pathBasename = (path: string): string => {
@@ -102,6 +109,7 @@ export function displayInfoForSurface(
   tabsById: ReadonlyMap<string, TabDisplayData>,
   threads: ReturnType<typeof selectAllThreads>,
   tasksById: ReadonlyMap<string, OpenTask>,
+  browserTabs: ReadonlyMap<string, BrowserTabTitleSource> = new Map(),
 ): TabDisplayInfo {
   let parsed: ReturnType<typeof parseSurfaceKey>;
   try {
@@ -116,6 +124,16 @@ export function displayInfoForSurface(
 
   if (parsed.kind === "app")
     return { title: "App", kind: "app", unreadNotificationCount: 0 };
+
+  if (parsed.kind === "browser") {
+    const tab = browserTabs.get(parsed.id);
+    return {
+      title: browserTabTitle(tab),
+      tooltip: nonBlank(tab?.url),
+      kind: "browser",
+      unreadNotificationCount: 0,
+    };
+  }
 
   if (parsed.kind === "task") {
     const task = tasksById.get(parsed.id);
@@ -242,8 +260,18 @@ export function useTabDisplay() {
   const tabs = useAppSelector(selectTabsDisplayData);
   const threads = useAppSelector(selectAllThreads);
   const tasks = useAppSelector(selectOpenTasksFromRoot);
+  const browserStatus = useAppSelector(selectProjectBrowserStatus);
+  const browserNames = useAppSelector(selectBrowserTabHintNames);
   const tabsById = new Map(tabs.map((tab) => [tab.id, tab]));
   const tasksById = new Map(tasks.map((task) => [task.id, task]));
+  const browserTabs = new Map<string, BrowserTabTitleSource>(
+    Object.entries(browserNames).map(([tabId, name]) => [tabId, { name }]),
+  );
+  for (const tab of browserStatus?.tabs ?? [])
+    browserTabs.set(tab.tab_id, {
+      ...tab,
+      name: tab.name ?? browserNames[tab.tab_id],
+    });
   return (key: SurfaceKey) =>
     views[key]
       ? {
@@ -251,5 +279,5 @@ export function useTabDisplay() {
           kind: "app" as const,
           unreadNotificationCount: 0,
         }
-      : displayInfoForSurface(key, tabsById, threads, tasksById);
+      : displayInfoForSurface(key, tabsById, threads, tasksById, browserTabs);
 }

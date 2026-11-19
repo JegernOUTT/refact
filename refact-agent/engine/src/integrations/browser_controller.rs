@@ -103,17 +103,9 @@ pub fn resolve_tab(runtime: &BrowserRuntime, target: &TabTarget) -> Result<Arc<T
             .ok_or_else(|| "No active tab in browser runtime".to_string()),
         TabTarget::Id {
             id,
-        } => {
-            let tabs = runtime
-                .browser
-                .get_tabs()
-                .lock()
-                .map_err(|e| format!("Failed to lock browser tabs: {}", e))?;
-            tabs.iter()
-                .find(|t| t.get_target_id() == id)
-                .cloned()
-                .ok_or_else(|| format!("Tab not found with id: {}", id))
-        }
+        } => runtime
+            .find_tab(id)
+            .ok_or_else(|| format!("Tab not found with id: {}", id)),
     }
 }
 
@@ -257,6 +249,7 @@ struct BrowserActionDriver<'a> {
     resolved: Option<ResolvedElement>,
     locator_echo: Option<String>,
     pointer_attempt: usize,
+    focus_hold: Option<refact_browser::tab_gate::TabDispatchHold>,
 }
 
 struct DragActionabilityDriver<'a> {
@@ -416,6 +409,7 @@ impl<'a> BrowserActionDriver<'a> {
             resolved: None,
             locator_echo: None,
             pointer_attempt: 0,
+            focus_hold: None,
         }
     }
 
@@ -488,16 +482,22 @@ impl ActionabilityDriver for BrowserActionDriver<'_> {
         let resolved = self.resolved()?;
         let dispatcher = CdpMouseDispatcher::new(self.tab);
         if self.action == ActionKind::Focus {
-            return call_handle_json(
+            let hold = refact_browser::tab_gate::hold_tab_for_dispatch(self.tab.get_target_id())
+                .map_err(|description| ActionabilityDiagnostic::PrecheckFailed {
+                    description,
+                })?;
+            call_handle_json(
                 self.tab,
                 self.world,
                 &resolved.handle,
                 &browser_locators::js_focus_element(),
             )
-            .map(|_| resolved.info.tag.clone())
             .map_err(|description| ActionabilityDiagnostic::PrecheckFailed {
                 description,
-            });
+            })?;
+            let tag = resolved.info.tag.clone();
+            self.focus_hold = Some(hold);
+            return Ok(tag);
         }
         if self.action == ActionKind::ScrollIntoViewIfNeeded {
             return dispatcher
@@ -1031,6 +1031,7 @@ fn execute_steps_with_world(
         uploads: vec![],
         downloads: vec![],
         new_tabs: vec![],
+        tab_id: None,
         active_routes: vec![],
         intercepted_requests: vec![],
         context: None,
@@ -1135,10 +1136,77 @@ fn open_tab_for_device(
 ) -> Result<(&'static refact_browser::DeviceDescriptor, Arc<Tab>), String> {
     let descriptor = refact_browser::devices::lookup(device.as_deref().unwrap_or("desktop"))?;
     let tab = runtime
-        .browser
-        .new_tab()
+        .open_tab()
         .map_err(|error| format!("Failed: {error}"))?;
     Ok((descriptor, tab))
+}
+
+fn prepare_project_tab(
+    runtime: &mut BrowserRuntime,
+    device: &Option<String>,
+    name: &Option<String>,
+    project_chat: Option<&str>,
+) -> Result<(Arc<Tab>, Arc<refact_browser::tab_gate::TabGate>, String), String> {
+    let name = name.as_deref().map(validate_tab_name).transpose()?;
+    let (descriptor, tab) = open_tab_for_device(runtime, device)?;
+    let id = tab.get_target_id().clone();
+    let setup = (|| {
+        crate::integrations::browser_runtime::setup_recording_for_tab(runtime, tab.clone())?;
+        if device.is_some() {
+            refact_browser::context_state::apply_viewport(&tab, &descriptor.viewport)?;
+            tab.set_user_agent(
+                &descriptor.user_agent,
+                runtime.context_state.locale.as_deref(),
+                None,
+            )
+            .map_err(|error| format!("Failed to set new tab user agent: {error}"))?;
+            runtime
+                .tab_devices
+                .insert(id.clone(), descriptor.viewport.clone());
+        }
+        Ok::<(), String>(())
+    })();
+    if let Err(error) = setup {
+        if matches!(tab.close(false), Ok(true)) {
+            runtime.world_manager.tab_closed(&id);
+            runtime.select_tab_after_close(&id);
+        }
+        return Err(error);
+    }
+    if let Some(name) = name {
+        runtime.tab_meta.entry(id.clone()).or_default().name = Some(name);
+    }
+    if let Some(chat_id) = project_chat {
+        refact_browser::record_chat_tab_use(
+            &mut runtime.tab_meta,
+            chat_id,
+            std::slice::from_ref(&id),
+            Some(&id),
+            None,
+            crate::integrations::browser_runtime::project_browser::now_ms(),
+        );
+    }
+    runtime.set_active_tab_target_id(id.clone());
+    Ok((tab, runtime.tab_gate(&id), descriptor.name.clone()))
+}
+
+fn open_tab_result(
+    idx: usize,
+    device_label: &str,
+    id: &str,
+    navigation: Result<Option<Option<NavigationTimeoutWarning>>, String>,
+) -> StepResult {
+    match navigation {
+        Err(error) => StepResult::failure(idx, "OpenTab", error),
+        Ok(warning) => merge_step_data(
+            navigation_step_success(
+                idx,
+                format!("Opened new {device_label} tab ({})", &id[..8.min(id.len())]),
+                warning.flatten(),
+            ),
+            serde_json::json!({"tab_id": id}),
+        ),
+    }
 }
 
 fn network_conditions_summary(
@@ -1158,19 +1226,17 @@ fn network_conditions_summary(
 fn apply_context_to_tabs(
     runtime: &mut BrowserRuntime,
     candidate: &refact_browser::ContextState,
+    tabs: &[Arc<Tab>],
 ) -> Result<(), String> {
-    let tabs = runtime
-        .browser
-        .get_tabs()
-        .lock()
-        .map_err(|error| format!("Failed to list intended tabs: {error}"))?
-        .clone();
+    if candidate.viewport.is_some() {
+        runtime.tab_devices.clear();
+    }
     runtime.context_state.apply_candidate(
         candidate.clone(),
         &mut runtime.context_state_dirty,
         |candidate| {
             for tab in tabs {
-                candidate.apply_to_tab(&tab)?;
+                candidate.apply_to_tab(tab)?;
             }
             Ok(())
         },
@@ -1194,11 +1260,49 @@ fn context_summary(runtime: &BrowserRuntime) -> BrowserContextSummary {
     runtime.context_state.summary(cookies, local, session)
 }
 
+fn get_storage_step(
+    tab: Option<&Tab>,
+    kind: BrowserStorageKind,
+    origin: Option<&str>,
+    idx: usize,
+) -> StepResult {
+    match tab
+        .ok_or_else(|| "No active tab in browser runtime".to_string())
+        .and_then(|tab| refact_browser::context_state::get_storage(tab, kind, origin))
+    {
+        Ok(items) => {
+            let masked = items
+                .into_iter()
+                .map(|item| BrowserStorageItem {
+                    name: item.name,
+                    value: "[REDACTED]".to_string(),
+                })
+                .collect::<Vec<_>>();
+            StepResult::success(idx, format!("Read {} storage item(s)", masked.len()))
+                .with_data(serde_json::json!({"items": masked}))
+        }
+        Err(error) => StepResult::failure(idx, "Read storage", error),
+    }
+}
+
 fn execute_context_management_step(
     runtime: &mut BrowserRuntime,
     step: &BrowserStep,
     idx: usize,
+    write_tabs: &[Arc<Tab>],
 ) -> StepResult {
+    if let BrowserStep::GetStorage {
+        kind,
+        origin,
+    } = step
+    {
+        return get_storage_step(
+            runtime.get_active_tab().as_deref(),
+            *kind,
+            origin.as_deref(),
+            idx,
+        );
+    }
     let mut candidate = runtime.context_state.clone();
     let result: Result<StepResult, String> = (|| match step {
         BrowserStep::SetViewport {
@@ -1215,7 +1319,7 @@ fn execute_context_management_step(
                 is_mobile: is_mobile.unwrap_or(false),
                 has_touch: has_touch.unwrap_or(false),
             });
-            apply_context_to_tabs(runtime, &candidate)?;
+            apply_context_to_tabs(runtime, &candidate, write_tabs)?;
             Ok(StepResult::success(
                 idx,
                 format!("Set viewport to {width}x{height}"),
@@ -1235,21 +1339,21 @@ fn execute_context_management_step(
                 contrast: contrast.clone(),
                 media: media.clone(),
             };
-            apply_context_to_tabs(runtime, &candidate)?;
+            apply_context_to_tabs(runtime, &candidate, write_tabs)?;
             Ok(StepResult::success(idx, "Applied media emulation"))
         }
         BrowserStep::SetLocale {
             locale,
         } => {
             candidate.locale = Some(locale.clone());
-            apply_context_to_tabs(runtime, &candidate)?;
+            apply_context_to_tabs(runtime, &candidate, write_tabs)?;
             Ok(StepResult::success(idx, format!("Set locale to {locale}")))
         }
         BrowserStep::SetTimezone {
             timezone,
         } => {
             candidate.timezone = Some(timezone.clone());
-            apply_context_to_tabs(runtime, &candidate)?;
+            apply_context_to_tabs(runtime, &candidate, write_tabs)?;
             Ok(StepResult::success(
                 idx,
                 format!("Set timezone to {timezone}"),
@@ -1260,7 +1364,7 @@ fn execute_context_management_step(
             accept_language,
         } => {
             candidate.user_agent = Some((user_agent.clone(), accept_language.clone()));
-            apply_context_to_tabs(runtime, &candidate)?;
+            apply_context_to_tabs(runtime, &candidate, write_tabs)?;
             Ok(StepResult::success(idx, "Set user agent"))
         }
         BrowserStep::SetGeolocation {
@@ -1269,14 +1373,14 @@ fn execute_context_management_step(
             accuracy,
         } => {
             candidate.geolocation = Some((*latitude, *longitude, accuracy.unwrap_or(0.0)));
-            apply_context_to_tabs(runtime, &candidate)?;
+            apply_context_to_tabs(runtime, &candidate, write_tabs)?;
             Ok(StepResult::success(idx, "Set geolocation"))
         }
         BrowserStep::SetOffline {
             offline,
         } => {
             candidate.offline = *offline;
-            apply_context_to_tabs(runtime, &candidate)?;
+            apply_context_to_tabs(runtime, &candidate, write_tabs)?;
             Ok(StepResult::success(
                 idx,
                 if *offline {
@@ -1303,7 +1407,7 @@ fn execute_context_management_step(
                 candidate.offline = *offline;
             }
             candidate.network_conditions = conditions;
-            apply_context_to_tabs(runtime, &candidate)?;
+            apply_context_to_tabs(runtime, &candidate, write_tabs)?;
             Ok(StepResult::success(
                 idx,
                 network_conditions_summary(candidate.offline, conditions.as_ref()),
@@ -1326,7 +1430,7 @@ fn execute_context_management_step(
                 ));
             }
             candidate.cpu_throttling_rate = (*rate > 1.0).then_some(*rate);
-            apply_context_to_tabs(runtime, &candidate)?;
+            apply_context_to_tabs(runtime, &candidate, write_tabs)?;
             Ok(StepResult::success(
                 idx,
                 if *rate > 1.0 {
@@ -1343,7 +1447,7 @@ fn execute_context_management_step(
             let device = refact_browser::devices::lookup(name)?;
             candidate.viewport = Some(device.viewport.clone());
             candidate.user_agent = Some((device.user_agent.clone(), None));
-            apply_context_to_tabs(runtime, &candidate)?;
+            apply_context_to_tabs(runtime, &candidate, write_tabs)?;
             Ok(
                 StepResult::success(idx, format!("Emulating {}", device.summary())).with_data(
                     serde_json::json!({"device": {
@@ -1372,7 +1476,7 @@ fn execute_context_management_step(
             headers,
         } => {
             candidate.extra_http_headers = headers.clone();
-            apply_context_to_tabs(runtime, &candidate)?;
+            apply_context_to_tabs(runtime, &candidate, write_tabs)?;
             Ok(StepResult::success(
                 idx,
                 format!("Set {} extra HTTP header(s)", headers.len()),
@@ -1429,30 +1533,6 @@ fn execute_context_management_step(
                 idx,
                 format!("Cleared {cleared} cookie(s)"),
             ))
-        }
-        BrowserStep::GetStorage {
-            kind,
-            origin,
-        } => {
-            let items = refact_browser::context_state::get_storage(
-                runtime
-                    .get_active_tab()
-                    .ok_or_else(|| "No active tab in browser runtime".to_string())?
-                    .as_ref(),
-                *kind,
-                origin.as_deref(),
-            )?;
-            let masked = items
-                .iter()
-                .map(|item| BrowserStorageItem {
-                    name: item.name.clone(),
-                    value: "[REDACTED]".to_string(),
-                })
-                .collect::<Vec<_>>();
-            Ok(
-                StepResult::success(idx, format!("Read {} storage item(s)", items.len()))
-                    .with_data(serde_json::json!({"items": masked})),
-            )
         }
         BrowserStep::SetStorage {
             kind,
@@ -1922,20 +2002,14 @@ fn reset_sticky_registries(
     })
 }
 
-fn execute_reset_step(runtime: &mut BrowserRuntime, idx: usize) -> StepResult {
-    let tabs = runtime
-        .browser
-        .get_tabs()
-        .lock()
-        .map(|tabs| tabs.iter().cloned().collect::<Vec<_>>())
-        .unwrap_or_default();
+fn execute_reset_step(runtime: &mut BrowserRuntime, idx: usize, tabs: &[Arc<Tab>]) -> StepResult {
     let previous_context = runtime.context_state.clone();
     let result: Result<BrowserResetCounts, String> = (|| {
         let routes = runtime.route_registry.list();
-        runtime.remove_routes(None)?;
-        let authenticators = runtime.webauthn_manager.cleanup(&tabs);
-        let clock = runtime.clock.reset(&tabs)?;
-        let init_scripts = runtime.init_scripts.reset(&tabs)?;
+        runtime.remove_routes_on(None, tabs)?;
+        let authenticators = runtime.webauthn_manager.cleanup(tabs);
+        let clock = runtime.clock.reset(tabs)?;
+        let init_scripts = runtime.init_scripts.reset(tabs)?;
         let service_worker_block = runtime.context_state.block_service_workers;
         let counts = reset_sticky_registries(
             &routes,
@@ -1946,11 +2020,14 @@ fn execute_reset_step(runtime: &mut BrowserRuntime, idx: usize) -> StepResult {
             clock,
             service_worker_block,
         )?;
-        runtime.context_state.clear_overrides(&tabs)?;
+        runtime.context_state.clear_overrides(tabs)?;
         Ok(counts)
     })();
     match result {
-        Ok(counts) => StepResult::success(idx, counts.summary()).with_data(counts.data()),
+        Ok(counts) => {
+            runtime.tab_devices.clear();
+            StepResult::success(idx, counts.summary()).with_data(counts.data())
+        }
         Err(error) => {
             runtime.context_state = previous_context;
             runtime.context_state_dirty = true;
@@ -2839,6 +2916,16 @@ pub async fn execute_request_with_runtime_validated(
     image_policy: &ImagePolicy,
     gcx: Arc<GlobalContext>,
 ) -> Result<ExecutionReport, String> {
+    execute_request_with_project_chat(runtime_arc, request, image_policy, gcx, None).await
+}
+
+pub(crate) async fn execute_request_with_project_chat(
+    runtime_arc: Arc<AMutex<BrowserRuntime>>,
+    request: BrowserActionRequest,
+    image_policy: &ImagePolicy,
+    gcx: Arc<GlobalContext>,
+    project_chat: Option<&str>,
+) -> Result<ExecutionReport, String> {
     let deadline = Instant::now() + BROWSER_REQUEST_DEADLINE;
     tokio::time::timeout_at(
         tokio::time::Instant::from_std(deadline),
@@ -2853,6 +2940,7 @@ pub async fn execute_request_with_runtime_validated(
             request,
             image_policy,
             deadline,
+            project_chat,
         )
         .await;
     }
@@ -2868,6 +2956,7 @@ pub async fn execute_request_with_runtime_validated(
             request,
             image_policy,
             deadline,
+            project_chat,
         )
         .await;
     };
@@ -2889,7 +2978,7 @@ pub async fn execute_request_with_runtime_validated(
         alive
     };
     if transport_alive {
-        return execute_request_with_runtime_before_deadline(runtime_arc, request, image_policy, deadline)
+        return execute_request_with_runtime_before_deadline(runtime_arc, request, image_policy, deadline, project_chat)
             .await.map_err(|error| {
                 if refact_browser::is_transport_dead_error(&error) {
                     format!("Browser transport was lost during dispatch; batch incomplete, effect unknown, retry_safe=false. No action was retried. Submit a new request and inspect/acknowledge the current session_generation before explicit bootstrap. Original error: {error}")
@@ -2916,6 +3005,7 @@ pub async fn execute_request_with_runtime_validated(
             request,
             image_policy,
             deadline,
+            project_chat,
         )
         .await?;
         report.warnings.push("CDP connection reattached to the same verified document; no interrupted action was retried".to_string());
@@ -3102,6 +3192,125 @@ impl TabManagementSections {
 
 const BROWSER_REQUEST_DEADLINE: Duration = Duration::from_secs(300);
 
+/// Steps that write emulation or the window, or navigate tabs, on any tab of the runtime.
+fn rewrites_tab_state(step: &BrowserStep) -> bool {
+    match step {
+        BrowserStep::SetViewport {
+            ..
+        }
+        | BrowserStep::EmulateMedia {
+            ..
+        }
+        | BrowserStep::SetLocale {
+            ..
+        }
+        | BrowserStep::SetTimezone {
+            ..
+        }
+        | BrowserStep::SetUserAgent {
+            ..
+        }
+        | BrowserStep::SetGeolocation {
+            ..
+        }
+        | BrowserStep::SetOffline {
+            ..
+        }
+        | BrowserStep::SetNetworkConditions {
+            ..
+        }
+        | BrowserStep::SetCpuThrottling {
+            ..
+        }
+        | BrowserStep::EmulateDevice {
+            ..
+        }
+        | BrowserStep::SetExtraHttpHeaders {
+            ..
+        }
+        | BrowserStep::SetStorage {
+            ..
+        }
+        | BrowserStep::ClearStorage {
+            ..
+        }
+        | BrowserStep::SetStorageState {
+            ..
+        }
+        | BrowserStep::Reset
+        | BrowserStep::OpenTab {
+            ..
+        }
+        | BrowserStep::SetWindowBounds {
+            ..
+        } => true,
+        BrowserStep::CdpSend {
+            method, ..
+        } => {
+            method.starts_with("Input.")
+                || method.starts_with("Emulation.")
+                || matches!(
+                    method.as_str(),
+                    "Page.navigate"
+                        | "Page.reload"
+                        | "Page.navigateToHistoryEntry"
+                        | "Page.setDocumentContent"
+                        | "Browser.setWindowBounds"
+                )
+        }
+        _ => false,
+    }
+}
+
+type TabWriteGuards = Vec<refact_browser::tab_gate::TabGateGuard>;
+
+/// Revalidate against Chrome's tab list after acquiring the sorted gates. A new target after
+/// this snapshot inherits the committed context at adoption; it is not in this write set.
+async fn lock_tab_writes(
+    runtime_arc: &Arc<AMutex<BrowserRuntime>>,
+    deadline: Instant,
+    connection_epoch: u64,
+) -> Result<
+    (
+        tokio::sync::MutexGuard<'_, BrowserRuntime>,
+        Vec<Arc<Tab>>,
+        TabWriteGuards,
+    ),
+    String,
+> {
+    for _ in 0..4 {
+        let gates = lock_browser_before(runtime_arc, deadline)
+            .await?
+            .open_tab_gates();
+        let guards = browser_block_in_place(deadline, || {
+            gates.iter().map(|(_, gate)| {
+                gate.acquire(refact_browser::tab_gate::GateUse::Tool, deadline)
+                    .map_err(|holder| format!(
+                        "A tab stayed busy ({}) until the browser request deadline; nothing was dispatched",
+                        refact_browser::tab_gate::gate_use_label(holder),
+                    ))
+            }).collect::<Result<Vec<_>, _>>()
+        })?;
+        let mut runtime = lock_browser_before(runtime_arc, deadline).await?;
+        if !runtime.ownership.is_connection_epoch(connection_epoch) {
+            return Err(
+                "Browser connection changed while waiting for tabs; nothing was dispatched".into(),
+            );
+        }
+        let tabs = runtime.open_tabs();
+        if tabs.iter().all(|tab| {
+            let id = tab.get_target_id();
+            gates
+                .binary_search_by(|(candidate, _)| candidate.cmp(id))
+                .ok()
+                .is_some_and(|index| Arc::ptr_eq(&gates[index].1, &runtime.tab_gate(id)))
+        }) {
+            return Ok((runtime, tabs, guards));
+        }
+    }
+    Err("The browser's tabs kept changing; nothing was dispatched".into())
+}
+
 async fn lock_browser_before<'a>(
     runtime: &'a Arc<AMutex<BrowserRuntime>>,
     deadline: Instant,
@@ -3123,6 +3332,45 @@ async fn lock_browser_before<'a>(
     Ok(runtime)
 }
 
+/// The runtime lock of one batch step. For a batch with an explicit target, tab-scoped helpers
+/// resolve only to the batch's own tab (nothing once it is closed) while it is held; the
+/// override is cleared before the lock is released, so the runtime-wide active tab is untouched.
+struct RequestTabLock<'a> {
+    runtime: tokio::sync::MutexGuard<'a, BrowserRuntime>,
+}
+
+impl<'a> RequestTabLock<'a> {
+    fn new(
+        mut runtime: tokio::sync::MutexGuard<'a, BrowserRuntime>,
+        request_tab: Option<Option<String>>,
+    ) -> Self {
+        runtime.set_request_tab(request_tab);
+        Self {
+            runtime,
+        }
+    }
+}
+
+impl std::ops::Deref for RequestTabLock<'_> {
+    type Target = BrowserRuntime;
+
+    fn deref(&self) -> &BrowserRuntime {
+        &self.runtime
+    }
+}
+
+impl std::ops::DerefMut for RequestTabLock<'_> {
+    fn deref_mut(&mut self) -> &mut BrowserRuntime {
+        &mut self.runtime
+    }
+}
+
+impl Drop for RequestTabLock<'_> {
+    fn drop(&mut self) {
+        self.runtime.set_request_tab(None);
+    }
+}
+
 fn browser_block_in_place<T>(deadline: Instant, execute: impl FnOnce() -> T) -> T {
     tokio::task::block_in_place(|| {
         let _deadline = headless_chrome::browser::transport::CommandDeadlineGuard::new(deadline);
@@ -3140,6 +3388,7 @@ pub async fn execute_request_with_runtime(
         request,
         image_policy,
         Instant::now() + BROWSER_REQUEST_DEADLINE,
+        None,
     )
     .await
 }
@@ -3149,6 +3398,7 @@ async fn execute_request_with_runtime_before_deadline(
     request: BrowserActionRequest,
     image_policy: &ImagePolicy,
     deadline: Instant,
+    project_chat: Option<&str>,
 ) -> Result<ExecutionReport, String> {
     let (ownership, connection_epoch) = {
         let runtime = lock_browser_before(&runtime_arc, deadline).await?;
@@ -3158,7 +3408,12 @@ async fn execute_request_with_runtime_before_deadline(
         )
     };
     let settings = browser_settings::current();
-    {
+    let pinned_target = matches!(request.target, TabTarget::Id { .. });
+    let is_project = ownership
+        .attached_chat_id()
+        .as_deref()
+        .is_some_and(crate::integrations::browser_runtime::project_browser::is_project_owner_id);
+    let (initial_url, mut current_tab) = {
         let mut rt = lock_browser_before(&runtime_arc, deadline).await?;
         rt.touch();
         if !rt.ownership.is_current_generation() {
@@ -3180,30 +3435,16 @@ async fn execute_request_with_runtime_before_deadline(
                         .to_string(),
                 );
             }
-            let tabs = rt
-                .browser
-                .get_tabs()
-                .lock()
-                .map(|t| t.clone())
-                .unwrap_or_default();
-            let tab = tabs
-                .iter()
-                .find(|t| t.get_target_id() == id.as_str())
+            let tab = rt
+                .find_tab(id)
                 .ok_or_else(|| format!("No tab found with id={}", id))?;
             rt.set_active_tab_target_id(tab.get_target_id().to_string());
         }
         if let Some(block) = request.block_service_workers {
             browser_block_in_place(deadline, || rt.set_block_service_workers(block))?;
         }
-    }
-
-    let initial_url = {
-        let rt = lock_browser_before(&runtime_arc, deadline).await?;
-        rt.get_active_tab().map(|tab| tab.get_url())
-    };
-    let mut current_tab = {
-        let rt = lock_browser_before(&runtime_arc, deadline).await?;
-        rt.get_active_tab()
+        let tab = rt.get_active_tab();
+        (tab.as_ref().map(|tab| tab.get_url()), tab)
     };
     let world = {
         let rt = lock_browser_before(&runtime_arc, deadline).await?;
@@ -3264,7 +3505,14 @@ async fn execute_request_with_runtime_before_deadline(
     macro_rules! runtime_before {
         () => {
             match lock_browser_before(&runtime_arc, deadline).await {
-                Ok(runtime) => runtime,
+                Ok(runtime) => RequestTabLock::new(
+                    runtime,
+                    pinned_target.then(|| {
+                        current_tab
+                            .as_ref()
+                            .map(|tab| tab.get_target_id().to_string())
+                    }),
+                ),
                 Err(error) => {
                     let mut retained = std::mem::take(&mut results);
                     if retained.len() < request.steps.len() {
@@ -3336,7 +3584,17 @@ async fn execute_request_with_runtime_before_deadline(
             .map(crate::integrations::browser_runtime::recovery_fence_error);
         let touch_error = if matches!(step, BrowserStep::Tap { .. }) {
             let rt = runtime_before!();
-            tap_context_error(&rt.context_state, rt.context_state_dirty)
+            {
+                let mut context = rt.context_state.clone();
+                if current_tab.is_some() {
+                    context.viewport = current_tab
+                        .as_ref()
+                        .and_then(|tab| rt.tab_devices.get(tab.get_target_id()))
+                        .cloned()
+                        .or(context.viewport);
+                }
+                tap_context_error(&context, rt.context_state_dirty)
+            }
         } else {
             None
         };
@@ -3514,34 +3772,10 @@ async fn execute_request_with_runtime_before_deadline(
                     .with_data(serde_json::json!({"frame": frame})),
                 Err(error) => StepResult::failure(idx, "Wait for WebSocket frame", error),
             }
-        } else if matches!(step, BrowserStep::Reset) {
-            let mut rt = runtime_before!();
-            browser_block_in_place(deadline, || execute_reset_step(&mut rt, idx))
-        } else if let BrowserStep::CdpSend {
-            method,
-            params,
-            target,
-        } = step
-        {
-            let mut rt = runtime_before!();
-            browser_block_in_place(deadline, || {
-                execute_cdp_send_step(&mut rt, method, params.as_ref(), *target, idx)
-            })
         } else if is_screencast_step(step) {
             let mut rt = runtime_before!();
             browser_block_in_place(deadline, || {
                 execute_screencast_step(&mut rt, step, idx, image_policy)
-            })
-        } else if let BrowserStep::SetWindowBounds {
-            x,
-            y,
-            width,
-            height,
-        } = step
-        {
-            let mut rt = runtime_before!();
-            browser_block_in_place(deadline, || {
-                execute_set_window_bounds_step(&mut rt, *x, *y, *width, *height, idx)
             })
         } else if is_clock_step(step) {
             let mut rt = runtime_before!();
@@ -3591,29 +3825,172 @@ async fn execute_request_with_runtime_before_deadline(
             browser_block_in_place(deadline, || {
                 execute_instrumentation_step(&mut rt, step, idx)
             })
-        } else if is_context_management_step(step) {
-            let mut rt = runtime_before!();
-            browser_block_in_place(deadline, || {
-                execute_context_management_step(&mut rt, step, idx)
+        } else if let BrowserStep::GetStorage {
+            kind,
+            origin,
+        } = step
+        {
+            let selected = {
+                let mut rt = runtime_before!();
+                rt.get_active_tab().map(|tab| {
+                    let gate = origin.is_some().then(|| rt.tab_gate(tab.get_target_id()));
+                    (tab, gate)
+                })
+            };
+            browser_block_in_place(deadline, || match selected {
+                Some((tab, Some(gate))) => {
+                    let id = tab.get_target_id().clone();
+                    let _scope = refact_browser::tab_gate::enter_step_gates(
+                        vec![(id.clone(), gate)],
+                        deadline,
+                    );
+                    // The storage helper visits and restores the page for an explicit origin.
+                    match refact_browser::tab_gate::hold_tab_for_dispatch(&id) {
+                        Ok(_hold) => get_storage_step(Some(&tab), *kind, origin.as_deref(), idx),
+                        Err(error) => StepResult::failure(idx, "Read storage", error),
+                    }
+                }
+                Some((tab, None)) => get_storage_step(Some(&tab), *kind, None, idx),
+                None => get_storage_step(None, *kind, origin.as_deref(), idx),
             })
-        } else if is_tab_management_step(step) {
-            let mut rt = runtime_before!();
-            let step_report = browser_block_in_place(deadline, || {
-                execute_steps_with_runtime(&mut rt, std::slice::from_ref(step), image_policy)
-            });
-            rt.touch();
-            current_tab = rt.get_active_tab();
-            drop(rt);
-            let nested_step = nested_sections.absorb(step_report);
-            new_tabs.append(&mut nested_sections.new_tabs);
-            routed_requests.append(&mut nested_sections.intercepted_requests);
-            locator_handlers.append(&mut nested_sections.locator_handlers);
-            nested_step.unwrap_or_else(|| {
-                StepResult::failure(idx, "Browser action", "No step result produced")
-            })
+        } else if is_project && matches!(step, BrowserStep::OpenTab { .. }) {
+            let BrowserStep::OpenTab {
+                device,
+                url,
+                name,
+            } = step
+            else {
+                unreachable!()
+            };
+            let opened = {
+                let mut rt = runtime_before!();
+                browser_block_in_place(deadline, || {
+                    prepare_project_tab(&mut rt, device, name, project_chat)
+                })
+            };
+            match opened {
+                Ok((tab, gate, device_label)) => {
+                    let tab_id = tab.get_target_id().clone();
+                    let navigation = browser_block_in_place(deadline, || {
+                        let _scope = refact_browser::tab_gate::enter_step_gates(
+                            vec![(tab_id.clone(), gate)],
+                            deadline,
+                        );
+                        url.as_ref()
+                            .map(|url| {
+                                run_and_wait_for_navigation(
+                                    &tab,
+                                    settings.timing.default_wait_timeout_ms,
+                                    || trigger_page_navigation(&tab, url),
+                                )
+                            })
+                            .transpose()
+                    });
+                    current_tab = runtime_before!().find_tab(&tab_id);
+                    open_tab_result(idx, &device_label, &tab_id, navigation)
+                }
+                Err(error) => StepResult::failure(idx, "OpenTab", error),
+            }
+        } else if rewrites_tab_state(step)
+            || is_context_management_step(step)
+            || is_tab_management_step(step)
+            || matches!(step, BrowserStep::CdpSend { .. })
+        {
+            let locked = if rewrites_tab_state(step) {
+                lock_tab_writes(&runtime_arc, deadline, connection_epoch).await
+            } else {
+                lock_browser_before(&runtime_arc, deadline)
+                    .await
+                    .map(|rt| (rt, Vec::new(), Vec::new()))
+            };
+            match locked {
+                Err(error) => StepResult::failure(idx, "Browser action", error),
+                Ok((rt, write_tabs, guards)) => {
+                    let request_target = if pinned_target {
+                        Some(current_tab.as_ref().map(|tab| tab.get_target_id().clone()))
+                    } else if rewrites_tab_state(step) {
+                        Some(
+                            rt.get_active_tab()
+                                .filter(|active| {
+                                    write_tabs.iter().any(|tab| Arc::ptr_eq(active, tab))
+                                })
+                                .map(|tab| tab.get_target_id().clone()),
+                        )
+                    } else {
+                        None
+                    };
+                    let mut rt = RequestTabLock::new(rt, request_target);
+                    let result = match step {
+                        BrowserStep::Reset => browser_block_in_place(deadline, || {
+                            execute_reset_step(&mut rt, idx, &write_tabs)
+                        }),
+                        BrowserStep::CdpSend {
+                            method,
+                            params,
+                            target,
+                        } => browser_block_in_place(deadline, || {
+                            execute_cdp_send_step(&mut rt, method, params.as_ref(), *target, idx)
+                        }),
+                        BrowserStep::SetWindowBounds {
+                            x,
+                            y,
+                            width,
+                            height,
+                        } => browser_block_in_place(deadline, || {
+                            execute_set_window_bounds_step(&mut rt, *x, *y, *width, *height, idx)
+                        }),
+                        step if is_context_management_step(step) => {
+                            browser_block_in_place(deadline, || {
+                                execute_context_management_step(&mut rt, step, idx, &write_tabs)
+                            })
+                        }
+                        _ => {
+                            let start_tab = if pinned_target {
+                                current_tab.clone()
+                            } else {
+                                rt.get_active_tab()
+                            };
+                            let step_report = browser_block_in_place(deadline, || {
+                                execute_steps_from_tab(
+                                    &mut rt,
+                                    std::slice::from_ref(step),
+                                    image_policy,
+                                    start_tab,
+                                    !pinned_target,
+                                    Some(&write_tabs),
+                                )
+                            });
+                            rt.touch();
+                            if !pinned_target {
+                                rt.set_request_tab(None);
+                            }
+                            current_tab = if pinned_target {
+                                step_report.tab_id.as_ref().and_then(|id| rt.find_tab(id))
+                            } else {
+                                rt.get_active_tab()
+                            };
+                            let nested_step = nested_sections.absorb(step_report);
+                            new_tabs.append(&mut nested_sections.new_tabs);
+                            routed_requests.append(&mut nested_sections.intercepted_requests);
+                            locator_handlers.append(&mut nested_sections.locator_handlers);
+                            nested_step.unwrap_or_else(|| {
+                                StepResult::failure(
+                                    idx,
+                                    "Browser action",
+                                    "No step result produced",
+                                )
+                            })
+                        }
+                    };
+                    for guard in &guards {
+                        guard.update_view(|view| view.applied_pane = None);
+                    }
+                    result
+                }
+            }
         } else {
             let mut bootstrap_error = None;
-            if current_tab.is_none() {
+            if current_tab.is_none() && !pinned_target {
                 let mut rt = runtime_before!();
                 rt.touch();
                 current_tab = rt.get_active_tab();
@@ -3626,7 +4003,7 @@ async fn execute_request_with_runtime_before_deadline(
                     )
                 {
                     match browser_block_in_place(deadline, || {
-                        let tab = rt.browser.new_tab().map_err(|e| e.to_string())?;
+                        let tab = rt.open_tab()?;
                         if let Err(error) =
                             crate::integrations::browser_runtime::setup_recording_for_tab(
                                 &mut rt,
@@ -3646,25 +4023,37 @@ async fn execute_request_with_runtime_before_deadline(
             }
             match &current_tab {
                 Some(tab) => {
-                    let mut rt = runtime_before!();
-                    browser_block_in_place(deadline, || {
-                        let mouse_state = rt
-                            .mouse_states
-                            .entry(tab.get_target_id().to_string())
-                            .or_default();
-                        execute_runtime_network_step(
-                            tab,
-                            &world,
-                            &network_monitor,
-                            step,
+                    let target_id = tab.get_target_id().to_string();
+                    let gate = {
+                        let mut rt = runtime_before!();
+                        rt.find_tab(&target_id).map(|_| rt.tab_gate(&target_id))
+                    };
+                    if let Some(gate) = gate {
+                        browser_block_in_place(deadline, || {
+                            let _gates = refact_browser::tab_gate::enter_step_gates(
+                                vec![(target_id, gate)],
+                                deadline,
+                            );
+                            execute_runtime_network_step(
+                                tab,
+                                &world,
+                                &network_monitor,
+                                step,
+                                idx,
+                                armed_network_waits.get(&idx).copied(),
+                                image_policy,
+                                &handlers,
+                                &mut locator_handlers,
+                                &mut MouseState::default(),
+                            )
+                        })
+                    } else {
+                        StepResult::failure(
                             idx,
-                            armed_network_waits.get(&idx).copied(),
-                            image_policy,
-                            &handlers,
-                            &mut locator_handlers,
-                            mouse_state,
+                            "Browser action",
+                            "The selected tab closed; nothing was dispatched",
                         )
-                    })
+                    }
                 }
                 None => match bootstrap_error {
                     Some(error) => {
@@ -3762,10 +4151,20 @@ async fn execute_request_with_runtime_before_deadline(
                         browser_block_in_place(deadline, || {
                             refact_browser::adopt_new_tabs(&mut rt, Some(idx))
                         });
-                        let popup_id = browser_block_in_place(deadline, || rt.list_tab_infos())
-                            .into_iter()
-                            .find(|tab| !wait.baseline.contains(&tab.id))
-                            .map(|tab| tab.id);
+                        let opener = current_tab
+                            .as_ref()
+                            .map(|tab| tab.get_target_id().to_string());
+                        let popup_id = rt
+                            .live_tabs()
+                            .iter()
+                            .map(|tab| tab.get_target_id().to_string())
+                            .filter(|id| !wait.baseline.contains(id))
+                            .find(|id| {
+                                !pinned_target
+                                    || opener.is_some()
+                                        && rt.tab_openers.get(id).map(|o| &o.tab_id)
+                                            == opener.as_ref()
+                            });
                         popup_id.and_then(|tab_id| {
                             rt.tab_opened_by_step.entry(tab_id.clone()).or_insert(idx);
                             rt.set_active_tab_target_id(tab_id.clone());
@@ -3789,7 +4188,7 @@ async fn execute_request_with_runtime_before_deadline(
                             *wait_result = popup_wait_opened_result(wait.step_index, &tab.id);
                         }
                         let rt = runtime_before!();
-                        current_tab = rt.get_active_tab();
+                        current_tab = rt.find_tab(&tab.id);
                     }
                     None => {
                         if let Some(wait_result) = results.get_mut(wait.result_index) {
@@ -3879,11 +4278,15 @@ async fn execute_request_with_runtime_before_deadline(
     let active_tab = if transport_recovery(&results).is_some() || recovery_fence.is_some() {
         None
     } else {
-        match current_tab {
+        match current_tab.clone() {
             Some(tab) => Some(tab),
+            None if pinned_target => None,
             None => runtime_before!().get_active_tab(),
         }
     };
+    let tab_id = active_tab
+        .as_ref()
+        .map(|tab| tab.get_target_id().to_string());
     let page_context_mode = request.page_context_mode();
     let snapshot_store = runtime_before!().get_store();
     let mut warnings: Vec<String> = Vec::new();
@@ -4032,6 +4435,7 @@ async fn execute_request_with_runtime_before_deadline(
         uploads,
         downloads,
         new_tabs,
+        tab_id,
         active_routes,
         intercepted_requests,
         context,
@@ -4177,10 +4581,27 @@ pub fn execute_steps_with_runtime(
     steps: &[BrowserStep],
     image_policy: &ImagePolicy,
 ) -> ExecutionReport {
-    let settings = browser_settings::current();
     refact_browser::adopt_new_tabs(runtime, None);
+    let start_tab = runtime.get_active_tab();
+    execute_steps_from_tab(runtime, steps, image_policy, start_tab, true, None)
+}
+
+/// Runs steps starting on `start_tab`. Without `fallback_after_close`, closing the current
+/// tab leaves the batch without a tab instead of moving it to another one.
+fn execute_steps_from_tab(
+    runtime: &mut BrowserRuntime,
+    steps: &[BrowserStep],
+    image_policy: &ImagePolicy,
+    start_tab: Option<Arc<Tab>>,
+    fallback_after_close: bool,
+    guarded_tabs: Option<&[Arc<Tab>]>,
+) -> ExecutionReport {
+    let settings = browser_settings::current();
+    if guarded_tabs.is_none() {
+        refact_browser::adopt_new_tabs(runtime, None);
+    }
     let initial_tab_ids = runtime.known_tab_ids();
-    let mut current_tab: Option<Arc<Tab>> = runtime.get_active_tab();
+    let mut current_tab: Option<Arc<Tab>> = start_tab;
 
     let mut results: Vec<StepResult> = Vec::new();
     let mut new_tabs = Vec::new();
@@ -4215,14 +4636,28 @@ pub fn execute_steps_with_runtime(
                 BrowserStep::OpenTab {
                     device,
                     url,
-                } => match open_tab_for_device(runtime, device) {
-                    Ok((descriptor, new_tab)) => {
+                    name,
+                } => match name
+                    .as_deref()
+                    .map(validate_tab_name)
+                    .transpose()
+                    .and_then(|name| {
+                        open_tab_for_device(runtime, device).map(|opened| (name, opened))
+                    }) {
+                    Ok((name, (descriptor, new_tab))) => {
+                        let mut write_tabs = guarded_tabs
+                            .map(<[Arc<Tab>]>::to_vec)
+                            .unwrap_or_else(|| runtime.open_tabs());
+                        if !write_tabs.iter().any(|tab| Arc::ptr_eq(tab, &new_tab)) {
+                            write_tabs.push(new_tab.clone());
+                        }
                         let device_label = descriptor.name.clone();
                         let target_id = new_tab.get_target_id().to_string();
                         let mut candidate = runtime.context_state.clone();
                         candidate.viewport = Some(descriptor.viewport.clone());
                         candidate.user_agent = Some((descriptor.user_agent.clone(), None));
-                        if let Err(error) = apply_context_to_tabs(runtime, &candidate) {
+                        if let Err(error) = apply_context_to_tabs(runtime, &candidate, &write_tabs)
+                        {
                             runtime.context_state_dirty = true;
                             let _ = new_tab.close(false);
                             all_ok = false;
@@ -4244,6 +4679,10 @@ pub fn execute_steps_with_runtime(
                             all_ok = false;
                             results.push(StepResult::failure(idx, "OpenTab", error));
                             break;
+                        }
+                        if let Some(name) = name {
+                            runtime.tab_meta.entry(target_id.clone()).or_default().name =
+                                Some(name);
                         }
                         let navigation = url.as_ref().map(|url| {
                             run_and_wait_for_navigation(
@@ -4295,11 +4734,22 @@ pub fn execute_steps_with_runtime(
                     };
                     let target_id = tab.get_target_id().to_string();
                     match tab.close(false) {
-                        Ok(_) => {
+                        Ok(false) => StepResult::failure(
+                            idx,
+                            "CloseTab",
+                            "Chrome refused to close the tab; it is still open",
+                        ),
+                        Ok(true) => {
                             runtime.world_manager.tab_closed(&target_id);
                             runtime.mouse_states.remove(&target_id);
                             runtime.select_tab_after_close(&target_id);
-                            current_tab = runtime.get_active_tab();
+                            current_tab = if fallback_after_close {
+                                runtime.get_active_tab()
+                            } else {
+                                current_tab
+                                    .take()
+                                    .filter(|tab| tab.get_target_id() != &target_id)
+                            };
                             StepResult::success(
                                 idx,
                                 format!("Closed tab {}", &target_id[..8.min(target_id.len())]),
@@ -4311,12 +4761,6 @@ pub fn execute_steps_with_runtime(
                 BrowserStep::SwitchTab {
                     tab: tab_target,
                 } => {
-                    let tabs = runtime
-                        .browser
-                        .get_tabs()
-                        .lock()
-                        .map(|t| t.clone())
-                        .unwrap_or_default();
                     let target_str = match tab_target {
                         TabTarget::Active => String::from("active"),
                         TabTarget::Id {
@@ -4324,15 +4768,15 @@ pub fn execute_steps_with_runtime(
                         } => id.clone(),
                     };
                     let found = match tab_target {
-                        TabTarget::Active => {
-                            runtime.get_active_tab().or_else(|| tabs.first().cloned())
-                        }
+                        TabTarget::Active if !fallback_after_close => current_tab
+                            .as_ref()
+                            .and_then(|tab| runtime.find_tab(tab.get_target_id())),
+                        TabTarget::Active => runtime
+                            .get_active_tab()
+                            .or_else(|| runtime.open_tabs().first().cloned()),
                         TabTarget::Id {
                             id,
-                        } => tabs
-                            .iter()
-                            .find(|t| t.get_target_id() == id.as_str())
-                            .cloned(),
+                        } => runtime.find_tab(id),
                     };
                     match found {
                         Some(found_tab) => {
@@ -4385,7 +4829,10 @@ pub fn execute_steps_with_runtime(
                 | BrowserStep::RouteFromHar {
                     ..
                 }) => execute_route_management_step(runtime, step, idx).unwrap(),
-                BrowserStep::Reset => execute_reset_step(runtime, idx),
+                BrowserStep::Reset => {
+                    let tabs = runtime.open_tabs();
+                    execute_reset_step(runtime, idx, &tabs)
+                }
                 BrowserStep::CdpSend {
                     method,
                     params,
@@ -4416,7 +4863,8 @@ pub fn execute_steps_with_runtime(
                     execute_instrumentation_step(runtime, step, idx)
                 }
                 step if is_context_management_step(step) => {
-                    execute_context_management_step(runtime, step, idx)
+                    let tabs = runtime.open_tabs();
+                    execute_context_management_step(runtime, step, idx, &tabs)
                 }
                 BrowserStep::WaitForPopup {
                     timeout_ms,
@@ -4675,6 +5123,9 @@ pub fn execute_steps_with_runtime(
         Some(tab) => (Some(tab.get_url()), tab.get_title().ok()),
         None => (None, None),
     };
+    let tab_id = current_tab
+        .as_ref()
+        .map(|tab| tab.get_target_id().to_string());
     let dialogs = runtime.dialog_manager.take_reports();
     let uploads = runtime.file_chooser_manager.take_uploads();
     let downloads = runtime.download_monitor.take_report();
@@ -4709,6 +5160,7 @@ pub fn execute_steps_with_runtime(
         uploads,
         downloads,
         new_tabs,
+        tab_id,
         active_routes: runtime.route_registry.list(),
         intercepted_requests: runtime.route_registry.drain_interceptions(),
         context: Some(context_summary(runtime)),
@@ -7301,19 +7753,28 @@ fn step_drag_and_drop(
             return result;
         }
     };
-    let keyboard = Keyboard::new(CdpKeyboardDispatcher::new(tab));
-    let dispatcher = CdpMouseDispatcher::new(tab);
-    let mut mouse = Mouse::from_state(dispatcher, &keyboard, mouse_state.clone());
-    let mut drag = CdpDragObserver::new(tab, world);
-    let drag_result = refact_browser::drag_and_drop(
-        &mut mouse,
-        &mut drag,
-        &source.output.1.frame_id,
-        source.output.2,
-        target.output.2,
-        2,
-    );
-    *mouse_state = mouse.state();
+    let drag_result = (|| {
+        let hold = refact_browser::tab_gate::hold_tab_for_dispatch(tab.get_target_id())?;
+        let keyboard = Keyboard::new(CdpKeyboardDispatcher::new(tab));
+        let dispatcher = CdpMouseDispatcher::new(tab);
+        let mut mouse = Mouse::from_state(
+            dispatcher,
+            &keyboard,
+            hold.mouse_state().unwrap_or_else(|| mouse_state.clone()),
+        );
+        let mut drag = CdpDragObserver::new(tab, world);
+        let result = refact_browser::drag_and_drop(
+            &mut mouse,
+            &mut drag,
+            &source.output.1.frame_id,
+            source.output.2,
+            target.output.2,
+            2,
+        );
+        *mouse_state = mouse.state();
+        hold.set_mouse_state(mouse_state.clone());
+        result.map_err(|error| error.to_string())
+    })();
     let _ = world.release_handle(tab, &source.output.1);
     let _ = world.release_handle(tab, &target.output.1);
     match drag_result {
@@ -7397,11 +7858,17 @@ fn step_mouse(
     ) -> Result<(), refact_browser::MouseError>,
     summary: String,
 ) -> StepResult {
+    let hold = match refact_browser::tab_gate::hold_tab_for_dispatch(tab.get_target_id()) {
+        Ok(hold) => hold,
+        Err(error) => return StepResult::failure(idx, "Coordinate mouse action failed", error),
+    };
+    let initial = hold.mouse_state().unwrap_or_else(|| state.clone());
     let keyboard = Keyboard::new(CdpKeyboardDispatcher::new(tab));
-    let mut mouse = Mouse::from_state(CdpMouseDispatcher::new(tab), &keyboard, state.clone());
+    let mut mouse = Mouse::from_state(CdpMouseDispatcher::new(tab), &keyboard, initial);
     match operation(&mut mouse) {
         Ok(()) => {
             *state = mouse.state();
+            hold.set_mouse_state(state.clone());
             StepResult::success(idx, summary)
         }
         Err(error) => StepResult::failure(idx, "Coordinate mouse action failed", error.to_string()),
@@ -7440,8 +7907,11 @@ fn step_nav_js(tab: &Tab, idx: usize, js: &str, success_msg: &str) -> StepResult
     let settings = browser_settings::current();
     match run_and_wait_for_navigation(tab, settings.timing.default_wait_timeout_ms, || {
         let target = js_navigation_target(tab, js)?;
-        tab.evaluate(js, false)
-            .map_err(|error| format!("JS navigation trigger failed: {error}"))?;
+        refact_browser::tab_gate::with_tab_dispatch(tab.get_target_id(), || {
+            tab.evaluate(js, false)
+                .map(|_| ())
+                .map_err(|error| format!("JS navigation trigger failed: {error}"))
+        })?;
         Ok(target)
     }) {
         Ok(warning) => navigation_step_success(idx, success_msg.to_string(), warning),
@@ -7518,15 +7988,16 @@ enum NavigationEvent {
 }
 
 fn trigger_page_navigation(tab: &Tab, url: &str) -> Result<NavigationWaitTarget, String> {
-    let response = tab
-        .call_method(Page::Navigate {
+    let response = refact_browser::tab_gate::with_tab_dispatch(tab.get_target_id(), || {
+        tab.call_method(Page::Navigate {
             url: url.to_string(),
             referrer: None,
             transition_Type: None,
             frame_id: None,
             referrer_policy: None,
         })
-        .map_err(|error| format!("CDP Page.navigate failed: {error}"))?;
+        .map_err(|error| format!("CDP Page.navigate failed: {error}"))
+    })?;
     if let Some(error) = response.error_text {
         return Err(format!("CDP Page.navigate failed: {error}"));
     }
@@ -7854,7 +8325,9 @@ fn step_locator_action_with_timeout(
                     return StepResult::failure(idx, action, format!("Unknown action: {}", action));
                 }
             };
-            match call_handle_json(tab, world, &info.handle, &action_js) {
+            match refact_browser::tab_gate::with_tab_dispatch(tab.get_target_id(), || {
+                call_handle_json(tab, world, &info.handle, &action_js)
+            }) {
                 Ok(_) => StepResult::success(
                     idx,
                     format!(
@@ -7917,6 +8390,38 @@ fn step_actionable_action_in_mode(
     mode: ActionabilityExecutionMode,
     timeout: Duration,
 ) -> StepResult {
+    run_actionable_action(
+        tab,
+        world,
+        idx,
+        locator,
+        action,
+        action_kind,
+        handlers,
+        locator_handler_firings,
+        image_policy,
+        mode,
+        timeout,
+    )
+    .0
+}
+
+fn run_actionable_action(
+    tab: &Tab,
+    world: &WorldManager,
+    idx: usize,
+    locator: &BrowserLocator,
+    action: &str,
+    action_kind: ActionKind,
+    handlers: Option<&Arc<Mutex<LocatorHandlerRegistry>>>,
+    locator_handler_firings: &mut Vec<LocatorHandlerFiring>,
+    image_policy: &ImagePolicy,
+    mode: ActionabilityExecutionMode,
+    timeout: Duration,
+) -> (
+    StepResult,
+    Option<refact_browser::tab_gate::TabDispatchHold>,
+) {
     let engine = ActionabilityEngine::new(SystemClock::default(), ActionabilityTimeouts::default());
     let mut driver = BrowserActionDriver::new(
         tab,
@@ -7949,7 +8454,7 @@ fn step_actionable_action_in_mode(
                 result.actionability = Some(success.diagnostics(action_kind));
             }
             result.locator_echo = driver.locator_echo.take();
-            result
+            (result, driver.focus_hold.take())
         }
         Err(error) => {
             let diagnostics = error.diagnostics(action_kind);
@@ -7969,7 +8474,7 @@ fn step_actionable_action_in_mode(
             }
             result.retries = diagnostics.attempts.unwrap_or_default();
             result.actionability = Some(diagnostics);
-            result
+            (result, None)
         }
     }
 }
@@ -8235,7 +8740,7 @@ fn step_tap(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn focus_for_keyboard(
+pub(crate) fn focus_for_keyboard(
     tab: &Tab,
     world: &WorldManager,
     idx: usize,
@@ -8244,8 +8749,8 @@ fn focus_for_keyboard(
     handlers: Option<&Arc<Mutex<LocatorHandlerRegistry>>>,
     locator_handler_firings: &mut Vec<LocatorHandlerFiring>,
     image_policy: &ImagePolicy,
-) -> Option<StepResult> {
-    let result = step_actionable_action(
+) -> Result<Option<refact_browser::tab_gate::TabDispatchHold>, StepResult> {
+    let (result, hold) = run_actionable_action(
         tab,
         world,
         idx,
@@ -8255,8 +8760,14 @@ fn focus_for_keyboard(
         handlers,
         locator_handler_firings,
         image_policy,
+        ActionabilityExecutionMode::Standard,
+        ActionabilityTimeouts::default().action,
     );
-    (!result.ok).then_some(result)
+    if result.ok {
+        Ok(hold)
+    } else {
+        Err(result)
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -8270,8 +8781,8 @@ fn step_insert_text(
     locator_handler_firings: &mut Vec<LocatorHandlerFiring>,
     image_policy: &ImagePolicy,
 ) -> StepResult {
-    if let Some(locator) = locator {
-        if let Some(failure) = focus_for_keyboard(
+    let _focus = if let Some(locator) = locator {
+        match focus_for_keyboard(
             tab,
             world,
             idx,
@@ -8281,9 +8792,12 @@ fn step_insert_text(
             locator_handler_firings,
             image_policy,
         ) {
-            return failure;
+            Ok(hold) => hold,
+            Err(failure) => return failure,
         }
-    }
+    } else {
+        None
+    };
     let mut keyboard = Keyboard::new(CdpKeyboardDispatcher::new(tab));
     match keyboard.insert_text(text) {
         Ok(()) => StepResult::success(
@@ -8306,7 +8820,7 @@ fn step_press_sequentially(
     locator_handler_firings: &mut Vec<LocatorHandlerFiring>,
     image_policy: &ImagePolicy,
 ) -> StepResult {
-    if let Some(failure) = focus_for_keyboard(
+    let _focus = match focus_for_keyboard(
         tab,
         world,
         idx,
@@ -8316,8 +8830,9 @@ fn step_press_sequentially(
         locator_handler_firings,
         image_policy,
     ) {
-        return failure;
-    }
+        Ok(hold) => hold,
+        Err(failure) => return failure,
+    };
     let delay = delay_ms
         .filter(|delay_ms| *delay_ms > 0)
         .map(Duration::from_millis);
@@ -10729,15 +11244,14 @@ fn step_set_content(
             );
         }
     };
-    if let Err(error) = tab.call_method(Page::SetDocumentContent {
-        frame_id,
-        html: html.to_string(),
+    if let Err(error) = refact_browser::tab_gate::with_tab_dispatch(tab.get_target_id(), || {
+        tab.call_method(Page::SetDocumentContent {
+            frame_id,
+            html: html.to_string(),
+        })
+        .map_err(|error| format!("Failed to set document content: {error}"))
     }) {
-        return StepResult::failure(
-            idx,
-            "Set content",
-            format!("Failed to set document content: {error}"),
-        );
+        return StepResult::failure(idx, "Set content", error);
     }
     let _ = world.release_all(tab);
     let state = wait_until.unwrap_or(BrowserLoadState::Load);
@@ -11501,6 +12015,7 @@ mod tests {
             uploads: vec![],
             downloads: vec![],
             new_tabs: vec![],
+            tab_id: None,
             active_routes: vec![],
             intercepted_requests: vec![],
             context: None,

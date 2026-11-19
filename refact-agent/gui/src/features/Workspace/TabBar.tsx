@@ -108,6 +108,7 @@ function tabDragPayloadForSurface(surfaceKey: SurfaceKey): {
     if (
       parsed.kind === "dashboard" ||
       parsed.kind === "app" ||
+      parsed.kind === "browser" ||
       parsed.kind === "design" ||
       parsed.kind === "gitdiff" ||
       parsed.kind === "worktreediff" ||

@@ -1,4 +1,8 @@
-import { collectTabIds, type PaneNode } from "../features/ChatPanes/panesTree";
+import {
+  closeLeaf,
+  collectTabIds,
+  type PaneNode,
+} from "../features/ChatPanes/panesTree";
 import type { Config } from "../features/Config/configSlice";
 import type { QuestionDraft } from "./questionResponses";
 import {
@@ -448,6 +452,11 @@ function createFallbackWorkspace(): WorkspaceState {
   };
 }
 
+const LEGACY_BROWSER_SURFACE_KEY = "browser:main";
+
+const isLegacyBrowserSurface = (value: unknown): boolean =>
+  stringOrUndefined(value)?.trim() === LEGACY_BROWSER_SURFACE_KEY;
+
 function normalizeSurfaceKey(value: unknown): SurfaceKey | null {
   const key = stringOrUndefined(value)?.trim();
   if (!key) return null;
@@ -494,6 +503,7 @@ type WorkspaceNodeValidationContext = {
   seenNodeIds: Set<string>;
   totalNodeCount: { value: number };
   surfacePlacementCount: { value: number };
+  legacyOnlyLeafIds: string[];
 };
 
 function normalizePersistedWorkspaceNode(
@@ -520,7 +530,12 @@ function normalizePersistedWorkspaceNode(
     }
 
     const tabIds: SurfaceKey[] = [];
+    let legacySurfaces = 0;
     for (const rawSurfaceKey of value.tabIds) {
+      if (isLegacyBrowserSurface(rawSurfaceKey)) {
+        legacySurfaces += 1;
+        continue;
+      }
       const surfaceKey = normalizeSurfaceKey(rawSurfaceKey);
       if (!surfaceKey) return null;
       if (isWorktreeDiffSurface(surfaceKey)) continue;
@@ -532,11 +547,21 @@ function normalizePersistedWorkspaceNode(
       tabIds.push(surfaceKey);
     }
 
+    if (legacySurfaces > 0 && tabIds.length === 0)
+      context.legacyOnlyLeafIds.push(id);
+
     const rawActiveTabId =
-      value.activeTabId === null || value.activeTabId === undefined
+      value.activeTabId === null ||
+      value.activeTabId === undefined ||
+      isLegacyBrowserSurface(value.activeTabId)
         ? null
         : normalizeSurfaceKey(value.activeTabId);
-    if (value.activeTabId && !rawActiveTabId) return null;
+    if (
+      value.activeTabId &&
+      !rawActiveTabId &&
+      !isLegacyBrowserSurface(value.activeTabId)
+    )
+      return null;
     const activeTabId =
       rawActiveTabId && tabIds.includes(rawActiveTabId)
         ? rawActiveTabId
@@ -603,9 +628,14 @@ function normalizePersistedWorkspaceGroup(
     seenNodeIds: new Set<string>(),
     totalNodeCount,
     surfacePlacementCount: { value: 0 },
+    legacyOnlyLeafIds: [],
   };
-  const root = normalizePersistedWorkspaceNode(value.root, context);
-  if (!root) return null;
+  const parsed = normalizePersistedWorkspaceNode(value.root, context);
+  if (!parsed) return null;
+  const root = context.legacyOnlyLeafIds.reduce(
+    (node, leafId) => (node.kind === "split" ? closeLeaf(node, leafId) : node),
+    parsed,
+  );
 
   const leafIds = collectPaneLeafIds(root);
   const surfaceCount = collectTabIds(root).length;
@@ -647,6 +677,7 @@ export function loadPersistedWorkspace(
   const tabs: SurfaceKey[] = [];
   let legacyTerminalTab = false;
   for (const rawSurfaceKey of record.tabs) {
+    if (isLegacyBrowserSurface(rawSurfaceKey)) continue;
     const surfaceKey = normalizeSurfaceKey(rawSurfaceKey);
     if (!surfaceKey) return fallback;
     if (isTerminalSurface(surfaceKey)) {
@@ -702,10 +733,17 @@ export function loadPersistedWorkspace(
     return fallback;
   }
   const rawActiveTabId =
-    record.activeTabId === null || record.activeTabId === undefined
+    record.activeTabId === null ||
+    record.activeTabId === undefined ||
+    isLegacyBrowserSurface(record.activeTabId)
       ? null
       : normalizeSurfaceKey(record.activeTabId);
-  if (record.activeTabId && !rawActiveTabId) return fallback;
+  if (
+    record.activeTabId &&
+    !rawActiveTabId &&
+    !isLegacyBrowserSurface(record.activeTabId)
+  )
+    return fallback;
   const contextChatEntries = isRecord(record.contextChatByTab)
     ? Object.entries(record.contextChatByTab).filter(
         (entry): entry is [string, string] =>

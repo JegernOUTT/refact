@@ -349,7 +349,7 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
         .merge(scheduler_routes())
         .nest("/scheduler/credentials", automation_credentials::router())
         .merge(browser_routes())
-        .merge(v1_browser_project::router(app_state.clone()))
+        .merge(v1_browser_project::router())
         .merge(stats_routes())
         .merge(extensions_routes())
         .merge(marketplace_sources_routes())

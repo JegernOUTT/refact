@@ -780,3 +780,102 @@ describe("chatUiPersistence", () => {
     expect(loadTaskWorkspaceTab("task-3")).toBeNull();
   });
 });
+
+describe("legacy browser:main in persisted layouts", () => {
+  beforeEach(() => {
+    localStorage.clear();
+    setProjectStorageNamespace("legacy-browser");
+    savePersistedChatTabs({
+      openThreadIds: ["a", "b"],
+      currentThreadId: "a",
+      tabs: [{ id: "a" }, { id: "b" }],
+    });
+  });
+
+  it("drops only browser:main and keeps the rest of the group", () => {
+    localStorage.setItem(
+      workspaceStorageKey(),
+      JSON.stringify({
+        version: 4,
+        tabs: ["chat:a", "browser:main"],
+        activeTabId: "chat:a",
+        groups: {
+          "chat:a": {
+            focusedLeafId: "left",
+            root: {
+              kind: "split",
+              id: "s",
+              dir: "row",
+              sizes: [0.5, 0.5],
+              children: [
+                {
+                  kind: "leaf",
+                  id: "left",
+                  tabIds: ["chat:a", "chat:b"],
+                  activeTabId: "chat:a",
+                },
+                {
+                  kind: "leaf",
+                  id: "right",
+                  tabIds: ["file:/repo/a.ts", "browser:main"],
+                  activeTabId: "browser:main",
+                },
+              ],
+            },
+          },
+        },
+      }),
+    );
+    const workspace = loadPersistedWorkspace();
+    expect(workspace.tabs).toEqual(["chat:a"]);
+    const group = workspace.groups["chat:a"];
+    expect(group && collectTabIds(group.root)).toEqual([
+      "chat:a",
+      "chat:b",
+      "file:/repo/a.ts",
+    ]);
+  });
+
+  it("collapses a pane that only held browser:main", () => {
+    localStorage.setItem(
+      workspaceStorageKey(),
+      JSON.stringify({
+        version: 4,
+        tabs: ["chat:a"],
+        activeTabId: "chat:a",
+        groups: {
+          "chat:a": {
+            focusedLeafId: "right",
+            root: {
+              kind: "split",
+              id: "s",
+              dir: "row",
+              sizes: [0.5, 0.5],
+              children: [
+                {
+                  kind: "leaf",
+                  id: "left",
+                  tabIds: ["chat:a", "chat:b"],
+                  activeTabId: "chat:a",
+                },
+                {
+                  kind: "leaf",
+                  id: "right",
+                  tabIds: ["browser:main"],
+                  activeTabId: "browser:main",
+                },
+              ],
+            },
+          },
+        },
+      }),
+    );
+    const group = loadPersistedWorkspace().groups["chat:a"];
+    expect(group?.root).toMatchObject({
+      kind: "leaf",
+      id: "left",
+      tabIds: ["chat:a", "chat:b"],
+    });
+    expect(group?.focusedLeafId).toBe("left");
+  });
+});

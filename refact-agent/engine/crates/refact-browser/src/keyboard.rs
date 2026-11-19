@@ -72,18 +72,31 @@ pub trait KeyboardDispatcher {
 
 pub struct CdpKeyboardDispatcher<'a> {
     tab: &'a Tab,
+    hold: Option<crate::tab_gate::TabDispatchHold>,
 }
 
 impl<'a> CdpKeyboardDispatcher<'a> {
     pub fn new(tab: &'a Tab) -> Self {
         Self {
             tab,
+            hold: None,
         }
+    }
+}
+
+impl<T: KeyboardDispatcher + ?Sized> KeyboardDispatcher for &mut T {
+    fn dispatch(&mut self, event: KeyboardDispatch) -> Result<(), String> {
+        (**self).dispatch(event)
     }
 }
 
 impl KeyboardDispatcher for CdpKeyboardDispatcher<'_> {
     fn dispatch(&mut self, event: KeyboardDispatch) -> Result<(), String> {
+        if self.hold.is_none() {
+            self.hold = Some(crate::tab_gate::hold_tab_for_dispatch(
+                self.tab.get_target_id(),
+            )?);
+        }
         match event {
             KeyboardDispatch::Key(payload) => {
                 let event_type = match payload.event_type {

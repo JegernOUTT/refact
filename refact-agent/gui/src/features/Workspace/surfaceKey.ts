@@ -13,9 +13,10 @@ export type WorkspaceCapabilities = Record<
   "filesPanel" | "gitPanel" | "terminalPanel",
   boolean
 >;
-export type MainSurfaceKind = "git" | "browser";
+export type MainSurfaceKind = "git";
 export type PrefixedSurfaceKind =
   | "app"
+  | "browser"
   | "chat"
   | "task"
   | "buddy"
@@ -34,10 +35,9 @@ export type PaneSurfaceKey =
   | TaskSurfaceKey
   | BuddySurfaceKey
   | DesignSurfaceKey
-  | BrowserSurfaceKey
+  | BrowserTabSurfaceKey
   | MainSurfaceKey;
-export type BrowserSurfaceKey = "browser:main";
-export const BROWSER_SURFACE_KEY: BrowserSurfaceKey = "browser:main";
+export type BrowserTabSurfaceKey = `browser:${string}`;
 export type AppSurfaceKey = `app:${string}`;
 export type ChatSurfaceKey = `chat:${string}`;
 export type DesignSurfaceKey = `design:${string}`;
@@ -60,6 +60,7 @@ export type ParsedSurfaceKey =
 
 const isPrefixedSurfaceKind = (kind: string): kind is PrefixedSurfaceKind =>
   kind === "app" ||
+  kind === "browser" ||
   kind === "chat" ||
   kind === "task" ||
   kind === "buddy" ||
@@ -69,11 +70,15 @@ const isPrefixedSurfaceKind = (kind: string): kind is PrefixedSurfaceKind =>
   kind === "worktreediff";
 
 export const isMainSurfaceKind = (kind: string): kind is MainSurfaceKind =>
-  kind === "git" || kind === "browser";
+  kind === "git";
+
+const BROWSER_TAB_ID_PATTERN = /^[\w.:~-]{1,256}$/;
+
+export const isValidBrowserTabId = (id: string): boolean =>
+  id !== "main" && BROWSER_TAB_ID_PATTERN.test(id);
 
 export function makeSurfaceKey(kind: "dashboard", id?: null): SurfaceKey;
 export function makeSurfaceKey(kind: "git", id: "main"): MainSurfaceKey;
-export function makeSurfaceKey(kind: "browser", id: "main"): BrowserSurfaceKey;
 export function makeSurfaceKey(
   kind: Exclude<SurfaceKind, "dashboard" | MainSurfaceKind>,
   id: string,
@@ -119,6 +124,7 @@ export function parseSurfaceKey(key: SurfaceKey): ParsedSurfaceKey {
 
   if (
     (kind === "buddy" && id !== "home") ||
+    (kind === "browser" && !isValidBrowserTabId(id)) ||
     (kind === "gitdiff" && !decodeGitDiffDescriptor(id)) ||
     (kind === "worktreediff" && !decodeWorktreeDiffDescriptor(id))
   ) {
@@ -159,8 +165,21 @@ export const isSplittableSurface = (key: SurfaceKey): key is PaneSurfaceKey => {
 export const isDesignSurface = (key: SurfaceKey): key is DesignSurfaceKey =>
   key.startsWith("design:") && key.length > "design:".length;
 
-export const isBrowserSurface = (key: SurfaceKey): key is BrowserSurfaceKey =>
-  key === BROWSER_SURFACE_KEY;
+export const isBrowserTabSurface = (
+  key: SurfaceKey,
+): key is BrowserTabSurfaceKey =>
+  key.startsWith("browser:") &&
+  isValidBrowserTabId(key.slice("browser:".length));
+
+export const browserTabIdFromSurfaceKey = (key: SurfaceKey): string | null =>
+  isBrowserTabSurface(key) ? key.slice("browser:".length) : null;
+
+export const makeBrowserTabSurfaceKey = (
+  tabId: string,
+): BrowserTabSurfaceKey => {
+  if (!isValidBrowserTabId(tabId)) throw new Error("invalid browser tab id");
+  return `browser:${tabId}`;
+};
 
 export const isMainSurface = (key: SurfaceKey): key is MainSurfaceKey =>
   key === "git:main" || isGitDiffSurface(key) || isWorktreeDiffSurface(key);
@@ -204,6 +223,9 @@ export const isMainSurfaceEnabled = (
 
 export const isAppSurface = (key: SurfaceKey): key is AppSurfaceKey =>
   key.startsWith("app:") && key.length > "app:".length;
+
+export const isChatBoundSurface = (key: SurfaceKey): boolean =>
+  isAppSurface(key) || isBrowserTabSurface(key);
 
 export const makeWorktreeDiffSurfaceKey = (
   descriptor: WorktreeDiffDescriptor,

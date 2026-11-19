@@ -28,17 +28,40 @@ struct BrowserActionRequestEnvelope {
     block_service_workers: Option<bool>,
     #[serde(default)]
     continue_on_error: bool,
+    #[serde(default)]
+    tab_name: Option<String>,
     steps: Vec<Value>,
 }
 
 pub fn parse_browser_action_request(value: Value) -> Result<BrowserActionRequest, String> {
+    parse_browser_tool_request(value).map(|(request, _)| request)
+}
+
+/// The tool request plus its validated `tab_name`, which names the tab the call ends on.
+pub fn parse_browser_tool_request(
+    value: Value,
+) -> Result<(BrowserActionRequest, Option<String>), String> {
     let envelope: BrowserActionRequestEnvelope =
         serde_json::from_value(value).map_err(|error| bounded_error_text(&error.to_string()))?;
+    let tab_name = envelope
+        .tab_name
+        .as_deref()
+        .map(validate_tab_name)
+        .transpose()
+        .map_err(|error| format!("tab_name: {error}"))?;
     let mut steps = Vec::with_capacity(envelope.steps.len());
     for (index, raw_step) in envelope.steps.into_iter().enumerate() {
-        steps.push(parse_browser_step(index, raw_step)?);
+        let step = parse_browser_step(index, raw_step)?;
+        if let BrowserStep::OpenTab {
+            name: Some(name), ..
+        } = &step
+        {
+            validate_tab_name(name)
+                .map_err(|error| format!("step[{index}] (open_tab): name: {error}"))?;
+        }
+        steps.push(step);
     }
-    Ok(BrowserActionRequest {
+    let request = BrowserActionRequest {
         acknowledge_session_generation: envelope.acknowledge_session_generation,
         session: envelope.session,
         expected_session_id: envelope.expected_session_id,
@@ -49,7 +72,8 @@ pub fn parse_browser_action_request(value: Value) -> Result<BrowserActionRequest
         block_service_workers: envelope.block_service_workers,
         continue_on_error: envelope.continue_on_error,
         steps,
-    })
+    };
+    Ok((request, tab_name))
 }
 
 fn parse_browser_step(index: usize, raw_step: Value) -> Result<BrowserStep, String> {

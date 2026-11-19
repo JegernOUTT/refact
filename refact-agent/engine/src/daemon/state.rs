@@ -254,13 +254,6 @@ impl DaemonState {
                 .then(|| config.hooks.token.clone())
                 .flatten()
         });
-        let project_browser_proxy_enabled = if config.auth.enabled {
-            auth_token
-                .as_deref()
-                .is_some_and(|token| !token.trim().is_empty())
-        } else {
-            cfg!(target_os = "linux")
-        };
         let supervisor = crate::daemon::supervisor::Supervisor::new_with_cron_pending(
             events.clone(),
             daemon_dir.clone(),
@@ -269,7 +262,6 @@ impl DaemonState {
             proxy_activity.clone(),
             config.idle_timeout_secs,
             worker_auth_token,
-            project_browser_proxy_enabled,
             relaunch_executable.clone(),
         );
         let proxy_client = reqwest::Client::builder()

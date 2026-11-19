@@ -1,5 +1,9 @@
 import { pythonWorkspaceApi } from "../services/refact/pythonWorkspace";
 import { appWorkspacePersistenceMiddleware } from "../features/Apps/appWorkspacePersistence";
+import {
+  browserViewsSlice,
+  browserWorkspaceMiddleware,
+} from "../features/Browser/browserViews";
 import { appsSlice } from "../features/Apps/appsSlice";
 import { appsApi } from "../services/refact/apps";
 import { surfaceSessionMiddleware } from "../features/Workspace/surfaceSessionState";
@@ -241,6 +245,7 @@ const rootReducer = combineSlices(
   knowledgeSlice,
   connectionSlice,
   browserSlice,
+  browserViewsSlice,
   designSlice,
   notificationsSlice,
   schedulerSlice,
@@ -388,6 +393,7 @@ export function setUpStore(preloadedState?: Partial<RootState>) {
         .prepend(historyMiddleware.middleware)
         .prepend(
           appWorkspacePersistenceMiddleware,
+          browserWorkspaceMiddleware,
           surfaceSessionMiddleware,
           listenerMiddleware.middleware,
         );

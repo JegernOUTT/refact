@@ -20,13 +20,19 @@ export type WorkspaceDockSectionId =
   | "python"
   | "agents"
   | "activity"
-  | "apps";
+  | "apps"
+  | "browser";
 
 export function isDockSectionAvailable(
   section: WorkspaceDockSectionId,
   availability: WorkspaceDockAvailability,
 ): boolean {
-  return section === "python" || section === "agents" || availability[section];
+  return (
+    section === "python" ||
+    section === "agents" ||
+    section === "browser" ||
+    availability[section]
+  );
 }
 
 export function resolveWorkspaceDockAvailability(

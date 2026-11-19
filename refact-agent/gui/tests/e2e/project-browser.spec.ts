@@ -1,52 +1,36 @@
 import {
-  chromium,
   expect,
   test,
+  type Browser,
   type BrowserContext,
   type Locator,
   type Page,
   type TestInfo,
 } from "@playwright/test";
-import { existsSync } from "node:fs";
-import { spawn } from "node:child_process";
-import { readFile, writeFile } from "node:fs/promises";
-import { join } from "node:path";
-import { setTimeout as delay } from "node:timers/promises";
+import { createHash } from "node:crypto";
+import { existsSync, readdirSync } from "node:fs";
+import { cp, writeFile } from "node:fs/promises";
+import { basename, join } from "node:path";
 import {
   createProjectRoot,
-  createDesktopOpener,
   Daemon,
   fixtureEnvironment,
-  seedChat,
+  NON_LOOPBACK_HOST,
   seedLegacyProfile,
   startSite,
-  type DesktopOpener,
-  type Project,
+  Worker,
+  writeChat,
+  writeEngineConfig,
+  type Fixture,
+  type Site,
 } from "./project-browser/fixture";
 
 test.skip(
   !process.env.REFACT_PROJECT_BROWSER_SCRATCH,
-  "Real daemon and Chromium: use tests/e2e/project-browser/run.sh",
+  "Real engine and Chromium: use tests/e2e/project-browser/run.sh",
 );
 
-const region = (page: Page) =>
-  page.getByRole("region", { name: "Project browser" });
-const address = (page: Page) =>
-  region(page).getByRole("textbox", { name: /address|url/i });
-const frame = (page: Page) =>
-  region(page).getByRole("img", { name: /browser/i });
-const browserTab = (page: Page) =>
-  page.getByRole("tab", { name: "Browser", exact: true });
-const browserTabs = (page: Page) =>
-  region(page).getByRole("group", { name: "Browser tabs" });
-const chatTab = (page: Page, title: string) =>
-  page.getByRole("tab").filter({
-    has: page.getByText(title, { exact: true }),
-  });
-const openButton = (page: Page) =>
-  page.getByRole("button", { name: "Open browser", exact: true });
 const browserEndpoint = "/v1/browser/project/";
-const alphaSignedIn = "Signed in: Project Alpha";
 
 type BrowserFrame = {
   runtime_id: string;
@@ -58,68 +42,251 @@ type BrowserFrame = {
   viewport: { width: number; height: number };
 };
 
-type BrowserStatus = {
-  project_id: string | null;
-  connected: boolean;
-  running: boolean;
-  runtime_id: string | null;
-  active_tab: string | null;
-  tabs: { tab_id: string; title: string; url: string }[];
+type StatusTab = {
+  tab_id: string;
+  url: string;
+  title: string;
+  name: string | null;
+  opened_by_chat: string | null;
+  last_chat: string | null;
 };
 
-function observeFrames(page: Page) {
-  let latest: BrowserFrame | undefined;
+type BrowserStatus = {
+  running: boolean;
+  connected: boolean;
+  runtime_id?: string;
+  tabs: StatusTab[];
+};
+
+const composer = (page: Page) => page.getByTestId("chat-form-textarea");
+const browserView = (page: Page) =>
+  page.getByRole("region", { name: "Browser tab", exact: true });
+const frameImage = (page: Page) =>
+  browserView(page).getByRole("img", { name: "Browser page" });
+const workspaceTab = (page: Page, title: string) =>
+  page.getByRole("tab", {
+    name: new RegExp(`(^|\\s)${title.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`),
+  });
+const leafSections = (page: Page) =>
+  page.locator("section[data-workspace-leaf-id]");
+const railButton = (page: Page) =>
+  page.locator('button[aria-controls="workspace-browser-panel"]');
+const dockPanel = (page: Page) => page.locator("#workspace-browser-panel");
+
+/** Every response the GUI page receives, plus the latest Browser frame per tab. */
+/** Local wall-clock time in the worker log format (HHMMSS.mmm). */
+const logClock = (at: number) => {
+  const time = new Date(at);
+  const pad = (value: number, size = 2) => String(value).padStart(size, "0");
+  return `${pad(time.getHours())}${pad(time.getMinutes())}${pad(
+    time.getSeconds(),
+  )}.${pad(time.getMilliseconds(), 3)}`;
+};
+
+type BrowserRequest = {
+  route: string;
+  tab_id: string | null;
+  kind: string | null;
+  started: string;
+  ended: string | null;
+  startAt: number;
+  endAt: number | null;
+  ms: number | null;
+  status: number | null;
+  failure: string | null;
+};
+
+function observe(page: Page) {
+  const frames = new Map<string, BrowserFrame>();
+  const frameLog: { tab_id: string; url: string; title: string; at: number }[] =
+    [];
+  const requests: BrowserRequest[] = [];
+  const pending = new Map<object, { entry: BrowserRequest; at: number }>();
+  const finish = (
+    request: object,
+    status: number | null,
+    failure: string | null,
+  ) => {
+    const open = pending.get(request);
+    if (!open) return;
+    pending.delete(request);
+    const at = Date.now();
+    open.entry.ended = logClock(at);
+    open.entry.endAt = at;
+    open.entry.ms = at - open.at;
+    open.entry.status = status;
+    open.entry.failure = failure;
+  };
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if (!url.pathname.includes(browserEndpoint)) return;
+    const body = JSON.parse(request.postData() || "{}") as {
+      tab_id?: string;
+      kind?: string;
+      op?: string;
+    };
+    const at = Date.now();
+    const entry: BrowserRequest = {
+      route: url.pathname.slice(
+        url.pathname.indexOf(browserEndpoint) + browserEndpoint.length,
+      ),
+      tab_id: body.tab_id ?? null,
+      kind: body.kind ?? body.op ?? null,
+      started: logClock(at),
+      ended: null,
+      startAt: at,
+      endAt: null,
+      ms: null,
+      status: null,
+      failure: null,
+    };
+    requests.push(entry);
+    pending.set(request, { entry, at });
+  });
+  page.on("requestfinished", (request) => {
+    void request
+      .response()
+      .then((response) => finish(request, response?.status() ?? null, null));
+  });
+  page.on("requestfailed", (request) =>
+    finish(request, null, request.failure()?.errorText ?? "failed"),
+  );
+  const responses: { path: string; status: number }[] = [];
+  const failures: {
+    path: string;
+    status: number;
+    request: string | null;
+    body: string;
+    at: number;
+  }[] = [];
   page.on("response", (response) => {
-    if (
-      response.ok() &&
-      new URL(response.url()).pathname.endsWith(`${browserEndpoint}frame`)
-    ) {
+    const url = new URL(response.url());
+    responses.push({ path: url.pathname, status: response.status() });
+    if (url.pathname.includes(browserEndpoint) && response.status() >= 400) {
+      void response
+        .text()
+        .catch(() => "")
+        .then((body) =>
+          failures.push({
+            path: url.pathname,
+            status: response.status(),
+            request: response.request().postData(),
+            body,
+            at: Date.now(),
+          }),
+        );
+    }
+    if (response.ok() && url.pathname.endsWith(`${browserEndpoint}frame`)) {
       void response
         .json()
         .then((body: BrowserFrame) => {
-          latest = body;
+          frames.set(body.tab_id, body);
+          if (frameLog.length === 128) frameLog.shift();
+          frameLog.push({
+            tab_id: body.tab_id,
+            url: body.url,
+            title: body.title,
+            at: Date.now(),
+          });
         })
         .catch(() => undefined);
     }
   });
-  return () => latest;
+  return {
+    frame: (tabId: string) => frames.get(tabId),
+    frameLog,
+    responses,
+    failures,
+    requests,
+    browserResponses: () =>
+      responses.filter(({ path }) => path.includes(browserEndpoint)),
+    /** 401/403 anywhere except the cloud-account organization endpoints, which need a
+     * Refact cloud login unrelated to the Browser and answer 401 in every fixture. */
+    denied: () =>
+      responses.filter(
+        ({ path, status }) =>
+          (status === 401 || status === 403) &&
+          !path.includes("/v1/organization/"),
+      ),
+  };
 }
+type Observer = ReturnType<typeof observe>;
 
-async function openGui(
-  daemon: Daemon,
-  context: BrowserContext,
-  project: Project,
-  chatId: string,
-) {
-  const url = await daemon.installProjectCookie(context, project.project_id);
-  const page = await context.newPage();
-  await page.goto(`${url}?chat=${chatId}`);
-  return page;
-}
-
-async function openBrowser(page: Page) {
-  const composer = page.getByTestId("chat-form-textarea");
-  await composer.click();
-  await openButton(page).click();
-  await expect(browserTab(page)).toBeVisible();
-  await expect(region(page)).toBeVisible();
-}
-
-async function navigate(
-  page: Page,
-  url: string,
-  observe: ReturnType<typeof observeFrames>,
-) {
-  await address(page).fill(url);
-  await address(page).press("Enter");
-  await expect.poll(() => observe()?.url, { timeout: 20_000 }).toBe(url);
-  await expect(frame(page)).toBeVisible();
-}
+const timeline: { name: string; at: number; local: string }[] = [];
 
 async function picture(page: Page, info: TestInfo, name: string) {
+  const at = Date.now();
+  timeline.push({ name, at, local: logClock(at) });
   const path = info.outputPath(`${name}.png`);
   await page.screenshot({ path, animations: "disabled" });
   await info.attach(name, { path, contentType: "image/png" });
+}
+
+async function newGuiPage(browser: Browser) {
+  const context = await browser.newContext({
+    viewport: { width: 1600, height: 950 },
+    serviceWorkers: "block",
+  });
+  const page = await context.newPage();
+  return { context, page, net: observe(page) };
+}
+
+async function sendMessage(page: Page, text: string) {
+  await expect(composer(page)).toBeEditable({ timeout: 30_000 });
+  await composer(page).fill(text);
+  await composer(page).press("Enter");
+  await expect(page.getByText(text, { exact: true }).first()).toBeVisible({
+    timeout: 20_000,
+  });
+}
+
+async function expectNoCredentialUi(page: Page) {
+  await expect(
+    page.getByText(
+      /credential|unauthori[sz]ed|project session|sign in to (the )?browser|HTTP 401|401 unauthorized/i,
+    ),
+  ).toHaveCount(0);
+}
+
+/** The visible Browser view's Chromium tab id once it shows a frame matching `ready`. */
+async function visibleBrowserTab(
+  page: Page,
+  net: Observer,
+  ready: (frame: BrowserFrame) => boolean,
+  timeout = 90_000,
+) {
+  await expect(browserView(page)).toBeVisible({ timeout });
+  const tabId = await browserView(page).getAttribute("data-browser-tab-id");
+  if (!tabId) throw new Error("Browser view has no tab id");
+  await expect
+    .poll(
+      () => {
+        const frame = net.frame(tabId);
+        return frame ? ready(frame) : false;
+      },
+      { timeout, message: `Browser frame of ${tabId} never became ready` },
+    )
+    .toBe(true);
+  await expect(frameImage(page)).toBeVisible();
+  return tabId;
+}
+
+/** Chat pane on the left, Browser pane on the right, both visible side by side. */
+async function expectBrowserRightOfChat(page: Page) {
+  const chat = leafSections(page).filter({ has: composer(page) });
+  const browser = leafSections(page).filter({ has: browserView(page) });
+  await expect(chat).toHaveCount(1);
+  await expect(browser).toHaveCount(1);
+  await expect(composer(page)).toBeVisible();
+  await expect(frameImage(page)).toBeVisible();
+  const [left, right] = await Promise.all([
+    chat.boundingBox(),
+    browser.boundingBox(),
+  ]);
+  if (!left || !right) throw new Error("Split panes have no bounds");
+  expect(left.width).toBeGreaterThan(250);
+  expect(right.width).toBeGreaterThan(250);
+  expect(left.x + left.width).toBeLessThanOrEqual(right.x + 2);
 }
 
 async function framePoint(
@@ -142,808 +309,1077 @@ async function framePoint(
   };
 }
 
-async function frameShowsFooter(image: Locator) {
-  return image.evaluate(async (element: HTMLImageElement) => {
-    await element.decode();
-    const canvas = document.createElement("canvas");
-    canvas.width = element.naturalWidth;
-    canvas.height = element.naturalHeight;
-    const context = canvas.getContext("2d", { willReadFrequently: true });
-    if (!context) throw new Error("No GUI frame decode canvas");
-    context.drawImage(element, 0, 0);
-    const [red, green, blue] = context.getImageData(
-      canvas.width - 25,
-      canvas.height - 25,
-      1,
-      1,
-    ).data;
-    return red < 40 && green > 105 && blue > 80;
-  });
-}
-
-async function switchChat(page: Page, title: string) {
-  const tab = chatTab(page, title);
-  if (!(await tab.isVisible())) {
-    await page.getByRole("button", { name: "Home", exact: true }).click();
-    await page.getByText(title, { exact: true }).click();
-  } else {
+async function openChat(page: Page, title: string) {
+  const tab = workspaceTab(page, title);
+  if (await tab.isVisible()) {
     await tab.click();
+  } else {
+    await page.getByRole("button", { name: "Home", exact: true }).click();
+    await page.getByRole("link", { name: title, exact: true }).click();
   }
-  await expect(tab).toHaveAttribute("aria-selected", "true");
+  await expect(workspaceTab(page, title)).toHaveAttribute(
+    "aria-selected",
+    "true",
+    { timeout: 20_000 },
+  );
+  await expect(composer(page)).toBeVisible();
 }
 
-test("daemon-served Browser inputs, migration, shared chat runtime and persistent project isolation", async ({
+async function inPagePost(page: Page, path: string) {
+  return page.evaluate(async (url) => {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    return { status: response.status, body: await response.text() };
+  }, path);
+}
+
+type RouteFailure = Observer["failures"][number];
+
+/**
+ * The engine answers 409 when a tab's gate is held by another user, the renderer misses its
+ * deadline, or the page is changing; the GUI keeps the last frame and retries. Only these
+ * exact details on /frame and /resize are transient by contract; any 409 on /input or
+ * /navigate is not.
+ */
+const GATE_HOLDERS = [
+  "a Browser-view frame",
+  "a Browser-view resize",
+  "a Browser-view input",
+  "a Browser-view navigation",
+  "another browser action",
+] as const;
+
+const TRANSIENT_RENDERER_DETAILS: Record<string, readonly string[]> = {
+  frame: [
+    "a frame of this tab is already being captured; try again",
+    ...GATE_HOLDERS.filter((holder) => holder !== "a Browser-view frame").map(
+      (holder) =>
+        `this tab is busy with ${holder}; no frame was captured; try again`,
+    ),
+    "the browser did not return a frame in time; try again",
+    "the page is changing; no frame was captured; try again",
+  ],
+  resize: [
+    ...GATE_HOLDERS.map(
+      (holder) =>
+        `this tab is busy with ${holder}; the pane size was not applied; try again`,
+    ),
+    "the browser did not confirm the pane size in time; try again",
+    "the page is changing; the pane size was not confirmed; try again",
+  ],
+};
+
+function isTransientRendererConflict(failure: RouteFailure) {
+  if (failure.status !== 409) return false;
+  const route = failure.path.slice(
+    failure.path.indexOf(browserEndpoint) + browserEndpoint.length,
+  );
+  if (route !== "frame" && route !== "resize") return false;
+  let detail = "";
+  try {
+    detail = (JSON.parse(failure.body) as { detail?: string }).detail ?? "";
+  } catch {
+    return false;
+  }
+  return TRANSIENT_RENDERER_DETAILS[route]?.includes(detail) ?? false;
+}
+
+function recordTransientConflicts(info: TestInfo, observers: Observer[]) {
+  for (const failure of observers.flatMap((net) => net.failures))
+    if (isTransientRendererConflict(failure))
+      info.annotations.push({
+        type: "transient-409",
+        description: `${logClock(failure.at)} ${failure.path} ${
+          failure.request ?? ""
+        } ${failure.body}`,
+      });
+}
+
+async function writeRouteEvidence(info: TestInfo, observers: Observer[]) {
+  await writeFile(
+    info.outputPath("browser-route-failures.json"),
+    JSON.stringify(
+      {
+        timeline,
+        recentFrames: observers.map((net) => net.frameLog),
+        failures: observers.flatMap((net) =>
+          net.failures.map((failure) => ({
+            ...failure,
+            local: logClock(failure.at),
+            transient: isTransientRendererConflict(failure),
+          })),
+        ),
+      },
+      null,
+      2,
+    ),
+  );
+  await writeFile(
+    info.outputPath("browser-requests.json"),
+    JSON.stringify(
+      observers.map((net) => net.requests),
+      null,
+      1,
+    ),
+  );
+}
+
+/** All error responses have been read (their bodies arrive asynchronously). */
+async function settledFailures(net: Observer) {
+  await expect
+    .poll(
+      () =>
+        net.browserResponses().filter(({ status }) => status >= 400).length -
+        net.failures.length,
+    )
+    .toBe(0);
+}
+
+/** Keeps process output, model calls and engine logs next to the screenshots. */
+async function keepDiagnostics(
+  info: TestInfo,
+  fixture: Fixture,
+  site: Site,
+  outputs: Record<string, string>,
+  roots: string[] = [],
+) {
+  for (const [name, body] of Object.entries(outputs))
+    await writeFile(info.outputPath(`${name}-output.txt`), body);
+  await writeFile(
+    info.outputPath("llm-calls.json"),
+    JSON.stringify(site.llmCalls, null, 2),
+  );
+  await writeFile(
+    info.outputPath("site-visits.json"),
+    JSON.stringify(site.visits, null, 2),
+  );
+  const logs = join(fixture.cache, "logs");
+  if (existsSync(logs))
+    await cp(logs, info.outputPath("engine-logs"), { recursive: true });
+  for (const root of roots) {
+    const trajectories = join(root, ".refact", "trajectories");
+    if (existsSync(trajectories))
+      await cp(
+        trajectories,
+        info.outputPath(`trajectories-${basename(root)}`),
+        {
+          recursive: true,
+        },
+      );
+  }
+}
+
+/** The chat's tool messages exactly as the engine streams them to the GUI (snapshot event). */
+async function wireToolMessages(apiBase: string, chatId: string) {
+  const abort = new AbortController();
+  const response = await fetch(
+    `${apiBase}/v1/chats/subscribe?chat_id=${encodeURIComponent(chatId)}`,
+    { signal: abort.signal },
+  );
+  if (!response.ok || !response.body)
+    throw new Error(`subscribe: HTTP ${response.status}`);
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) throw new Error("subscribe stream ended without a snapshot");
+      buffer += decoder.decode(value, { stream: true });
+      for (const line of buffer.split("\n")) {
+        if (!line.startsWith("data: ")) continue;
+        let event: { type?: string; messages?: Record<string, unknown>[] };
+        try {
+          event = JSON.parse(line.slice(6)) as typeof event;
+        } catch {
+          continue;
+        }
+        if (event.type !== "snapshot") continue;
+        return (event.messages ?? [])
+          .filter((message) => message.role === "tool")
+          .map((message) => ({
+            tool_call_id: message.tool_call_id,
+            keys: Object.keys(message).sort(),
+            top_level_browser_project: message.browser_project ?? null,
+            extra_browser_project:
+              (message.extra as Record<string, unknown> | undefined)
+                ?.browser_project ?? null,
+          }));
+      }
+    }
+  } finally {
+    abort.abort();
+  }
+}
+
+/**
+ * Sends a scripted message, waits until the model has seen the chrome tool result, then
+ * requires the Browser view to have opened on its own. If it did not, the failure is
+ * recorded and the tab is opened from the Browser rail so later checks still run.
+ */
+async function browseAndExpectAutoOpen(
+  page: Page,
+  site: Site,
+  message: string,
+  view: { title?: string; railText: string | RegExp },
+) {
+  const script = /fixture script ([a-z0-9-]+)/.exec(message)?.[1];
+  const finished = () =>
+    site.llmCalls.filter(
+      (call) => call.script === script && call.responded === "final",
+    ).length;
+  const before = finished();
+  await sendMessage(page, message);
+  await expect
+    .poll(finished, {
+      timeout: 90_000,
+      message: "the model never received the chrome tool result",
+    })
+    .toBeGreaterThan(before);
+  const shown = view.title ? workspaceTab(page, view.title) : browserView(page);
+  await expect
+    .soft(shown, "the Browser view must auto-open after the chrome tool call")
+    .toBeVisible({ timeout: 20_000 });
+  if (!(await shown.isVisible())) await openFromRail(page, view.railText);
+}
+
+async function openFromRail(page: Page, text: string | RegExp) {
+  await railButton(page).click();
+  const item = dockPanel(page)
+    .getByRole("list", { name: "Browser tabs" })
+    .locator("li")
+    .filter({ hasText: text })
+    .first();
+  await item.getByRole("button").first().click();
+  await railButton(page).click();
+  await expect(browserView(page)).toBeVisible({ timeout: 20_000 });
+}
+
+async function closeAll(...items: (Browser | BrowserContext | undefined)[]) {
+  for (const item of items) await item?.close().catch(() => undefined);
+}
+
+const waitTimeout = 60_000;
+
+function scripts(site: Site) {
+  return {
+    login: site.script("login", {
+      tab_name: "Fixture login",
+      steps: [{ action: "navigate", url: `${site.origin}/login` }],
+    }),
+    check: site.script("check", {
+      steps: [{ action: "navigate", url: `${site.origin}/check` }],
+    }),
+    second: site.script("second", {
+      tab_name: "Second chat page",
+      steps: [{ action: "navigate", url: `${site.origin}/second` }],
+    }),
+    plain: "Just answer, no browsing: fixture script plain",
+    waitLogin: site.script("waitlogin", {
+      steps: [
+        { action: "navigate", url: `${site.origin}/login?wait=1` },
+        {
+          action: "wait_for_function",
+          expression: `async () => {
+            if (location.pathname === '/login' && !window.fixtureWaitObserved) {
+              window.fixtureWaitObserved = true;
+              await fetch('/wait-started');
+            }
+            return location.href === ${JSON.stringify(`${site.origin}/check`)};
+          }`,
+          timeout_ms: waitTimeout,
+        },
+      ],
+    }),
+  };
+}
+
+test("standalone worker on 0.0.0.0 via a non-loopback host: chat-driven Browser tabs, adoption, persistence and project isolation", async ({
   playwright,
 }, info) => {
+  test.setTimeout(900_000);
   const fixture = fixtureEnvironment();
-  const daemon = new Daemon(fixture);
   const site = await startSite();
-  const alphaRoot = await createProjectRoot(fixture, "project-alpha");
-  const betaRoot = await createProjectRoot(fixture, "project-beta");
-  let gui: Awaited<ReturnType<typeof chromium.launch>> | undefined;
+  await writeEngineConfig(fixture, site.origin);
+  const say = scripts(site);
+  const alphaRoot = await createProjectRoot(fixture, "worker-alpha");
+  const betaRoot = await createProjectRoot(fixture, "worker-beta");
+  const chatOne = await writeChat(alphaRoot, "Alpha chat one");
+  const chatTwo = await writeChat(alphaRoot, "Alpha chat two");
+  const betaChat = await writeChat(betaRoot, "Beta chat");
+  const hour = 3_600_000;
+  const older = await seedLegacyProfile(
+    fixture,
+    alphaRoot,
+    site,
+    "older",
+    new Date(Date.now() - 2 * hour),
+  );
+  const newer = await seedLegacyProfile(
+    fixture,
+    alphaRoot,
+    site,
+    "newer",
+    new Date(Date.now() - hour),
+  );
+  const alpha = new Worker(fixture, alphaRoot);
+  const beta = new Worker(fixture, betaRoot);
+  let gui: Browser | undefined;
   let page: Page | undefined;
-  let alpha: Project;
-  let alphaChat = "";
-  let beforeRestart: BrowserFrame | undefined;
+  const observers: Observer[] = [];
+  let tabA = "";
+  const closedTabs = new Set<string>();
+  const beforeRestart = new Set<string>();
+  let tabB = "";
 
   try {
-    await test.step("start fresh daemon, Chromium, and synthetic same-project legacy profiles", async () => {
-      await daemon.start(site.origin);
-      alpha = await daemon.openProject(alphaRoot);
-      alphaChat = await seedChat(daemon, alpha, "Alpha chat one");
-      await seedChat(daemon, alpha, "Alpha chat two");
-      const selected = await seedLegacyProfile(
-        fixture,
-        alpha,
-        site.origin,
-        "selected",
+    await alpha.start();
+    expect(new URL(alpha.origin).hostname).toBe(NON_LOOPBACK_HOST);
+    gui = await playwright.chromium.launch({
+      executablePath: fixture.chrome,
+      env: fixture.env,
+    });
+    const first = await newGuiPage(gui);
+    page = first.page;
+    const net = first.net;
+    observers.push(net);
+
+    await test.step("GUI served by the worker loads from the non-loopback address with no credential error", async () => {
+      const html = await (await fetch(`${alpha.origin}/`)).text();
+      const bundles = [...html.matchAll(/<script src="([^"]+)"/g)].map(
+        (match) => new URL(match[1], `${alpha.origin}/`).toString(),
       );
-      const unselected = await seedLegacyProfile(
-        fixture,
-        alpha,
-        site.origin,
-        "unselected",
+      expect(bundles.length).toBeGreaterThan(0);
+      const sources = await Promise.all(
+        bundles.map(async (url) => (await fetch(url)).text()),
       );
-      gui = await playwright.chromium.launch({
-        executablePath: fixture.chrome,
-        env: fixture.env,
-      });
-      const context = await gui.newContext({
-        viewport: { width: 1500, height: 900 },
-        serviceWorkers: "block",
-      });
-      page = await openGui(daemon, context, alpha, alphaChat);
-      await expect(chatTab(page, "Alpha chat one")).toHaveAttribute(
+      expect(
+        sources.some((source) => source.includes("This browser tab is closed")),
+        "the worker must serve the GUI built from this checkout",
+      ).toBe(true);
+      await writeFile(
+        info.outputPath("served-gui-bundles.json"),
+        JSON.stringify(
+          bundles.map((url, index) => ({
+            url,
+            sha256: createHash("sha256").update(sources[index]).digest("hex"),
+          })),
+          null,
+          2,
+        ),
+      );
+      await page!.goto(`${alpha.origin}/?chat=${chatOne}`);
+      await expect(workspaceTab(page!, "Alpha chat one")).toHaveAttribute(
         "aria-selected",
         "true",
-        { timeout: 25_000 },
+        { timeout: 30_000 },
       );
-      await openBrowser(page);
-      const panel = region(page);
-      const picker = panel.getByRole("combobox", {
-        name: "Chat browser profile",
+      await expect(composer(page!)).toBeVisible();
+      await expectNoCredentialUi(page!);
+      expect(net.denied()).toEqual([]);
+      await picture(page!, info, "A01-worker-gui-non-loopback");
+    });
+
+    await test.step("a chat tool call auto-opens its named Browser tab right of the chat; the newest legacy profile was adopted", async () => {
+      const before = site.visits.length;
+      await browseAndExpectAutoOpen(page!, site, say.login, {
+        title: "Fixture login",
+        railText: "Fixture login",
       });
-      await expect(picker).toBeVisible({ timeout: 20_000 });
-      await expect(
-        picker.getByRole("option", { name: unselected.id, exact: true }),
-      ).toBeEnabled();
-      expect(existsSync(selected.path)).toBe(true);
-      expect(existsSync(unselected.path)).toBe(true);
-      const adopt = panel.getByRole("button", { name: "Adopt profile" });
-      await expect(adopt).toBeDisabled();
-      await picker.selectOption(selected.id);
-      await adopt.click();
-      await expect.poll(() => existsSync(selected.path)).toBe(false);
-      expect(existsSync(unselected.path)).toBe(true);
+      await writeFile(
+        info.outputPath("wire-tool-messages.json"),
+        JSON.stringify(await wireToolMessages(alpha.origin, chatOne), null, 2),
+      );
+      await expect(workspaceTab(page!, "Fixture login")).toBeVisible();
+      tabA = await visibleBrowserTab(
+        page!,
+        net,
+        (frame) =>
+          frame.url === `${site.origin}/login` &&
+          frame.title === "Fixture login",
+      );
+      await expectBrowserRightOfChat(page!);
+      const login = site.lastVisit("/login", before);
+      expect(login?.userAgent).toMatch(/Chrome\//);
+      expect(login?.cookie).toContain("fixture_legacy=newer");
+      expect(login?.cookie).not.toContain("fixture_legacy=older");
+      expect(existsSync(newer.path)).toBe(false);
+      expect(existsSync(older.path)).toBe(true);
+      expect(
+        readdirSync(join(fixture.cache, "project_browser_profiles")),
+      ).toHaveLength(1);
+      expect(
+        site.llmCalls.filter((call) => call.responded === "tool_call"),
+      ).toHaveLength(1);
+      await expectNoCredentialUi(page!);
+      await picture(page!, info, "A02-auto-open-right-of-chat");
     });
 
-    if (!page || !gui) throw new Error("GUI fixture did not start");
-    const originalPage = page;
-    const observe = observeFrames(originalPage);
-
-    await test.step("navigate a static site, type and click a native form, wheel the rendered frame", async () => {
-      await navigate(originalPage, `${site.origin}/form`, observe);
-      const formVisit = site.visits
-        .filter((visit) => visit.path === "/form")
-        .at(-1);
-      expect(formVisit?.userAgent).toMatch(/Chrome\//);
-      expect(formVisit?.cookie).toContain("fixture_legacy=selected");
-      expect(formVisit?.cookie).not.toContain("unselected");
-      const state = observe();
-      if (!state) throw new Error("No Chromium frame after navigation");
-      const image = frame(originalPage);
-      const input = await framePoint(image, state, 60, 86);
-      const submit = await framePoint(image, state, 215, 86);
-      await originalPage.mouse.click(input.x, input.y);
-      await originalPage.keyboard.type("typed in actual Browser");
-      await originalPage.mouse.click(submit.x, submit.y);
+    await test.step("sign in by clicking and typing inside the live frame", async () => {
+      const state = net.frame(tabA);
+      if (!state) throw new Error("No login frame");
+      const image = frameImage(page!);
+      const field = await framePoint(image, state, 91, 87);
+      const submit = await framePoint(image, state, 215, 87);
+      const startedAt = Date.now();
+      await page!.mouse.click(field.x, field.y);
+      await page!.keyboard.type("alpha-user");
+      await page!.mouse.click(submit.x, submit.y);
       await expect
-        .poll(
-          () =>
-            site.visits.filter((visit) => visit.path === "/submit").at(-1)
-              ?.value,
-        )
-        .toBe("typed in actual Browser");
+        .poll(() => site.lastVisit("/signin")?.user, { timeout: 30_000 })
+        .toBe("alpha-user");
       await expect
-        .poll(() => observe()?.title)
-        .toBe("Browser fixture · submitted");
-      await expect.poll(() => frameShowsFooter(image)).toBe(false);
-      await originalPage.mouse.move(input.x, input.y + 140);
-      await originalPage.mouse.wheel(0, 1150);
-      await expect
-        .poll(() => frameShowsFooter(image), { timeout: 15_000 })
-        .toBe(true);
-      await picture(originalPage, info, "01-static-site-scrolled");
-    });
-
-    await test.step("resize, close and reopen the Browser tab, then switch between real chats", async () => {
-      const initial = observe();
-      if (!initial) throw new Error("No browser frame before resizing");
-      const initialWidth = initial.viewport.width;
-      const size = await region(originalPage).boundingBox();
-      if (!size) throw new Error("Browser pane has no bounds before resizing");
-      await originalPage.setViewportSize({ width: 1080, height: 760 });
-      await expect
-        .poll(async () => {
-          const next = await region(originalPage).boundingBox();
-          return Math.abs((next?.width ?? size.width) - size.width);
-        })
-        .toBeGreaterThan(20);
+        .poll(() => net.frame(tabA)?.title, { timeout: 30_000 })
+        .toBe("Signed in as alpha-user");
+      const elapsed = Date.now() - startedAt;
+      const window = () =>
+        net.requests.filter(
+          (request) =>
+            request.startAt >= startedAt &&
+            ["input", "frame"].includes(request.route),
+        );
       await expect
         .poll(() =>
-          Math.abs((observe()?.viewport.width ?? initialWidth) - initialWidth),
-        )
-        .toBeGreaterThan(20);
-      await expect(frame(originalPage)).toBeVisible();
-      const id = observe()?.runtime_id;
-      const tabId = observe()?.tab_id;
-      await originalPage
-        .getByRole("button", { name: "Close Browser", exact: true })
-        .click();
-      await expect(browserTab(originalPage)).toHaveCount(0);
-      await openBrowser(originalPage);
-      await expect(frame(originalPage)).toBeVisible({ timeout: 15_000 });
-      await expect(address(originalPage)).toHaveValue(/\/submit\?entry=/);
-      expect(observe()?.runtime_id).toBe(id);
-      expect(observe()?.tab_id).toBe(tabId);
-      await switchChat(originalPage, "Alpha chat two");
-      await switchChat(originalPage, "Alpha chat one");
-      await expect(browserTab(originalPage)).toBeVisible();
-      if (!(await address(originalPage).isVisible()))
-        await browserTab(originalPage).click();
-      await expect(address(originalPage)).toHaveValue(/\/submit\?entry=/);
-      expect(observe()?.runtime_id).toBe(id);
-      expect(observe()?.tab_id).toBe(tabId);
-      beforeRestart = observe();
-      await picture(originalPage, info, "02-browser-after-chat-switch");
-    });
-
-    await test.step("restart daemon and worker; reload using a fresh GUI context and verify cookie survives", async () => {
-      await originalPage.context().close();
-      await daemon.stop();
-      await daemon.start(site.origin);
-      const restarted = await daemon.openProject(alphaRoot);
-      expect(restarted.project_id).toBe(alpha.project_id);
-      expect(restarted.worker.pid).not.toBe(alpha.worker.pid);
-      const context = await gui!.newContext({
-        viewport: { width: 1500, height: 900 },
-        serviceWorkers: "block",
-      });
-      const restartedPage = await openGui(
-        daemon,
-        context,
-        restarted,
-        alphaChat,
-      );
-      page = restartedPage;
-      const observeRestarted = observeFrames(restartedPage);
-      await openBrowser(restartedPage);
-      const before = site.visits.length;
-      await navigate(restartedPage, `${site.origin}/check`, observeRestarted);
-      const visit = site.visits
-        .slice(before)
-        .find(({ path }) => path === "/check");
-      expect(visit?.cookie).toContain("fixture_login=project-alpha");
-      expect(visit?.cookie).toContain("fixture_legacy=selected");
-      expect(observeRestarted()?.runtime_id).not.toBe(
-        beforeRestart?.runtime_id,
-      );
-      expect(observeRestarted()?.title).toBe("Signed in: Project Alpha");
-      await picture(restartedPage, info, "03-project-alpha-after-restart");
-    });
-
-    await test.step("same fixture host in a different project sees no cookie", async () => {
-      const beta = await daemon.openProject(betaRoot);
-      expect(beta.project_id).not.toBe(alpha.project_id);
-      const betaChat = await seedChat(daemon, beta, "Beta chat");
-      const context = await gui!.newContext({
-        viewport: { width: 1500, height: 900 },
-        serviceWorkers: "block",
-      });
-      const betaPage = await openGui(daemon, context, beta, betaChat);
-      page = betaPage;
-      const observeBeta = observeFrames(betaPage);
-      await openBrowser(betaPage);
-      const before = site.visits.length;
-      await navigate(betaPage, `${site.origin}/check`, observeBeta);
-      const visit = site.visits
-        .slice(before)
-        .find(({ path }) => path === "/check");
-      expect(visit?.cookie).toBe("");
-      expect(observeBeta()?.title).toBe("Signed out");
-      await picture(betaPage, info, "04-project-beta-isolated");
-      expect(
-        site.visits.filter(({ path }) => path === "/model-must-not-be-invoked"),
-      ).toEqual([]);
-    });
-  } catch (error) {
-    await info.attach("daemon-output", {
-      body: daemon.diagnostics(),
-      contentType: "text/plain",
-    });
-    if (page && !page.isClosed()) await picture(page, info, "failure-gui");
-    throw error;
-  } finally {
-    try {
-      await gui?.close();
-    } finally {
-      try {
-        await daemon.stop();
-      } finally {
-        await site.close();
-      }
-    }
-  }
-});
-
-test("Linux refact ui handoff opens the real project Browser without leaking launch authority", async ({
-  playwright,
-}, info) => {
-  test.skip(process.platform !== "linux", "Linux desktop opener acceptance");
-  const fixture = fixtureEnvironment();
-  const daemon = new Daemon(fixture);
-  const site = await startSite();
-  const opener = await createDesktopOpener(fixture);
-  const alphaRoot = await createProjectRoot(fixture, "handoff-alpha");
-  const betaRoot = await createProjectRoot(fixture, "handoff-beta");
-  const browserProcesses: number[] = [];
-  const checkUrl = `${site.origin}/check`;
-  const launch = (project: Project, index: number) =>
-    launchDesktop(daemon, opener, project, index, browserProcesses);
-  const observations: Record<
-    string,
-    ReturnType<typeof observeDesktopBrowser>
-  > = {};
-  try {
-    await daemon.start(site.origin, { authEnabled: false, opener });
-    const project = await daemon.openProject(alphaRoot);
-    await seedChat(daemon, project, "Handoff alpha chat");
-
-    const ordinaryShell = await fetch(
-      `${daemon.origin}/p/${project.project_id}/`,
-      { redirect: "manual" },
-    );
-    expect(ordinaryShell.status).toBe(200);
-    await expectBareBrowserDenied(daemon, project);
-
-    const firstLaunch = await launch(project, 0);
-    const first = await connectDesktopChromium(
-      playwright.chromium,
-      firstLaunch.profile,
-      firstLaunch.url,
-    );
-    const initial = (observations.alpha = observeDesktopBrowser(
-      first.page,
-      firstLaunch.url,
-    ));
-    let submitted: BrowserFrame;
-    try {
-      await openSeededChat(first.page, "Handoff alpha chat");
-      await openBrowserFromDesktop(first.page);
-      await initial.ready(project);
-      await navigate(first.page, `${site.origin}/form`, initial.frame);
-      const state = initial.frame();
-      if (!state) throw new Error("No Browser frame after local handoff");
-      const image = frame(first.page);
-      const field = await framePoint(image, state, 60, 86);
-      const submit = await framePoint(image, state, 215, 86);
-      await first.page.mouse.click(field.x, field.y);
-      await first.page.keyboard.type("real local handoff");
-      await first.page.mouse.click(submit.x, submit.y);
-      await expect
-        .poll(
-          () => isLocalHandoffSubmission(initial.frame()?.url, site.origin),
-          {
-            timeout: 20_000,
-          },
+          window()
+            .filter((request) => request.route === "input")
+            .every((request) => request.endAt !== null),
         )
         .toBe(true);
-      const submission = initial.frame();
-      if (!submission) throw new Error("No submitted Browser frame");
-      submitted = submission;
-      expect(submitted.title).toBe("Browser fixture · submitted");
-      expect(
-        site.visits.some(
-          ({ path, value }) =>
-            path === "/submit" && value === "real local handoff",
+      const inputs = window().filter((request) => request.route === "input");
+      const frames = window().filter((request) => request.route === "frame");
+      const overlapping = inputs.map((input) => ({
+        input,
+        frames: frames.filter(
+          (frame) =>
+            frame.tab_id === input.tab_id &&
+            frame.startAt <= input.startAt &&
+            (frame.endAt ?? Infinity) > input.startAt,
         ),
-      ).toBe(true);
-
-      await browserTabs(first.page)
-        .locator('button[aria-label="New tab"]')
-        .click();
-      await expect
-        .poll(
-          () => {
-            const active = initial.status()?.active_tab;
-            return Boolean(active && active !== submitted.tab_id);
-          },
-          { timeout: 20_000 },
-        )
-        .toBe(true);
-      await checkSiteLogin(first.page, site, checkUrl, initial.frame, true);
-      const closeCheck = browserTabs(first.page).getByRole("button", {
-        name: `Close tab: ${alphaSignedIn}`,
-        exact: true,
-      });
-      await closeCheck.click();
-      await expect(closeCheck).toHaveCount(0);
-      await selectBrowserTab(first.page, submitted.title);
-      await expect
-        .poll(() => initial.frame()?.tab_id, { timeout: 20_000 })
-        .toBe(submitted.tab_id);
-      await expect(address(first.page)).toHaveValue(submitted.url);
-      await expectNoDaemonToken(first, daemon);
-      await picture(first.page, info, "05-linux-local-launch");
-    } finally {
-      await first.context.close();
-      await first.browser.close();
-    }
-
-    await daemon.stop();
-    await daemon.start(site.origin, { authEnabled: false, opener });
-    const restarted = await daemon.openProject(alphaRoot);
-    expect(restarted.project_id).toBe(project.project_id);
-    const secondLaunch = await launch(restarted, 1);
-    expect(secondLaunch.file === firstLaunch.file).toBe(false);
-    expect(secondLaunch.url === firstLaunch.url).toBe(false);
-    const second = await connectDesktopChromium(
-      playwright.chromium,
-      secondLaunch.profile,
-      secondLaunch.url,
-    );
-    const restored = (observations.alphaRelaunch = observeDesktopBrowser(
-      second.page,
-      secondLaunch.url,
-    ));
-    try {
-      await openSeededChat(second.page, "Handoff alpha chat");
-      await openBrowserFromDesktop(second.page);
-      await restored.ready(restarted);
-      let restoredTab: BrowserStatus["tabs"][number] | undefined;
-      await expect
-        .poll(
-          () => {
-            restoredTab = restored
-              .status()
-              ?.tabs.find(({ url }) => url === submitted.url);
-            return Boolean(restoredTab);
-          },
-          {
-            message:
-              "Chromium must list the previously submitted URL before any GUI navigation",
-            timeout: 25_000,
-          },
-        )
-        .toBe(true);
-      if (!restoredTab) throw new Error("No restored Browser tab");
-      const restoredTabId = restoredTab.tab_id;
-      if (restored.status()?.active_tab !== restoredTabId) {
-        await selectBrowserTab(second.page, restoredTab.title || submitted.url);
-      }
-      await expect
-        .poll(
-          () => {
-            const current = restored.frame();
-            return (
-              current?.tab_id === restoredTabId && current.url === submitted.url
-            );
-          },
-          { timeout: 25_000 },
-        )
-        .toBe(true);
-      expect(restored.frame()?.runtime_id !== submitted.runtime_id).toBe(true);
+      }));
+      await writeFile(
+        info.outputPath("login-input-timeline.json"),
+        JSON.stringify(
+          { elapsed_ms: elapsed, requests: window(), overlapping },
+          null,
+          1,
+        ),
+      );
       expect(
-        restored.navigationCount(),
-        "Restoration must not issue a Browser navigate request",
-      ).toBe(0);
-      await expect(address(second.page)).toHaveValue(submitted.url);
-      await expect(frame(second.page)).toBeVisible();
-      await picture(second.page, info, "06-linux-restored-tab");
+        elapsed,
+        "click + type + submit must finish within 8 s: one 3 s renderer deadline for the frame showing the result, plus one 3 s input deadline, plus ~2 s for frame polling and the local navigation",
+      ).toBeLessThanOrEqual(8_000);
+      expect(inputs.filter((input) => input.kind === "click").length).toBe(2);
+      expect(inputs.filter((input) => input.kind === "text").length).toBe(
+        "alpha-user".length,
+      );
+      expect(
+        inputs.filter((input) => input.status !== 200),
+        "every input is accepted",
+      ).toEqual([]);
+      expect(
+        inputs.filter((input) => (input.ms ?? Infinity) >= 3_000),
+        "no input reaches the 3 s input deadline",
+      ).toEqual([]);
+      expect(
+        overlapping.filter(
+          ({ input, frames: inFlight }) =>
+            inFlight.length > 0 && (input.ms ?? Infinity) > 1_500,
+        ),
+        "an input sent while a frame of its tab was being captured must not wait for that capture",
+      ).toEqual([]);
+      await picture(page!, info, "A03-signed-in-inside-frame");
+    });
 
-      await checkSiteLogin(second.page, site, checkUrl, restored.frame, true);
-      await expectNoDaemonToken(second, daemon);
-      await picture(second.page, info, "07-linux-alpha-after-restart");
-    } finally {
-      await second.context.close();
-      await second.browser.close();
-    }
-
-    const beta = await daemon.openProject(betaRoot);
-    expect(beta.project_id).not.toBe(restarted.project_id);
-    await expectBareBrowserDenied(daemon, beta);
-    await seedChat(daemon, beta, "Handoff beta chat");
-    const betaLaunch = await launch(beta, 2);
-    expect(
-      new Set([firstLaunch.file, secondLaunch.file, betaLaunch.file]).size,
-    ).toBe(3);
-    expect(
-      new Set([firstLaunch.url, secondLaunch.url, betaLaunch.url]).size,
-    ).toBe(3);
-    const other = await connectDesktopChromium(
-      playwright.chromium,
-      betaLaunch.profile,
-      betaLaunch.url,
-    );
-    const isolated = (observations.beta = observeDesktopBrowser(
-      other.page,
-      betaLaunch.url,
-    ));
-    try {
-      await openSeededChat(other.page, "Handoff beta chat");
-      await openBrowserFromDesktop(other.page);
-      await isolated.ready(beta);
-      await checkSiteLogin(other.page, site, checkUrl, isolated.frame, false);
-      await expectNoDaemonToken(other, daemon);
-      await picture(other.page, info, "08-linux-beta-isolated");
-    } finally {
-      await other.context.close();
-      await other.browser.close();
-    }
-    expect(
-      site.visits.filter(({ path }) => path === "/model-must-not-be-invoked"),
-    ).toEqual([]);
-    expect(
-      (await readFile(opener.arguments, "utf8")).split(/\r?\n/).filter(Boolean)
-        .length,
-    ).toBe(3);
-    expect(daemon.loggedToken()).toBe(false);
-  } catch (error) {
-    for (const [label, observe] of Object.entries(observations)) {
-      await info.attach(`${label}-browser-state`, {
-        body: observe.diagnostics(site.origin),
-        contentType: "application/json",
+    await test.step("closing the view, then another tool call reopens it on the signed-in page", async () => {
+      await page!
+        .getByRole("button", { name: "Close Fixture login", exact: true })
+        .click();
+      await expect(workspaceTab(page!, "Fixture login")).toHaveCount(0);
+      await expect(browserView(page!)).toHaveCount(0);
+      await sendMessage(page!, say.plain);
+      await expect(
+        page!.getByText("Fixture model reply (plain).", { exact: true }),
+      ).toBeVisible({ timeout: 60_000 });
+      await expect(workspaceTab(page!, "Fixture login")).toHaveCount(0);
+      const before = site.visits.length;
+      await browseAndExpectAutoOpen(page!, site, say.check, {
+        title: "Fixture login",
+        railText: "Fixture login",
       });
+      await expect(workspaceTab(page!, "Fixture login")).toBeVisible();
+      const reopened = await visibleBrowserTab(
+        page!,
+        net,
+        (frame) =>
+          frame.url === `${site.origin}/check` &&
+          frame.title === "Signed in as alpha-user",
+      );
+      expect(reopened).toBe(tabA);
+      expect(site.lastVisit("/check", before)?.cookie).toContain(
+        "fixture_login=alpha-user",
+      );
+      await expectBrowserRightOfChat(page!);
+      await picture(page!, info, "A04-reopened-signed-in");
+    });
+
+    await test.step("the user signs in through the Browser view while the agent's chrome call waits for it", async () => {
+      await expect(browserView(page!)).toHaveAttribute(
+        "data-browser-tab-id",
+        tabA,
+      );
+      const startedAt = Date.now();
+      const visits = site.visits.length;
+      const calls = () =>
+        site.llmCalls.filter((call) => call.script === "waitlogin");
+      const frameEvents = () =>
+        net.frameLog.filter(
+          (frame) => frame.tab_id === tabA && frame.at >= startedAt,
+        );
+      const visit = (path: string) => site.lastVisit(path, visits);
+      const requests = () =>
+        net.requests.filter(
+          (request) => request.tab_id === tabA && request.startAt >= startedAt,
+        );
+      try {
+        await sendMessage(page!, say.waitLogin);
+        await expect
+          .poll(() => visit("/wait-started")?.at, { timeout: 15_000 })
+          .toBeDefined();
+        const loginFrame = () =>
+          frameEvents().filter(
+            (frame) =>
+              frame.at >= visit("/wait-started")!.at &&
+              frame.url === `${site.origin}/login?wait=1`,
+          );
+        await expect.poll(() => loginFrame().length).toBeGreaterThan(0);
+        const state = net.frame(tabA);
+        if (!state) throw new Error("No login frame during the wait");
+        const image = frameImage(page!);
+        const field = await framePoint(image, state, 91, 87);
+        const submit = await framePoint(image, state, 215, 87);
+        expect(calls().map((call) => call.responded)).toEqual(["tool_call"]);
+        await page!.mouse.click(field.x, field.y);
+        await page!.keyboard.type("alpha-user");
+        const typedAt = Date.now();
+        await expect
+          .poll(() => loginFrame().some((frame) => frame.at > typedAt))
+          .toBe(true);
+        expect(visit("/check")).toBeUndefined();
+        expect(calls()).toHaveLength(1);
+        await page!.mouse.click(submit.x, submit.y);
+        await expect.poll(() => calls().length, { timeout: 20_000 }).toBe(2);
+        const [call, final] = calls();
+        expect(final.responded).toBe("final");
+        expect(call.toolCallId).toBeTruthy();
+        expect(final.resultCallId).toBe(call.toolCallId);
+        expect(final.at - visit("/wait-started")!.at).toBeLessThan(
+          waitTimeout / 3,
+        );
+        expect(visit("/signin")?.user).toBe("alpha-user");
+        expect(visit("/check")?.cookie).toContain("fixture_login=alpha-user");
+        expect(visit("/check")!.at).toBeLessThanOrEqual(final.at);
+        expect(JSON.parse(final.toolResult ?? "")).toMatchObject({
+          tool: "chrome",
+          ok: true,
+          url: `${site.origin}/check`,
+          steps: [{ ok: true }, { ok: true, summary: "Predicate satisfied" }],
+        });
+        const inputs = () =>
+          requests().filter((request) => request.route === "input");
+        await expect
+          .poll(() => inputs().map((input) => [input.kind, input.status]))
+          .toEqual([
+            ["click", 200],
+            ...Array.from("alpha-user", () => ["text", 200]),
+            ["click", 200],
+          ]);
+        await expect
+          .poll(() => net.frame(tabA)?.url)
+          .toBe(`${site.origin}/check`);
+        expect(net.frame(tabA)?.title).toBe("Signed in as alpha-user");
+      } finally {
+        await writeFile(
+          info.outputPath("wait-signin-timeline.json"),
+          JSON.stringify(
+            {
+              startedAt,
+              waitTimeout,
+              calls: calls()
+                .map(
+                  ({
+                    at,
+                    responded,
+                    toolCallId,
+                    resultCallId,
+                    toolResult,
+                  }) => ({
+                    at,
+                    responded,
+                    toolCallId,
+                    resultCallId,
+                    excerpt: toolResult?.slice(0, 1500),
+                  }),
+                )
+                .slice(-4),
+              visits: site.visits
+                .slice(visits)
+                .filter((v) =>
+                  ["/login", "/wait-started", "/signin", "/check"].includes(
+                    v.path,
+                  ),
+                )
+                .map(({ at, path }) => ({ at, path }))
+                .slice(-12),
+              frames: frameEvents(),
+              requests: requests().slice(-128),
+            },
+            null,
+            1,
+          ),
+        );
+      }
+      await picture(page!, info, "A04b-signed-in-during-agent-wait");
+    });
+
+    await test.step("Browser rail panel lists tabs with their chat; New tab opens next to the chat; Close tab closes Chromium's tab", async () => {
+      await railButton(page!).click();
+      const panel = dockPanel(page!);
+      await expect(panel).toBeVisible();
+      const items = panel
+        .getByRole("list", { name: "Browser tabs" })
+        .locator("li");
+      const statusTabs = async () =>
+        (
+          (await (
+            await alpha.request(`${browserEndpoint}status`, {})
+          ).json()) as BrowserStatus
+        ).tabs;
+      const initial = await statusTabs();
+      await expect(items).toHaveCount(initial.length, { timeout: 20_000 });
+      const own = items.filter({ hasText: "Fixture login" });
+      await expect(own).toHaveCount(1);
+      await expect(own).toContainText("Alpha chat one");
+      await expect(own).toContainText("Open here");
+      expect(initial.find((tab) => tab.tab_id === tabA)?.name).toBe(
+        "Fixture login",
+      );
+      await picture(page!, info, "A05-rail-panel");
+
+      await panel.getByRole("button", { name: "New tab", exact: true }).click();
+      await expect(items).toHaveCount(initial.length + 1, { timeout: 30_000 });
+      await expect
+        .poll(() => browserView(page!).getAttribute("data-browser-tab-id"), {
+          timeout: 30_000,
+        })
+        .not.toBe(tabA);
+      const created = await browserView(page!).getAttribute(
+        "data-browser-tab-id",
+      );
+      if (!created) throw new Error("New tab view has no tab id");
+      closedTabs.add(created);
+      await expect
+        .poll(() => Boolean(net.frame(created)), { timeout: 30_000 })
+        .toBe(true);
+      await expectBrowserRightOfChat(page!);
+      const withNew = await statusTabs();
+      const index = withNew.findIndex((tab) => tab.tab_id === created);
+      expect(index).toBeGreaterThanOrEqual(0);
+      expect(withNew[index].opened_by_chat).toBe(chatOne);
+      await expect(items.nth(index)).toContainText("Alpha chat one");
+      await picture(page!, info, "A06-new-tab-next-to-chat");
+
+      await items
+        .nth(index)
+        .getByRole("button", { name: /^Close tab: / })
+        .click();
+      await expect(items).toHaveCount(initial.length, { timeout: 30_000 });
+      await expect(
+        page!.locator(`[data-browser-tab-id="${created}"]`),
+      ).toHaveCount(0);
+      const after = (await statusTabs()).map((tab) => tab.tab_id);
+      expect(after).not.toContain(created);
+      expect(after).toContain(tabA);
+
+      await panel.getByRole("button", { name: "New tab", exact: true }).click();
+      await expect(items).toHaveCount(initial.length + 1, { timeout: 30_000 });
+      await expect
+        .poll(() => browserView(page!).getAttribute("data-browser-tab-id"), {
+          timeout: 30_000,
+        })
+        .not.toBe(tabA);
+      const doomed = await browserView(page!).getAttribute(
+        "data-browser-tab-id",
+      );
+      if (!doomed || doomed === created)
+        throw new Error("Second new tab view has no fresh tab id");
+      closedTabs.add(doomed);
+      await alpha.request(`${browserEndpoint}tab`, {
+        op: "close",
+        tab_id: doomed,
+      });
+      await expect(
+        browserView(page!).getByRole("heading", {
+          name: "This browser tab is closed",
+        }),
+      ).toBeVisible({ timeout: 30_000 });
+      await expect(items).toHaveCount(initial.length, { timeout: 30_000 });
+      await picture(page!, info, "A07-closed-tab-view");
+      await page!
+        .getByRole("button", { name: "Close view", exact: true })
+        .click();
+      await expect(
+        page!.locator(`[data-browser-tab-id="${doomed}"]`),
+      ).toHaveCount(0);
+      await railButton(page!).click();
+    });
+
+    await test.step("a second chat's tool call gets its own tab; switching chats swaps the right pane", async () => {
+      await openChat(page!, "Alpha chat two");
+      await browseAndExpectAutoOpen(page!, site, say.second, {
+        title: "Second chat page",
+        railText: "Second chat page",
+      });
+      await expect(workspaceTab(page!, "Second chat page")).toBeVisible();
+      tabB = await visibleBrowserTab(
+        page!,
+        net,
+        (frame) => frame.url === `${site.origin}/second`,
+      );
+      expect(tabB).not.toBe(tabA);
+      await expectBrowserRightOfChat(page!);
+      const status = (await (
+        await alpha.request(`${browserEndpoint}status`, {})
+      ).json()) as BrowserStatus;
+      const a = status.tabs.find((tab) => tab.tab_id === tabA);
+      const b = status.tabs.find((tab) => tab.tab_id === tabB);
+      expect(a?.url).toBe(`${site.origin}/check`);
+      expect(a?.last_chat).toBe(chatOne);
+      expect(b?.last_chat).toBe(chatTwo);
+      expect(b?.name).toBe("Second chat page");
+      await expect(
+        workspaceTab(page!, "Fixture login"),
+        "chat one's Browser view must not show in chat two's tab strip",
+      ).toHaveCount(0);
+      await picture(page!, info, "A08-second-chat-own-tab");
+
+      await openChat(page!, "Alpha chat one");
+      await expect(browserView(page!)).toHaveAttribute(
+        "data-browser-tab-id",
+        tabA,
+        { timeout: 20_000 },
+      );
+      await expectBrowserRightOfChat(page!);
+      await expect(workspaceTab(page!, "Fixture login")).toBeVisible();
+      await expect(
+        workspaceTab(page!, "Second chat page"),
+        "chat two's Browser view must not show in chat one's tab strip",
+      ).toHaveCount(0);
+      await picture(page!, info, "A09-switch-back-to-chat-one");
+      await openChat(page!, "Alpha chat two");
+      await expect(browserView(page!)).toHaveAttribute(
+        "data-browser-tab-id",
+        tabB,
+        { timeout: 20_000 },
+      );
+    });
+
+    await test.step("restart the worker: the persisted view shows the closed state, one-click recovery opens a live signed-in tab, and the next tool call stays on it", async () => {
+      await alpha.stopWorker();
+      for (const id of [tabA, tabB]) beforeRestart.add(id);
+      await alpha.start(alpha.port);
+      await page!.goto(`${alpha.origin}/?chat=${chatOne}`);
+      await expect(composer(page!)).toBeVisible({ timeout: 30_000 });
+      const stale = page!.locator(`[data-browser-tab-id="${tabA}"]`);
+      await expect(
+        stale,
+        "the persisted Browser view of chat one survives the reload",
+      ).toBeVisible({ timeout: 30_000 });
+      await expect(
+        stale.getByRole("heading", { name: "This browser tab is closed" }),
+        "a view must not start Chromium by itself",
+      ).toBeVisible({ timeout: 30_000 });
+      await expect(stale).toContainText("Browser rail");
+      const idle = (await (
+        await alpha.request(`${browserEndpoint}status`, {})
+      ).json()) as BrowserStatus;
+      expect(idle.running).toBe(false);
+      const chatPane = leafSections(page!).filter({ has: composer(page!) });
+      const paneBox = await chatPane.boundingBox();
+      if (!paneBox) throw new Error("Chat pane has no bounds");
+      await page!.mouse.move(
+        paneBox.x + paneBox.width / 2,
+        paneBox.y + paneBox.height / 2,
+      );
+      await expect(workspaceTab(page!, "Alpha chat one")).toHaveAttribute(
+        "aria-selected",
+        "true",
+      );
+      await expect(
+        page!.getByRole("tab", {
+          name: /(^|\s)Alpha chat two$/,
+          selected: true,
+        }),
+      ).toHaveCount(0);
+      await picture(page!, info, "A10a-restart-stale-view-closed");
+
+      await stale
+        .getByRole("button", { name: "Open browser for this chat" })
+        .click();
+      await expect(
+        stale,
+        "one-click recovery replaces the dead view",
+      ).toHaveCount(0, { timeout: 30_000 });
+      const recovered = await visibleBrowserTab(page!, net, () => true);
+      expect(beforeRestart.has(recovered)).toBe(false);
+      await expect(browserView(page!).getByRole("alert")).toHaveCount(0);
+      await expect(page!.getByRole("alert")).toHaveCount(0);
+      const recoveredStatus = (await (
+        await alpha.request(`${browserEndpoint}status`, {})
+      ).json()) as BrowserStatus;
+      expect(recoveredStatus.running).toBe(true);
+      expect(
+        recoveredStatus.tabs.find((tab) => tab.tab_id === recovered)?.last_chat,
+      ).toBe(chatOne);
+      const beforeAddress = site.visits.length;
+      await browserView(page!)
+        .getByRole("textbox", { name: "Address" })
+        .fill(`${site.origin}/check`);
+      await browserView(page!)
+        .getByRole("textbox", { name: "Address" })
+        .press("Enter");
+      await expect
+        .poll(() => net.frame(recovered)?.title, { timeout: 30_000 })
+        .toBe("Signed in as alpha-user");
+      expect(site.lastVisit("/check", beforeAddress)?.cookie).toContain(
+        "fixture_login=alpha-user",
+      );
+      await expectBrowserRightOfChat(page!);
+      await expect(page!.getByRole("alert")).toHaveCount(0);
+      await picture(page!, info, "A10b-recovered-signed-in");
+
+      const before = site.visits.length;
+      await browseAndExpectAutoOpen(page!, site, say.check, {
+        railText: /\/check/,
+      });
+      const fresh = await visibleBrowserTab(
+        page!,
+        net,
+        (frame) =>
+          frame.url === `${site.origin}/check` &&
+          frame.title === "Signed in as alpha-user",
+      );
+      expect(fresh, "the chat's next tool call stays on its own tab").toBe(
+        recovered,
+      );
+      expect(site.lastVisit("/check", before)?.cookie).toContain(
+        "fixture_login=alpha-user",
+      );
+      await expectBrowserRightOfChat(page!);
+      await picture(page!, info, "A10-after-worker-restart");
+    });
+
+    await test.step("a second project's separate worker is not signed in", async () => {
+      await beta.start();
+      const other = await newGuiPage(gui!);
+      page = other.page;
+      observers.push(other.net);
+      await page.goto(`${beta.origin}/?chat=${betaChat}`);
+      await expect(composer(page)).toBeVisible({ timeout: 30_000 });
+      const before = site.visits.length;
+      await browseAndExpectAutoOpen(page, site, say.check, {
+        railText: /\/check/,
+      });
+      await visibleBrowserTab(
+        page,
+        other.net,
+        (frame) =>
+          frame.url === `${site.origin}/check` && frame.title === "Signed out",
+      );
+      const visit = site.lastVisit("/check", before);
+      expect(visit?.cookie).not.toContain("fixture_login");
+      expect(visit?.cookie).not.toContain("fixture_legacy");
+      await picture(page, info, "A11-project-beta-isolated");
+    });
+
+    for (const net of observers) {
+      expect(net.denied()).toEqual([]);
+      await settledFailures(net);
+      recordTransientConflicts(info, [net]);
+      expect(
+        net.failures.filter((failure) => {
+          const tabId =
+            (JSON.parse(failure.request ?? "{}") as { tab_id?: string })
+              .tab_id ?? "";
+          return !(
+            (failure.status === 410 && closedTabs.has(tabId)) ||
+            ([404, 410].includes(failure.status) && beforeRestart.has(tabId)) ||
+            isTransientRendererConflict(failure)
+          );
+        }),
+        "Browser routes may only refuse tabs this test closed (410), tabs of the browser before the worker restart (404 not running / 410), or answer a transient renderer 409 on /frame or /resize",
+      ).toEqual([]);
+    }
+  } catch (error) {
+    if (page && !page.isClosed()) {
+      await picture(page, info, "failure-gui");
+      await writeFile(
+        info.outputPath("failure-gui-storage.json"),
+        JSON.stringify(
+          await page.evaluate(() => ({
+            local: { ...localStorage },
+            session: { ...sessionStorage },
+          })),
+          null,
+          1,
+        ),
+      );
+      await writeFile(
+        info.outputPath("failure-gui-aria.yaml"),
+        await page.locator("body").ariaSnapshot(),
+      );
     }
     throw error;
   } finally {
-    for (const pid of browserProcesses) {
-      try {
-        process.kill(pid, "SIGTERM");
-      } catch {
-        // Browser may already have exited after closing its CDP connection.
-      }
-    }
+    await writeRouteEvidence(info, observers);
+    await keepDiagnostics(
+      info,
+      fixture,
+      site,
+      {
+        "alpha-worker": alpha.diagnostics(),
+        "beta-worker": beta.diagnostics(),
+      },
+      [alphaRoot, betaRoot],
+    );
+    await closeAll(gui);
     try {
-      await daemon.stop();
+      await alpha.stopWorker();
+      await beta.stopWorker();
     } finally {
       await site.close();
     }
   }
 });
 
-function observeDesktopBrowser(page: Page, launchUrl: string) {
-  const observeFrame = observeFrames(page);
-  const projectUrl = new URL(launchUrl);
-  const endpoint = `${projectUrl.pathname}v1/browser/project/`;
-  let status: BrowserStatus | undefined;
-  let statusHttp: number | undefined;
-  let frameHttp: number | undefined;
-  let sawHandoffStatus = false;
-  let navigations = 0;
-  page.on("request", (request) => {
-    const url = new URL(request.url());
-    if (
-      url.origin === projectUrl.origin &&
-      url.pathname === `${endpoint}navigate`
-    ) {
-      navigations += 1;
-    }
-  });
-  page.on("response", (response) => {
-    const url = new URL(response.url());
-    if (url.origin !== projectUrl.origin) return;
-    if (url.pathname === `${endpoint}frame`) frameHttp = response.status();
-    if (url.pathname !== `${endpoint}status`) return;
-    statusHttp = response.status();
-    const request = response.request();
-    if (
-      !response.ok() ||
-      request.method() !== "POST" ||
-      !request.headers()["x-refact-browser-launch"]
-    )
-      return;
-    sawHandoffStatus = true;
-    void response
-      .json()
-      .then((body: BrowserStatus) => {
-        status = body;
-      })
-      .catch(() => undefined);
-  });
-  return {
-    frame: observeFrame,
-    status: () => status,
-    navigationCount: () => navigations,
-    async ready(project: Project) {
-      await expect
-        .poll(
-          () =>
-            sawHandoffStatus &&
-            status?.project_id === project.project_id.slice(0, 16),
-          {
-            message:
-              "The desktop handoff must authorize a successful Browser status request for this project",
-            timeout: 20_000,
-          },
-        )
-        .toBe(true);
-      await expect
-        .poll(
-          () => {
-            const current = observeFrame();
-            return Boolean(
-              status?.running &&
-                status.connected &&
-                status.runtime_id &&
-                status.active_tab &&
-                current?.runtime_id === status.runtime_id &&
-                current.tab_id === status.active_tab,
-            );
-          },
-          {
-            message:
-              "The Browser must return a frame for the active tab of its running runtime",
-            timeout: 25_000,
-          },
-        )
-        .toBe(true);
-      await expect(address(page)).toBeVisible();
-      await expect(frame(page)).toBeVisible();
-    },
-    diagnostics(siteOrigin: string) {
-      const safeId = (id: string | null | undefined) =>
-        !id ? null : /^[a-f0-9-]{8,36}$/i.test(id) ? id : "[redacted id]";
-      const safeTab = ({ tab_id, url }: { tab_id: string; url: string }) => {
-        const parsed = URL.canParse(url) ? new URL(url) : undefined;
-        return {
-          tabId: safeId(tab_id),
-          url:
-            url === "about:blank"
-              ? url
-              : parsed?.origin === siteOrigin &&
-                  ["/form", "/check", "/submit"].includes(parsed.pathname)
-                ? parsed.pathname
-                : "[redacted URL]",
-        };
-      };
-      const latestFrame = observeFrame();
-      return JSON.stringify(
-        {
-          statusHttp,
-          frameHttp,
-          sawHandoffStatus,
-          navigations,
-          running: status?.running,
-          connected: status?.connected,
-          runtimeId: safeId(status?.runtime_id),
-          activeTabId: safeId(status?.active_tab),
-          tabs: status?.tabs.map(safeTab) ?? [],
-          frame: latestFrame
-            ? {
-                runtimeId: safeId(latestFrame.runtime_id),
-                ...safeTab(latestFrame),
-              }
-            : null,
-        },
-        null,
-        2,
+for (const authEnabled of [false, true]) {
+  test(`daemon with auth ${
+    authEnabled ? "ON (normal UI login)" : "OFF"
+  }: a chat tool call opens the Browser split and every Browser route answers`, async ({
+    playwright,
+  }, info) => {
+    test.setTimeout(420_000);
+    const fixture = fixtureEnvironment();
+    const site = await startSite();
+    await writeEngineConfig(fixture, site.origin);
+    const say = scripts(site);
+    const lane = authEnabled ? "daemon-auth-on" : "daemon-auth-off";
+    const daemon = new Daemon(fixture, `${lane}-dir`);
+    const root = await createProjectRoot(fixture, lane);
+    const chat = await writeChat(root, `${lane} chat`);
+    let gui: Browser | undefined;
+    let page: Page | undefined;
+    const laneObservers: Observer[] = [];
+    try {
+      await daemon.start({ authEnabled });
+      const project = await daemon.openProject(root);
+      gui = await playwright.chromium.launch({
+        executablePath: fixture.chrome,
+        env: fixture.env,
+      });
+      const opened = await newGuiPage(gui);
+      page = opened.page;
+      const net = opened.net;
+      laneObservers.push(net);
+      if (authEnabled)
+        await opened.context.addCookies([
+          await daemon.loginCookie(project.project_id),
+        ]);
+      const base = `/p/${project.project_id}`;
+      await page.goto(`${daemon.origin}${base}/?chat=${chat}`);
+      await expect(composer(page)).toBeVisible({ timeout: 30_000 });
+      await railButton(page).click();
+      await expect(
+        dockPanel(page).getByRole("button", { name: "Start browser" }),
+        "the Browser dock offers Start instead of launching Chromium itself",
+      ).toBeVisible({ timeout: 20_000 });
+      const idle = await inPagePost(page, `${base}${browserEndpoint}status`);
+      expect(idle.status).toBe(200);
+      expect((JSON.parse(idle.body) as BrowserStatus).running).toBe(false);
+      await picture(
+        page,
+        info,
+        `${authEnabled ? "C" : "B"}00-${lane}-dock-start-button`,
       );
-    },
-  };
-}
-
-async function checkSiteLogin(
-  page: Page,
-  site: Awaited<ReturnType<typeof startSite>>,
-  checkUrl: string,
-  observe: ReturnType<typeof observeFrames>,
-  signedIn: boolean,
-) {
-  const before = site.visits.length;
-  await navigate(page, checkUrl, observe);
-  const visit = site.visits.slice(before).find(({ path }) => path === "/check");
-  expect(Boolean(visit), "Browser must send a fresh /check request").toBe(true);
-  expect(Boolean(visit?.userAgent.includes("Chrome/"))).toBe(true);
-  expect(
-    signedIn
-      ? visit?.cookie.split("; ").includes("fixture_login=project-alpha")
-      : visit?.cookie === "",
-    "Browser /check must have the expected fixture login state",
-  ).toBe(true);
-  await expect
-    .poll(
-      () =>
-        observe()?.url === checkUrl &&
-        observe()?.title === (signedIn ? alphaSignedIn : "Signed out"),
-      { timeout: 20_000 },
-    )
-    .toBe(true);
-}
-
-async function selectBrowserTab(page: Page, label: string) {
-  const tab = browserTabs(page).getByRole("button", {
-    name: label,
-    exact: true,
-  });
-  if ((await tab.getAttribute("aria-pressed")) !== "true") await tab.click();
-  await expect(tab).toHaveAttribute("aria-pressed", "true");
-}
-
-async function expectBareBrowserDenied(daemon: Daemon, project: Project) {
-  const response = await fetch(
-    `${daemon.origin}/p/${project.project_id}${browserEndpoint}status`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: "{}",
-      redirect: "manual",
-    },
-  );
-  expect([401, 403, 404]).toContain(response.status);
-  expect(response.headers.has("location")).toBe(false);
-}
-
-async function expectNoDaemonToken(
-  desktop: Awaited<ReturnType<typeof connectDesktopChromium>>,
-  daemon: Daemon,
-) {
-  const cookies = await desktop.context.cookies();
-  expect(cookies.some(({ value }) => value === daemon.token)).toBe(false);
-  const storage = await desktop.page.evaluate(() => ({
-    localStorage: Object.values(localStorage),
-    sessionStorage: Object.values(sessionStorage),
-  }));
-  expect(JSON.stringify(storage).includes(daemon.token)).toBe(false);
-}
-
-function isLocalHandoffSubmission(url: string | undefined, origin: string) {
-  if (!url || !URL.canParse(url)) return false;
-  const submitted = new URL(url);
-  return (
-    submitted.origin === origin &&
-    submitted.pathname === "/submit" &&
-    submitted.searchParams.get("entry") === "real local handoff"
-  );
-}
-
-async function openSeededChat(page: Page, title: string) {
-  await page.getByRole("button", { name: "Home", exact: true }).click();
-  const link = page.getByRole("link", { name: title, exact: true });
-  await expect(link).toBeVisible({ timeout: 20_000 });
-  await link.click();
-  await expect(page.getByTestId("chat-form-textarea")).toBeVisible({
-    timeout: 20_000,
-  });
-}
-
-async function openBrowserFromDesktop(page: Page) {
-  if (await browserTab(page).count()) {
-    await expect(region(page)).toBeVisible();
-    await expect(address(page)).toBeVisible();
-    return;
-  }
-  const composer = page.getByTestId("chat-form-textarea");
-  await composer.fill("local fixture setup");
-  await expect(openButton(page)).toBeVisible();
-  await openButton(page).click();
-  await expect(browserTab(page)).toBeVisible();
-  await expect(region(page)).toBeVisible();
-}
-
-async function launchDesktop(
-  daemon: Daemon,
-  opener: DesktopOpener,
-  project: Project,
-  index: number,
-  pids: number[],
-) {
-  const url = (await spawnUi(daemon, project.root)).trim();
-  const pid = Number(await readOneLine(opener.pids, index));
-  if (!Number.isSafeInteger(pid) || pid <= 1)
-    throw new Error("Desktop opener did not report a valid Chromium PID");
-  pids.push(pid);
-  expect(await readOneLine(opener.argumentCounts, index)).toBe("1");
-  const file = await readOneLine(opener.arguments, index);
-  expect(/^\/[^?#]*\.html$/.test(file) && !file.includes(daemon.token)).toBe(
-    true,
-  );
-  expect((await readFile(file, "utf8")).includes(daemon.token)).toBe(false);
-  expect(
-    /^http:\/\/refact-[a-f0-9]+\.localhost:\d+\/p\/[^?#/]+\/$/.test(url) &&
-      url.endsWith(`/p/${project.project_id}/`) &&
-      !url.includes(daemon.token),
-    "refact ui must print only the clean launch URL for the selected project",
-  ).toBe(true);
-  const profile = await readOneLine(opener.profilePaths, index);
-  await writeFile(join(profile, "fixture-ready"), "", { mode: 0o600 });
-  return { url, file, profile };
-}
-
-function spawnUi(daemon: Daemon, root: string): Promise<string> {
-  const child = spawn(daemon.fixtureEngine, ["ui", root], {
-    cwd: root,
-    env: daemon.uiEnv,
-    stdio: ["ignore", "pipe", "ignore"],
-  });
-  return new Promise((resolve, reject) => {
-    let stdout = "";
-    child.stdout?.on("data", (chunk: Buffer) => (stdout += chunk.toString()));
-    child.once("error", reject);
-    child.once("close", (code) => {
-      if (code === 0) resolve(stdout);
-      else reject(new Error(`refact ui exited with ${code}`));
-    });
-  });
-}
-
-async function readOneLine(path: string, index = 0): Promise<string> {
-  const end = Date.now() + 20_000;
-  while (Date.now() < end) {
-    try {
-      const lines = (await readFile(path, "utf8"))
-        .split(/\r?\n/)
-        .filter(Boolean);
-      if (lines[index]) return lines[index];
+      await railButton(page).click();
+      await browseAndExpectAutoOpen(page, site, say.login, {
+        title: "Fixture login",
+        railText: "Fixture login",
+      });
+      await expect(workspaceTab(page, "Fixture login")).toBeVisible();
+      await visibleBrowserTab(
+        page,
+        net,
+        (frame) =>
+          frame.url === `${site.origin}/login` &&
+          frame.title === "Fixture login",
+      );
+      await expectBrowserRightOfChat(page);
+      const start = await inPagePost(page, `${base}${browserEndpoint}start`);
+      expect(start.status).toBe(200);
+      const status = await inPagePost(page, `${base}${browserEndpoint}status`);
+      expect(status.status).toBe(200);
+      expect((JSON.parse(status.body) as BrowserStatus).running).toBe(true);
+      const routes = net.browserResponses();
+      expect(routes.filter(({ status }) => status === 401)).toEqual([]);
+      await settledFailures(net);
+      recordTransientConflicts(info, [net]);
+      expect(
+        net.failures.filter((failure) => !isTransientRendererConflict(failure)),
+        "only transient renderer 409s on /frame or /resize are allowed",
+      ).toEqual([]);
+      for (const route of ["status", "frame"])
+        expect(
+          routes.some(
+            ({ path, status }) =>
+              path === `${base}${browserEndpoint}${route}` && status === 200,
+          ),
+        ).toBe(true);
+      await expectNoCredentialUi(page);
+      if (!authEnabled) {
+        const bare = await fetch(
+          `${daemon.origin}${base}${browserEndpoint}status`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: "{}",
+          },
+        );
+        expect(bare.status).toBe(200);
+      }
+      await picture(page, info, `${authEnabled ? "C" : "B"}01-${lane}`);
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      if (page && !page.isClosed()) await picture(page, info, "failure-gui");
+      throw error;
+    } finally {
+      await writeRouteEvidence(info, laneObservers);
+      await keepDiagnostics(
+        info,
+        fixture,
+        site,
+        {
+          daemon: daemon.diagnostics(),
+        },
+        [root],
+      );
+      await closeAll(gui);
+      try {
+        await daemon.stopDaemon();
+      } finally {
+        await site.close();
+      }
     }
-    await delay(100);
-  }
-  throw new Error("Timed out waiting for desktop opener observation");
-}
-
-async function connectDesktopChromium(
-  browserType: typeof chromium,
-  profile: string,
-  expectedUrl: string,
-) {
-  const endpoint = await readDevtoolsEndpoint(profile);
-  const browser = await browserType.connectOverCDP(endpoint);
-  const context = browser.contexts()[0];
-  if (!context) throw new Error("Opened Chromium has no default context");
-  const page = context.pages()[0] ?? (await context.newPage());
-  await page.setViewportSize({ width: 1500, height: 900 });
-  await expect
-    .poll(() => page.url() === expectedUrl, {
-      message: "The desktop handoff must reach the clean project shell URL",
-      timeout: 30_000,
-    })
-    .toBe(true);
-  return { browser, context, page };
-}
-
-async function readDevtoolsEndpoint(profile: string): Promise<string> {
-  const path = join(profile, "DevToolsActivePort");
-  const end = Date.now() + 30_000;
-  while (Date.now() < end) {
-    try {
-      const lines = (await readFile(path, "utf8")).split(/\r?\n/);
-      if (lines[0] && lines[1]) return `http://127.0.0.1:${lines[0]}`;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    }
-    await delay(100);
-  }
-  throw new Error("Timed out waiting for the real Chromium DevTools endpoint");
+  });
 }

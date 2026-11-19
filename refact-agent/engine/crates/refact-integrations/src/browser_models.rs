@@ -1295,6 +1295,8 @@ pub enum BrowserStep {
         device: Option<String>,
         #[serde(default)]
         url: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
     },
     CloseTab {
         #[serde(default)]
@@ -2414,7 +2416,7 @@ impl BrowserStep {
         ("reload", &[], &[], &[]),
         ("go_back", &[], &[], &[]),
         ("go_forward", &[], &[], &[]),
-        ("open_tab", &[], &["device", "url"], &[]),
+        ("open_tab", &[], &["device", "name", "url"], &[]),
         ("close_tab", &[], &["tab"], &[]),
         ("switch_tab", &["tab"], &[], &[]),
         ("list_tabs", &[], &[], &[]),
@@ -3256,6 +3258,8 @@ pub struct ExecutionReport {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub downloads: Vec<DownloadInfo>,
     pub new_tabs: Vec<TabInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub active_routes: Vec<RouteInfo>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -3563,11 +3567,61 @@ pub struct TabInfo {
     pub opener: Option<TabOpener>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub opened_by_step: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+pub const MAX_TAB_NAME_CHARS: usize = 64;
+
+pub fn validate_tab_name(raw: &str) -> Result<String, String> {
+    let name = raw.trim();
+    if name.is_empty() || name.chars().count() > MAX_TAB_NAME_CHARS {
+        return Err(format!(
+            "tab name must be 1..={MAX_TAB_NAME_CHARS} characters after trimming"
+        ));
+    }
+    if name.chars().any(char::is_control) {
+        return Err("tab name must not contain control characters".into());
+    }
+    Ok(name.to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tab_names_are_trimmed_bounded_and_free_of_control_characters() {
+        assert_eq!(validate_tab_name("  docs  ").unwrap(), "docs");
+        assert_eq!(validate_tab_name(&"é".repeat(64)).unwrap(), "é".repeat(64));
+        for bad in ["", "   ", "a\nb", "tab\u{7}", &"x".repeat(65)] {
+            assert!(validate_tab_name(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn tab_name_and_report_tab_id_serialize_only_when_present() {
+        let mut tab = TabInfo {
+            id: "t1".into(),
+            target_id: "t1".into(),
+            url: "about:blank".into(),
+            title: String::new(),
+            active: true,
+            opener: None,
+            opened_by_step: None,
+            name: None,
+        };
+        assert!(serde_json::to_value(&tab).unwrap().get("name").is_none());
+        tab.name = Some("docs".into());
+        assert_eq!(serde_json::to_value(&tab).unwrap()["name"], "docs");
+        let mut report = ExecutionReport::default();
+        assert!(serde_json::to_value(&report)
+            .unwrap()
+            .get("tab_id")
+            .is_none());
+        report.tab_id = Some("t1".into());
+        assert_eq!(serde_json::to_value(&report).unwrap()["tab_id"], "t1");
+    }
 
     #[test]
     fn context_cookie_and_storage_state_serde_round_trip() {
@@ -3613,6 +3667,7 @@ mod tests {
             BrowserStep::OpenTab {
                 device: Some("desktop".to_string()),
                 url: Some("https://example.com/new".to_string()),
+                name: Some("docs".to_string()),
             },
             BrowserStep::CloseTab {
                 tab: None,
@@ -5162,6 +5217,7 @@ mod tests {
                 failure_reason: None,
             }],
             new_tabs: vec![],
+            tab_id: None,
             active_routes: vec![],
             intercepted_requests: vec![],
             context: None,

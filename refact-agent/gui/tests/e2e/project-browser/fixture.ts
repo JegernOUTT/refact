@@ -1,11 +1,15 @@
-import { chromium, type BrowserContext } from "@playwright/test";
+import { chromium } from "@playwright/test";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
 import { readFileSync, readlinkSync } from "node:fs";
-import { access, chmod, mkdir, readFile, writeFile } from "node:fs/promises";
-import { createServer } from "node:http";
+import { access, mkdir, readFile, utimes, writeFile } from "node:fs/promises";
+import { createServer, type IncomingMessage } from "node:http";
+import { createServer as createNetServer } from "node:net";
 import { isAbsolute, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+
+export const FIXTURE_MODEL = "custom/fixture-model";
+export const NON_LOOPBACK_HOST = "192.0.2.1";
 
 function required(name: string): string {
   const path = process.env[name];
@@ -38,6 +42,8 @@ export function assertIsolated() {
   }
 }
 
+export type Fixture = ReturnType<typeof fixtureEnvironment>;
+
 export function fixtureEnvironment() {
   assertIsolated();
   const scratch = required("REFACT_PROJECT_BROWSER_SCRATCH");
@@ -58,6 +64,7 @@ export function fixtureEnvironment() {
     home,
     engine: required("REFACT_PROJECT_BROWSER_ENGINE"),
     chrome: required("REFACT_PROJECT_BROWSER_CHROME"),
+    cache: join(home, ".cache", "refact"),
     env: {
       PATH: "/usr/bin:/bin:/usr/sbin",
       HOME: home,
@@ -70,11 +77,12 @@ export function fixtureEnvironment() {
   };
 }
 
-async function poll<T>(
+export async function poll<T>(
   read: () => Promise<T | undefined>,
   name: string,
+  timeout = 30_000,
 ): Promise<T> {
-  const end = Date.now() + 20_000;
+  const end = Date.now() + timeout;
   while (Date.now() < end) {
     const value = await read();
     if (value !== undefined) return value;
@@ -89,122 +97,228 @@ export type Project = {
   worker: { pid: number; http_port: number };
 };
 
-export async function createProjectRoot(
-  fixture: ReturnType<typeof fixtureEnvironment>,
-  name: string,
-) {
+export async function createProjectRoot(fixture: Fixture, name: string) {
   const root = join(fixture.scratch, name);
   await mkdir(root);
   execFileSync("git", ["init", "--quiet"], { cwd: root, env: fixture.env });
   return root;
 }
 
-export type DesktopOpener = {
-  bin: string;
-  argumentCounts: string;
-  arguments: string;
-  profiles: string;
-  profilePaths: string;
-  pids: string;
-};
-
-export async function createDesktopOpener(
-  fixture: ReturnType<typeof fixtureEnvironment>,
-): Promise<DesktopOpener> {
-  const bin = join(fixture.scratch, "opener-bin");
-  const argumentCounts = join(fixture.scratch, "opener-argument-counts");
-  const argumentsPath = join(fixture.scratch, "opener-arguments");
-  const profiles = join(fixture.scratch, "desktop-chromium");
-  const profilePaths = join(fixture.scratch, "opener-profile-paths");
-  const pids = join(fixture.scratch, "opener-pids");
-  await mkdir(bin, { recursive: true, mode: 0o700 });
-  await mkdir(profiles, { recursive: true, mode: 0o700 });
-  const openerPath = join(bin, "xdg-open");
+export async function writeEngineConfig(fixture: Fixture, siteOrigin: string) {
+  const engineConfig = join(fixture.home, ".config", "refact");
+  const providers = join(engineConfig, "providers.d");
+  await mkdir(providers, { recursive: true });
   await writeFile(
-    openerPath,
-    `#!/bin/sh
-set -eu
-umask 077
-[ "$#" -eq 1 ] || exit 64
-case "$1" in /*) ;; *) exit 65 ;; esac
-printf '%s\\n' "$#" >> "$REFACT_PROJECT_BROWSER_OPEN_ARG_COUNTS"
-printf '%s\\n' "$1" >> "$REFACT_PROJECT_BROWSER_OPEN_ARGS"
-profile="$REFACT_PROJECT_BROWSER_OPEN_PROFILES/$(date +%s%N)"
-mkdir -m 700 "$profile"
-printf '%s\\n' "$profile" >> "$REFACT_PROJECT_BROWSER_OPEN_PROFILE_PATHS"
-(
-  attempts=0
-  until [ -f "$profile/fixture-ready" ]; do
-    [ "$attempts" -lt 200 ] || exit 1
-    attempts=$((attempts + 1))
-    sleep 0.1
-  done
-  exec "$CHROME" --headless=new --no-sandbox --disable-dev-shm-usage --no-first-run --no-default-browser-check --remote-debugging-port=0 --user-data-dir="$profile" "$1"
-) >/dev/null 2>&1 &
-printf '%s\\n' "$!" >> "$REFACT_PROJECT_BROWSER_OPEN_PIDS"
-`,
-    { mode: 0o700 },
+    join(providers, "custom.yaml"),
+    JSON.stringify({
+      enabled: true,
+      chat_endpoint: `${siteOrigin}/v1/chat/completions`,
+      wire_format: "openai_chat_completions",
+      enabled_models: ["fixture-model"],
+      custom_models: {
+        "fixture-model": {
+          n_ctx: 400_000,
+          supports_tools: true,
+          tokenizer: "fake",
+          max_output_tokens: 4096,
+        },
+      },
+    }),
   );
-  await chmod(openerPath, 0o700);
-  return {
-    bin,
-    argumentCounts,
-    arguments: argumentsPath,
-    profiles,
-    profilePaths,
-    pids,
-  };
+  await writeFile(
+    join(engineConfig, "browser.yaml"),
+    JSON.stringify({
+      launch: {
+        chrome_path: fixture.chrome,
+        chromium_sandbox: false,
+        extra_args: ["--password-store=basic"],
+      },
+    }),
+  );
 }
 
-export class Daemon {
-  readonly token = randomBytes(32).toString("hex");
-  readonly dir: string;
-  private child?: ChildProcess;
-  private exited?: Promise<{
+async function freePort(): Promise<number> {
+  const server = createNetServer();
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "0.0.0.0", resolve);
+  });
+  const address = server.address();
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+  if (!address || typeof address === "string")
+    throw new Error("No free port for the worker");
+  return address.port;
+}
+
+class OwnedProcess {
+  protected child?: ChildProcess;
+  protected exited?: Promise<{
     code: number | null;
     signal: NodeJS.Signals | null;
   }>;
-  private daemonOutput = "";
-  private authEnabled = true;
-  origin = "";
-  readonly fixtureEnv: ReturnType<typeof fixtureEnvironment>["env"];
-  readonly fixtureEngine: string;
-  uiEnv: NodeJS.ProcessEnv;
+  protected output = "";
 
-  constructor(private readonly fixture: ReturnType<typeof fixtureEnvironment>) {
-    this.dir = join(fixture.scratch, "daemon");
-    this.fixtureEnv = fixture.env;
-    this.fixtureEngine = fixture.engine;
-    this.uiEnv = fixture.env;
+  protected spawnOwned(
+    command: string,
+    args: string[],
+    cwd: string,
+    env: NodeJS.ProcessEnv,
+  ) {
+    const child = spawn(command, args, {
+      cwd,
+      env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    this.child = child;
+    for (const pipe of [child.stdout, child.stderr]) {
+      pipe?.on("data", (chunk: Buffer) => {
+        this.output = (this.output + chunk.toString()).slice(-16_777_216);
+      });
+    }
+    this.exited = new Promise((resolve, reject) => {
+      child.on("error", reject);
+      child.on("exit", (code, signal) => resolve({ code, signal }));
+    });
+    void this.exited.catch(() => undefined);
+    return child;
   }
 
-  async start(
-    siteOrigin: string,
-    options: { authEnabled?: boolean; opener?: DesktopOpener } = {},
+  protected exitedEarly(label: string) {
+    if (!this.exited) throw new Error(`${label} was not started`);
+    return this.exited.then(() => {
+      throw new Error(`${label} exited before readiness`);
+    });
+  }
+
+  get pid() {
+    return this.child?.pid;
+  }
+
+  async stop(label: string) {
+    const child = this.child;
+    const exited = this.exited;
+    if (
+      !child ||
+      !exited ||
+      child.exitCode !== null ||
+      child.signalCode !== null
+    )
+      return;
+    child.kill("SIGTERM");
+    const outcome = await Promise.race([
+      exited,
+      delay(35_000, undefined, { ref: false }),
+    ]);
+    if (!outcome) {
+      child.kill("SIGKILL");
+      await exited;
+      throw new Error(`${label} did not shut down gracefully`);
+    }
+    if (outcome.code !== 0 && outcome.signal !== "SIGTERM") {
+      throw new Error(
+        `${label} did not exit cleanly (${outcome.code ?? outcome.signal})`,
+      );
+    }
+  }
+}
+
+/** The user's setup: one standalone worker for one project, no daemon. */
+export class Worker extends OwnedProcess {
+  origin = "";
+  port = 0;
+
+  constructor(
+    private readonly fixture: Fixture,
+    readonly root: string,
   ) {
-    this.authEnabled = options.authEnabled ?? true;
-    const engineConfig = join(this.fixture.home, ".config", "refact");
-    const providers = join(engineConfig, "providers.d");
-    await mkdir(providers, { recursive: true });
-    await writeFile(
-      join(providers, "custom.yaml"),
-      JSON.stringify({
-        enabled: true,
-        chat_endpoint: `${siteOrigin}/model-must-not-be-invoked`,
-        enabled_models: ["fixture-model"],
-        custom_models: { "fixture-model": { n_ctx: 4096, tokenizer: "fake" } },
-      }),
+    super();
+  }
+
+  async start(port?: number) {
+    this.port = port ?? (await freePort());
+    this.output += `\n===== worker start on port ${
+      this.port
+    } at ${new Date().toISOString()} =====\n`;
+    this.spawnOwned(
+      this.fixture.engine,
+      [
+        "worker",
+        "--http-port",
+        String(this.port),
+        "--http-host",
+        "0.0.0.0",
+        "--workspace-folder",
+        this.root,
+        "--no-scheduler",
+        "--logs-stderr",
+      ],
+      this.root,
+      this.fixture.env,
     );
-    await writeFile(
-      join(engineConfig, "browser.yaml"),
-      JSON.stringify({
-        launch: {
-          chrome_path: this.fixture.chrome,
-          chromium_sandbox: false,
-          extra_args: ["--password-store=basic"],
+    this.origin = `http://${NON_LOOPBACK_HOST}:${this.port}`;
+    await Promise.race([
+      this.exitedEarly("Standalone worker"),
+      poll(
+        async () => {
+          try {
+            const response = await fetch(`${this.origin}/v1/ping`, {
+              signal: AbortSignal.timeout(2_000),
+            });
+            return response.ok ? true : undefined;
+          } catch {
+            return undefined;
+          }
         },
-      }),
-    );
+        "standalone worker readiness on the non-loopback address",
+        90_000,
+      ),
+    ]);
+  }
+
+  async request(
+    path: string,
+    body?: object,
+    method = body === undefined ? "GET" : "POST",
+  ) {
+    const response = await fetch(`${this.origin}${path}`, {
+      method,
+      headers: { "Content-Type": "application/json" },
+      body: body === undefined ? undefined : JSON.stringify(body),
+      redirect: "error",
+      signal: AbortSignal.timeout(125_000),
+    });
+    if (!response.ok)
+      throw new Error(
+        `${path}: HTTP ${response.status}: ${await response.text()}`,
+      );
+    return response;
+  }
+
+  stopWorker() {
+    return this.stop("Standalone worker");
+  }
+
+  diagnostics() {
+    return this.output;
+  }
+}
+
+export class Daemon extends OwnedProcess {
+  readonly token = randomBytes(32).toString("hex");
+  readonly dir: string;
+  private authEnabled = true;
+  origin = "";
+
+  constructor(
+    private readonly fixture: Fixture,
+    name: string,
+  ) {
+    super();
+    this.dir = join(fixture.scratch, name);
+  }
+
+  async start(options: { authEnabled: boolean }) {
+    this.authEnabled = options.authEnabled;
     await mkdir(this.dir, { recursive: true, mode: 0o700 });
     await writeFile(
       join(this.dir, "daemon.yaml"),
@@ -218,46 +332,14 @@ export class Daemon {
       }),
       { mode: 0o600 },
     );
-    const { engine, chrome, env, scratch } = this.fixture;
-    this.uiEnv = {
-      ...env,
-      ...(options.opener
-        ? {
-            PATH: `${options.opener.bin}:${env.PATH}`,
-            REFACT_PROJECT_BROWSER_OPEN_ARG_COUNTS:
-              options.opener.argumentCounts,
-            REFACT_PROJECT_BROWSER_OPEN_ARGS: options.opener.arguments,
-            REFACT_PROJECT_BROWSER_OPEN_PROFILES: options.opener.profiles,
-            REFACT_PROJECT_BROWSER_OPEN_PROFILE_PATHS:
-              options.opener.profilePaths,
-            REFACT_PROJECT_BROWSER_OPEN_PIDS: options.opener.pids,
-          }
-        : {}),
-      CHROME: chrome,
-      REFACT_DAEMON_DIR: this.dir,
-    };
-    const child = spawn(engine, ["daemon", "--foreground", "--port", "0"], {
-      cwd: scratch,
-      env: this.uiEnv,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    this.child = child;
-    for (const pipe of [child.stdout, child.stderr]) {
-      pipe?.on("data", (chunk: Buffer) => {
-        this.daemonOutput = (this.daemonOutput + chunk.toString()).slice(
-          -32_768,
-        );
-      });
-    }
-    this.exited = new Promise((resolve, reject) => {
-      child.on("error", reject);
-      child.on("exit", (code, signal) => resolve({ code, signal }));
-    });
-    void this.exited.catch(() => undefined);
+    const child = this.spawnOwned(
+      this.fixture.engine,
+      ["daemon", "--foreground", "--port", "0"],
+      this.fixture.scratch,
+      { ...this.fixture.env, REFACT_DAEMON_DIR: this.dir },
+    );
     const port = await Promise.race([
-      this.exited.then(() => {
-        throw new Error("Disposable daemon exited before readiness");
-      }),
+      this.exitedEarly("Disposable daemon"),
       poll(async () => {
         const path = join(this.dir, "daemon.json");
         try {
@@ -309,14 +391,12 @@ export class Daemon {
     ).json() as Promise<Project>;
   }
 
-  async installProjectCookie(context: BrowserContext, projectId: string) {
+  /** The normal UI login: the daemon token bootstrap that issues the scoped project cookie. */
+  async loginCookie(projectId: string) {
     const path = `/p/${projectId}/`;
     const response = await fetch(
       `${this.origin}${path}?daemon_token=${this.token}`,
-      {
-        redirect: "manual",
-        signal: AbortSignal.timeout(20_000),
-      },
+      { redirect: "manual", signal: AbortSignal.timeout(20_000) },
     );
     if (response.status !== 303 || response.headers.get("location") !== path) {
       throw new Error(
@@ -329,70 +409,225 @@ export class Daemon {
     const pair = cookie?.match(/^([^=]+)=([^;]+); HttpOnly; SameSite=Strict; /);
     if (!pair)
       throw new Error("Daemon did not issue an HttpOnly scoped project cookie");
-    await context.addCookies([
-      {
-        domain: "127.0.0.1",
-        path,
-        name: pair[1],
-        value: pair[2],
-        httpOnly: true,
-        sameSite: "Strict",
-      },
-    ]);
-    return `${this.origin}${path}`;
+    return {
+      domain: "127.0.0.1",
+      path,
+      name: pair[1],
+      value: pair[2],
+      httpOnly: true,
+      sameSite: "Strict" as const,
+    };
   }
 
-  async stop() {
-    const child = this.child;
-    const exited = this.exited;
-    if (
-      !child ||
-      !exited ||
-      child.exitCode !== null ||
-      child.signalCode !== null
-    )
-      return;
-    child.kill("SIGTERM");
-    const outcome = await Promise.race([
-      exited,
-      delay(35_000, undefined, { ref: false }),
-    ]);
-    if (!outcome) {
-      child.kill("SIGKILL");
-      await exited;
-      throw new Error("Disposable daemon did not shut down gracefully");
-    }
-    if (outcome.code !== 0 || outcome.signal !== null) {
-      throw new Error(
-        `Disposable daemon did not exit cleanly (${
-          outcome.code ?? outcome.signal
-        })`,
-      );
-    }
+  stopDaemon() {
+    return this.stop("Disposable daemon");
   }
 
   diagnostics() {
-    return this.daemonOutput.replaceAll(this.token, "[fixture token]");
-  }
-
-  loggedToken() {
-    return this.daemonOutput.includes(this.token);
+    return this.output.replaceAll(this.token, "[fixture token]");
   }
 }
 
 const styles = `body{margin:0;font:20px system-ui;color:white;background:rgb(20,30,40)}
-main{padding:12px 16px;min-height:950px;box-sizing:border-box}h1{margin:0 0 22px}
+main{padding:12px 16px;min-height:950px;box-sizing:border-box}h1{margin:0 0 22px;font-size:24px}
 form{position:absolute;left:16px;top:70px;display:flex;align-items:center;gap:12px}input{box-sizing:border-box;width:150px;height:34px}
-button{width:75px;height:34px}footer{height:900px;padding:15px;background:rgb(10,140,110);box-sizing:border-box}`;
+button{width:75px;height:34px}`;
 
+export type Visit = {
+  at: number;
+  path: string;
+  user: string | null;
+  cookie: string;
+  userAgent: string;
+};
+
+export type LlmCall = {
+  script: string | null;
+  responded: "tool_call" | "final" | "text";
+  toolCallId?: string;
+  roles: string[];
+  users: string[];
+  tools: number;
+  hasChrome: boolean;
+  at: number;
+  /** Text of the tool result the model received on this turn, if any. */
+  toolResult?: string;
+  resultCallId?: string;
+};
+
+type ChatMessage = {
+  role: string;
+  content?: unknown;
+  tool_calls?: unknown[];
+  tool_call_id?: string;
+};
+
+function messageText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content))
+    return content
+      .map((part) =>
+        typeof part === "object" && part && "text" in part
+          ? String((part as { text: unknown }).text)
+          : "",
+      )
+      .join("\n");
+  return "";
+}
+
+/** Only a whole typed user message selects a script, never context that quotes one. */
+const SCRIPT =
+  /^\s*(?:Please browse|Just answer, no browsing): fixture script ([a-z0-9-]+)\s*$/m;
+
+async function readBody(req: IncomingMessage) {
+  const chunks: Buffer[] = [];
+  for await (const chunk of req) chunks.push(chunk as Buffer);
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+/**
+ * Local site plus an OpenAI-compatible streaming model. A user message that says
+ * `fixture script <key>` makes the model call `chrome` once with the registered request;
+ * the next model turn after that tool call answers with a short final message.
+ */
 export async function startSite() {
-  let issuedLogin = false;
-  const visits: {
-    path: string;
-    value: string | null;
-    cookie: string;
-    userAgent: string;
-  }[] = [];
+  const visits: Visit[] = [];
+  const llmCalls: LlmCall[] = [];
+  const scripts = new Map<string, object>();
+  let callCounter = 0;
+
+  const completion = (body: string) => {
+    const payload = JSON.parse(body) as {
+      messages?: ChatMessage[];
+      tools?: { function?: { name?: string } }[];
+      stream?: boolean;
+      model?: string;
+    };
+    const messages = payload.messages ?? [];
+    const hasChrome = (payload.tools ?? []).some(
+      (tool) => tool.function?.name === "chrome",
+    );
+    let asked = -1;
+    let script: string | null = null;
+    for (const [index, message] of messages.entries()) {
+      const match =
+        message.role === "user"
+          ? SCRIPT.exec(messageText(message.content))
+          : null;
+      if (!match) continue;
+      asked = index;
+      script = match[1];
+    }
+    const answered =
+      asked >= 0 &&
+      messages
+        .slice(asked + 1)
+        .some(
+          (message) =>
+            message.role === "tool" ||
+            (message.role === "assistant" &&
+              (message.tool_calls?.length ?? 0) > 0),
+        );
+    const request = script ? scripts.get(script) : undefined;
+    const waitResult =
+      script === "waitlogin" && asked >= 0
+        ? messages.slice(asked + 1).find((message) => message.role === "tool")
+        : undefined;
+    const seen = {
+      roles: messages.map((message) => message.role),
+      users: messages
+        .filter((message) => message.role === "user")
+        .map((message) => messageText(message.content).slice(0, 160)),
+      tools: payload.tools?.length ?? 0,
+      hasChrome,
+      at: Date.now(),
+      resultCallId: waitResult?.tool_call_id,
+      toolResult: waitResult
+        ? messageText(waitResult.content).slice(0, 20_000)
+        : undefined,
+    };
+    let delta: Record<string, unknown>;
+    let finish: string;
+    if (request && hasChrome && !answered) {
+      callCounter += 1;
+      const id = `call_fixture_${callCounter}_${randomUUID().slice(0, 8)}`;
+      llmCalls.push({
+        script,
+        responded: "tool_call",
+        toolCallId: id,
+        ...seen,
+      });
+      delta = {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          {
+            index: 0,
+            id,
+            type: "function",
+            function: {
+              name: "chrome",
+              arguments: JSON.stringify({ request }),
+            },
+          },
+        ],
+      };
+      finish = "tool_calls";
+    } else {
+      llmCalls.push({
+        script,
+        responded: answered ? "final" : "text",
+        ...seen,
+      });
+      delta = {
+        role: "assistant",
+        content: answered
+          ? `Fixture browsing done (${script ?? "no script"}).`
+          : `Fixture model reply (${script ?? "no script"}).`,
+      };
+      finish = "stop";
+    }
+    const base = {
+      id: `fixture-${randomUUID()}`,
+      created: Math.floor(Date.now() / 1000),
+      model: payload.model ?? "fixture-model",
+    };
+    if (!payload.stream) {
+      return {
+        type: "application/json",
+        text: JSON.stringify({
+          ...base,
+          object: "chat.completion",
+          choices: [{ index: 0, finish_reason: finish, message: delta }],
+          usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+        }),
+      };
+    }
+    const chunk = (choice: object, extra: object = {}) =>
+      `data: ${JSON.stringify({
+        ...base,
+        object: "chat.completion.chunk",
+        choices: [choice],
+        ...extra,
+      })}\n\n`;
+    return {
+      type: "text/event-stream",
+      text:
+        chunk({ index: 0, delta, finish_reason: null }) +
+        chunk(
+          { index: 0, delta: {}, finish_reason: finish },
+          {
+            usage: {
+              prompt_tokens: 10,
+              completion_tokens: 5,
+              total_tokens: 15,
+            },
+          },
+        ) +
+        "data: [DONE]\n\n",
+    };
+  };
+
   const server = createServer((req, res) => {
     const url = new URL(req.url ?? "/", "http://127.0.0.1");
     const { pathname: path } = url;
@@ -400,50 +635,95 @@ export async function startSite() {
       res.writeHead(204).end();
       return;
     }
+    if (path === "/v1/models") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          object: "list",
+          data: [{ id: "fixture-model", object: "model" }],
+        }),
+      );
+      return;
+    }
+    if (path === "/v1/chat/completions" && req.method === "POST") {
+      void readBody(req)
+        .then((body) => {
+          const reply = completion(body);
+          res.writeHead(200, {
+            "Content-Type": reply.type,
+            "Cache-Control": "no-store",
+          });
+          res.end(reply.text);
+        })
+        .catch((error: unknown) => {
+          res.writeHead(500).end(String(error));
+        });
+      return;
+    }
     const cookie = req.headers.cookie ?? "";
-    const value = url.searchParams.get("entry");
+    const user = url.searchParams.get("user");
     visits.push({
+      at: Date.now(),
       path,
-      value,
+      user,
       cookie,
       userAgent: req.headers["user-agent"] ?? "",
     });
-    if (path === "/model-must-not-be-invoked") {
-      res.writeHead(501).end("This test does not invoke a model");
-      return;
-    }
-    const login = cookie.split("; ").includes("fixture_login=project-alpha");
+    const signedIn = cookie
+      .split("; ")
+      .find((pair) => pair.startsWith("fixture_login="))
+      ?.slice("fixture_login=".length);
     const pageTitle =
-      path === "/check"
-        ? login
-          ? "Signed in: Project Alpha"
-          : "Signed out"
-        : path === "/submit"
-          ? "Browser fixture · submitted"
-          : "Browser fixture · form";
+      path === "/signin" && user
+        ? `Signed in as ${user}`
+        : path === "/check"
+          ? signedIn
+            ? `Signed in as ${signedIn}`
+            : "Signed out"
+          : path === "/login"
+            ? "Fixture login"
+            : `Fixture page ${path}`;
     res.setHeader("Content-Type", "text/html; charset=utf-8");
     res.setHeader("Cache-Control", "no-store");
     res.setHeader(
       "Content-Security-Policy",
-      "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'",
+      `default-src 'none'; ${
+        path === "/login" && url.searchParams.has("wait")
+          ? "connect-src 'self';"
+          : ""
+      } style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'`,
     );
-    if (path === "/submit" && value && !issuedLogin) {
-      issuedLogin = true;
+    if (path === "/signin" && user) {
       res.setHeader(
         "Set-Cookie",
-        "fixture_login=project-alpha; Max-Age=86400; Path=/; HttpOnly; SameSite=Strict",
+        `fixture_login=${encodeURIComponent(
+          user,
+        )}; Max-Age=86400; Path=/; HttpOnly; SameSite=Lax`,
       );
+      const next = url.searchParams.get("next");
+      if (next === "/check") {
+        res.writeHead(303, { Location: "/check" }).end();
+        return;
+      }
     }
-    if (path === "/seed-selected" || path === "/seed-unselected") {
+    const legacy = /^\/seed-(older|newer)$/.exec(path)?.[1];
+    if (legacy) {
       res.setHeader(
         "Set-Cookie",
-        `fixture_legacy=${path.slice(
-          6,
-        )}; Max-Age=86400; Path=/; HttpOnly; SameSite=Strict`,
+        `fixture_legacy=${legacy}; Max-Age=86400; Path=/; HttpOnly; SameSite=Lax`,
       );
     }
-    res.end(`<!doctype html><html lang="en"><meta charset="utf-8"><title>${pageTitle}</title><style>${styles}</style><main><h1>${pageTitle}</h1>
-<form action="/submit"><input name="entry" aria-label="Fixture entry"><button type="submit">Submit</button></form></main><footer>Browser fixture · scrolled</footer></html>`);
+    const form =
+      path === "/login"
+        ? `<form action="/signin"><input name="user" aria-label="User">${
+            url.searchParams.has("wait")
+              ? `<input type="hidden" name="next" value="/check">`
+              : ""
+          }<button type="submit">Sign in</button></form>`
+        : "";
+    res.end(
+      `<!doctype html><html lang="en"><meta charset="utf-8"><title>${pageTitle}</title><style>${styles}</style><main><h1>${pageTitle}</h1>${form}</main></html>`,
+    );
   });
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
@@ -452,74 +732,86 @@ export async function startSite() {
   const address = server.address();
   if (!address || typeof address === "string")
     throw new Error("Missing fixture address");
+  const origin = `http://127.0.0.1:${address.port}`;
   return {
-    origin: `http://127.0.0.1:${address.port}`,
+    origin,
     visits,
+    llmCalls,
+    /** Registers the chrome request the model issues for `fixture script <key>`. */
+    script(key: string, request: object) {
+      scripts.set(key, request);
+      return `Please browse: fixture script ${key}`;
+    },
+    lastVisit(path: string, since = 0) {
+      return visits
+        .slice(since)
+        .filter((visit) => visit.path === path)
+        .at(-1);
+    },
     close: () =>
-      new Promise<void>((resolve, reject) =>
-        server.close((error) => (error ? reject(error) : resolve())),
-      ),
+      new Promise<void>((resolve, reject) => {
+        server.closeAllConnections();
+        server.close((error) => (error ? reject(error) : resolve()));
+      }),
   };
 }
 
-export async function seedChat(
-  daemon: Daemon,
-  project: Project,
-  title: string,
-) {
-  const id = randomUUID();
+export type Site = Awaited<ReturnType<typeof startSite>>;
+
+export function trajectory(id: string, title: string) {
   const now = new Date().toISOString();
-  await daemon.request(
-    `/p/${project.project_id}/v1/trajectories/${id}`,
-    {
-      id,
-      title,
-      created_at: now,
-      updated_at: now,
-      model: "",
-      mode: "agent",
-      tool_use: "agent",
-      messages: [{ role: "user", content: `${title} fixture message` }],
-    },
-    "PUT",
+  return {
+    id,
+    title,
+    created_at: now,
+    updated_at: now,
+    model: FIXTURE_MODEL,
+    mode: "agent",
+    tool_use: "agent",
+    messages: [],
+  };
+}
+
+/** Writes a chat trajectory directly into the project's storage (before a worker starts). */
+export async function writeChat(
+  root: string,
+  title: string,
+  id: string = randomUUID(),
+) {
+  const dir = join(root, ".refact", "trajectories");
+  await mkdir(dir, { recursive: true });
+  await writeFile(
+    join(dir, `${id}.json`),
+    JSON.stringify(trajectory(id, title)),
   );
   return id;
 }
 
+/**
+ * A pre-upgrade per-chat profile `<cache>/browser_profiles/<chat_id>` of a chat in this
+ * project, carrying a synthetic cookie, with a controlled last-use time.
+ */
 export async function seedLegacyProfile(
-  fixture: ReturnType<typeof fixtureEnvironment>,
-  project: Project,
-  siteOrigin: string,
-  profile: "selected" | "unselected",
+  fixture: Fixture,
+  root: string,
+  site: Site,
+  which: "older" | "newer",
+  modified: Date,
 ) {
-  const id = `fixture-legacy-${profile}`;
-  const cache = join(fixture.home, ".cache", "refact", "browser_profiles", id);
-  await mkdir(cache, { recursive: true });
-  const context = await chromium.launchPersistentContext(cache, {
+  const id = `legacy-${which}-chat`;
+  const path = join(fixture.cache, "browser_profiles", id);
+  await mkdir(path, { recursive: true });
+  const context = await chromium.launchPersistentContext(path, {
     executablePath: fixture.chrome,
     env: fixture.env,
     args: ["--password-store=basic"],
   });
   try {
-    await context.pages()[0].goto(`${siteOrigin}/seed-${profile}`);
+    await context.pages()[0].goto(`${site.origin}/seed-${which}`);
   } finally {
     await context.close();
   }
-  const trajectories = join(project.root, ".refact", "trajectories");
-  await mkdir(trajectories, { recursive: true });
-  const now = new Date().toISOString();
-  await writeFile(
-    join(trajectories, `${id}.json`),
-    JSON.stringify({
-      id,
-      title: `Legacy ${profile}`,
-      created_at: now,
-      updated_at: now,
-      model: "",
-      mode: "agent",
-      tool_use: "agent",
-      messages: [],
-    }),
-  );
-  return { id, path: cache };
+  await writeChat(root, `Legacy ${which} chat`, id);
+  await utimes(path, modified, modified);
+  return { id, path };
 }

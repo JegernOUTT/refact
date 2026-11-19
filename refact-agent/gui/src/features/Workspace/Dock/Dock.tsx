@@ -35,6 +35,7 @@ import {
 } from "../workspaceSlice";
 import styles from "./Dock.module.css";
 import { AppsDockPanel } from "../../Apps/AppsCatalog";
+import { BrowserDockPanel } from "../../Browser/BrowserDockPanel";
 import { ActiveChatsSection } from "./ActiveChatsSection";
 
 type DockStyle = CSSProperties & {
@@ -65,7 +66,7 @@ export function Dock({ enteringNarrow = false }: { enteringNarrow?: boolean }) {
     const result: WorkspaceDockSection[] = [];
     if (capabilities.filesPanel || panelsForced) result.push("files");
     if (capabilities.gitPanel || panelsForced) result.push("git");
-    result.push("agents", "activity", "apps", "python");
+    result.push("agents", "activity", "apps", "browser", "python");
     return result;
   }, [capabilities.filesPanel, capabilities.gitPanel, panelsForced]);
   const activeSection = availableSections.includes(dock.section)
@@ -179,6 +180,7 @@ export function Dock({ enteringNarrow = false }: { enteringNarrow?: boolean }) {
           <PythonWorkspacePanel chatId={focusedChatId} />
         ) : null}
         {activeSection === "apps" ? <AppsDockPanel /> : null}
+        {activeSection === "browser" ? <BrowserDockPanel /> : null}
         {activeSection === "files" ? <FilesPanel /> : null}
         {activeSection === "git" ? <GitDock /> : null}
         {activeSection === "agents" ? (

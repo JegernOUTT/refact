@@ -3,7 +3,6 @@
 //! chat-keyed lookups cannot return it; callers resolve the project from trusted session
 //! state first. Named and explicitly isolated sessions do not use this module.
 use super::*;
-use serde::Serialize;
 
 const OWNER_PREFIX: &str = "project-browser:";
 const PROJECT_PROFILES_DIR: &str = "project_browser_profiles";
@@ -105,20 +104,100 @@ pub async fn current_project_scope(
     ProjectBrowserScope::from_source_root(&root)
 }
 
+/// A daemon-managed worker serves exactly the project it was started for: its pinned CLI root.
+/// `None` for direct workers.
+pub fn pinned_project_scope(
+    app: &crate::app_state::AppState,
+) -> Option<Result<ProjectBrowserScope, String>> {
+    let cmdline = &app.gcx.cmdline;
+    let managed = !cmdline.daemon_endpoint.is_empty()
+        && !cmdline.project_id.is_empty()
+        && !cmdline.workspace_folder.is_empty();
+    managed.then(|| ProjectBrowserScope::from_source_root(Path::new(&cmdline.workspace_folder)))
+}
+
+/// The source root a tool context is bound to. `Sessionless` is a context without an execution
+/// scope whose chat and root chat have no live session (e.g. a tool run over HTTP outside any
+/// chat); `Unbound` is a live session that recorded no project root.
+enum ContextRoot {
+    Sessionless,
+    Unbound,
+    Bound(PathBuf),
+}
+
+async fn context_root(
+    app: &crate::app_state::AppState,
+    execution_scope: Option<&crate::worktrees::scope::ExecutionScope>,
+    chat_id: &str,
+    root_chat_id: &str,
+) -> ContextRoot {
+    if let Some(scope) = execution_scope {
+        return ContextRoot::Bound(scope.source_workspace_root().to_path_buf());
+    }
+    let mut live = false;
+    for id in [chat_id, root_chat_id] {
+        if id.is_empty() {
+            continue;
+        }
+        let session = app.chat.sessions.read().await.get(id).cloned();
+        if let Some(session) = session {
+            live = true;
+            let root = crate::coordination::scope::session_source_root(&*session.lock().await);
+            if let Some(root) = root {
+                return ContextRoot::Bound(root);
+            }
+        }
+    }
+    if live {
+        ContextRoot::Unbound
+    } else {
+        ContextRoot::Sessionless
+    }
+}
+
 /// Tool contexts: the execution scope's source root wins, then the chat, then its root chat.
+/// `None` keeps the per-chat browser: always for sessionless contexts, and in direct workers for
+/// a context without an accessible project root. A daemon-managed worker serves exactly its
+/// pinned project: a live chat without a recorded root uses it, while a root that is foreign or
+/// no longer accessible, or an inaccessible pin, is refused rather than given another browser.
 pub async fn project_scope_for_context(
     app: &crate::app_state::AppState,
     execution_scope: Option<&crate::worktrees::scope::ExecutionScope>,
     chat_id: &str,
     root_chat_id: &str,
-) -> Result<ProjectBrowserScope, String> {
-    if let Some(scope) = execution_scope {
-        return ProjectBrowserScope::from_source_root(scope.source_workspace_root());
+) -> Result<Option<ProjectBrowserScope>, String> {
+    let Some(pinned) = pinned_project_scope(app) else {
+        let scope = match execution_scope {
+            Some(scope) => ProjectBrowserScope::from_source_root(scope.source_workspace_root()),
+            None => match project_scope_for_chat(app, chat_id).await {
+                Ok(scope) => Ok(scope),
+                Err(error) if root_chat_id.is_empty() || root_chat_id == chat_id => Err(error),
+                Err(_) => project_scope_for_chat(app, root_chat_id).await,
+            },
+        };
+        return Ok(scope.ok());
+    };
+    let root = context_root(app, execution_scope, chat_id, root_chat_id).await;
+    if matches!(root, ContextRoot::Sessionless) {
+        return Ok(None);
     }
-    match project_scope_for_chat(app, chat_id).await {
-        Ok(scope) => Ok(scope),
-        Err(error) if root_chat_id.is_empty() || root_chat_id == chat_id => Err(error),
-        Err(_) => project_scope_for_chat(app, root_chat_id).await,
+    let pinned = pinned.map_err(|_| {
+        "the project browser is unavailable: this worker's project root is no longer accessible"
+            .to_string()
+    })?;
+    match root {
+        ContextRoot::Sessionless | ContextRoot::Unbound => Ok(Some(pinned)),
+        ContextRoot::Bound(root) => match ProjectBrowserScope::from_source_root(&root) {
+            Err(_) => Err(
+                "the project browser is unavailable: this chat's project root is no longer accessible"
+                    .into(),
+            ),
+            Ok(scope) if scope != pinned => Err(
+                "the project browser is unavailable: this chat belongs to a different project than this worker serves; open the chat in its own project"
+                    .into(),
+            ),
+            Ok(_) => Ok(Some(pinned)),
+        },
     }
 }
 
@@ -154,33 +233,6 @@ pub struct EnsuredProjectRuntime {
     pub launched: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum EnsureError {
-    DecisionRequired { candidate_count: usize },
-    Failed(String),
-}
-
-impl std::fmt::Display for EnsureError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::DecisionRequired {
-                candidate_count,
-            } => write!(
-                f,
-                "the project browser profile needs a decision first: {candidate_count} earlier \
-                 chat browser profile(s) can be adopted or skipped in the Browser tab"
-            ),
-            Self::Failed(error) => write!(f, "{error}"),
-        }
-    }
-}
-
-impl From<String> for EnsureError {
-    fn from(error: String) -> Self {
-        Self::Failed(error)
-    }
-}
-
 async fn runtime_arc(
     app: &crate::app_state::AppState,
     runtime_id: &str,
@@ -196,14 +248,14 @@ async fn runtime_arc(
 
 /// Returns the project's runtime, launching it on the durable project profile when none is
 /// registered. A live disconnected runtime qualifies only for same-process reconnect;
-/// a runtime whose process died is relaunched on the same profile. An unresolved profile with
-/// adoptable earlier chat profiles needs an explicit adopt/skip decision first.
+/// a runtime whose process died is relaunched on the same profile. An unresolved profile is
+/// resolved first by adopting the most recently used inactive earlier chat profile, if any.
 pub async fn ensure_project_runtime(
     app: &crate::app_state::AppState,
     scope: &ProjectBrowserScope,
     options: BrowserLaunchOptions,
     deadline: Instant,
-) -> Result<EnsuredProjectRuntime, EnsureError> {
+) -> Result<EnsuredProjectRuntime, String> {
     let owner = scope.owner_id();
     let lock = relaunch_lock_for_chat(&owner);
     let _guard = before_deadline(deadline, lock.lock()).await?;
@@ -245,15 +297,7 @@ pub async fn ensure_project_runtime(
     let cache_dir = app.gcx.cache_dir.clone();
     let profile_dir = scope.profile_dir(&cache_dir);
     if !profile_resolved(&profile_dir)? {
-        let active = registered_profile_dirs(app).await;
-        let candidates = list_legacy_candidates_in(&cache_dir, scope.source_root(), &active);
-        if !candidates.is_empty() {
-            return Err(EnsureError::DecisionRequired {
-                candidate_count: candidates.len(),
-            });
-        }
-        std::fs::create_dir_all(&profile_dir)
-            .map_err(|error| format!("cannot create the project browser profile: {error}"))?;
+        resolve_project_profile(app, scope, deadline).await?;
     }
     let options = project_launch_options(options);
     let mode = options.mode_label();
@@ -281,6 +325,85 @@ pub async fn ensure_project_runtime(
         runtime,
         launched: true,
     })
+}
+
+pub fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |age| age.as_millis() as u64)
+}
+
+/// Opens a tab in its own window, owned by `chat_id` when given; the active tab is kept.
+pub fn open_project_tab(
+    runtime: &mut BrowserRuntime,
+    chat_id: Option<&str>,
+) -> Result<Arc<headless_chrome::Tab>, String> {
+    let tab = runtime.open_tab()?;
+    if let Err(error) = setup_recording_for_tab(runtime, tab.clone()) {
+        let _ = tab.close(false);
+        return Err(error);
+    }
+    if let Some(chat_id) = chat_id {
+        let id = tab.get_target_id().to_string();
+        refact_browser::record_chat_tab_use(
+            &mut runtime.tab_meta,
+            chat_id,
+            std::slice::from_ref(&id),
+            Some(&id),
+            None,
+            now_ms(),
+        );
+    }
+    Ok(tab)
+}
+
+/// The tab a shared-runtime call without an explicit target runs in for this chat. An
+/// unowned active tab is claimed here, under the caller's runtime lock, so a concurrent call
+/// from another chat cannot pick it too.
+pub fn chat_default_target(
+    runtime: &mut BrowserRuntime,
+    chat_id: &str,
+) -> Result<crate::integrations::browser_models::TabTarget, String> {
+    use crate::integrations::browser_models::TabTarget;
+    use refact_browser::ChatTabChoice;
+    if runtime.recovery_fence.is_some() {
+        return Ok(TabTarget::Active);
+    }
+    refact_browser::adopt_new_tabs(runtime, None);
+    let live = runtime
+        .live_tabs()
+        .iter()
+        .map(|tab| tab.get_target_id().to_string())
+        .collect::<Vec<_>>();
+    let active = runtime
+        .get_active_tab()
+        .map(|tab| tab.get_target_id().to_string());
+    Ok(
+        match refact_browser::choose_chat_tab(chat_id, &live, &runtime.tab_meta, active.as_deref())
+        {
+            ChatTabChoice::Own(id) => TabTarget::Id {
+                id,
+            },
+            ChatTabChoice::ClaimActive(id) => {
+                refact_browser::record_chat_tab_use(
+                    &mut runtime.tab_meta,
+                    chat_id,
+                    &[],
+                    Some(&id),
+                    None,
+                    now_ms(),
+                );
+                TabTarget::Id {
+                    id,
+                }
+            }
+            ChatTabChoice::CreateNew => TabTarget::Id {
+                id: open_project_tab(runtime, Some(chat_id))?
+                    .get_target_id()
+                    .to_string(),
+            },
+        },
+    )
 }
 
 /// Closes the project's Chrome; the durable profile is always kept.
@@ -343,26 +466,11 @@ async fn registered_profile_dirs(app: &crate::app_state::AppState) -> Vec<PathBu
         .collect()
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LegacyProfileCandidate {
     pub chat_id: String,
     pub modified_ms: Option<u64>,
     pub active: bool,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct ProjectProfileState {
-    pub project_id: String,
-    pub resolved: bool,
-    pub runtime_id: Option<String>,
-    pub runtime_live: bool,
-    pub candidates: Vec<LegacyProfileCandidate>,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct AdoptOutcome {
-    pub project_id: String,
-    pub adopted_chat_id: String,
 }
 
 fn valid_legacy_chat_id(id: &str) -> bool {
@@ -382,8 +490,41 @@ fn is_real_dir(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir())
 }
 
+#[derive(serde::Deserialize)]
+struct TrajectoryProjectBinding {
+    #[serde(default)]
+    worktree: Option<TrajectoryWorktreeBinding>,
+}
+
+#[derive(serde::Deserialize)]
+struct TrajectoryWorktreeBinding {
+    #[serde(default)]
+    source_workspace_root: Option<PathBuf>,
+}
+
+/// A trajectory that records its worktree's source root must name this project; one without
+/// a worktree record is bound by its location alone.
+fn trajectory_binds_project(path: &Path, root: &Path) -> bool {
+    let Ok(file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let Ok(binding) =
+        serde_json::from_reader::<_, TrajectoryProjectBinding>(std::io::BufReader::new(file))
+    else {
+        return false;
+    };
+    match binding.worktree {
+        None => true,
+        Some(TrajectoryWorktreeBinding {
+            source_workspace_root: Some(bound),
+        }) => dunce::canonicalize(bound).is_ok_and(|bound| bound == root),
+        Some(_) => false,
+    }
+}
+
 /// Same-project membership is proven only by the chat's trajectory living under this
-/// project's `.refact/trajectories`; nothing inside the profile itself is read.
+/// project's `.refact/trajectories` and not recording another project's worktree; nothing
+/// inside the profile itself is read.
 fn chat_belongs_to_project(source_root: &Path, chat_id: &str) -> bool {
     let Ok(root) = dunce::canonicalize(source_root) else {
         return false;
@@ -395,18 +536,16 @@ fn chat_belongs_to_project(source_root: &Path, chat_id: &str) -> bool {
     }
     let file = format!("{chat_id}.json");
     let trusted_file = |path: &Path| {
-        is_real_file(path) && dunce::canonicalize(path).is_ok_and(|canonical| canonical == path)
+        is_real_file(path)
+            && dunce::canonicalize(path).is_ok_and(|canonical| canonical == path)
+            && trajectory_binds_project(path, &root)
     };
     trusted_file(&dir.join(&file))
         || (is_real_dir(&dir.join(chat_id)) && trusted_file(&dir.join(chat_id).join(&file)))
 }
 
 fn profile_is_active(path: &Path, active_profiles: &[PathBuf]) -> bool {
-    active_profiles.iter().any(|active| active == path)
-        || matches!(
-            profile_lock_state(path),
-            ProfileLockState::Live(_) | ProfileLockState::Foreign(_)
-        )
+    active_profiles.iter().any(|active| active == path) || profile_possibly_in_use(path)
 }
 
 pub fn list_legacy_candidates_in(
@@ -450,22 +589,14 @@ pub fn list_legacy_candidates_in(
 
 /// Moves exactly one verified, inactive legacy chat profile into the unresolved project
 /// profile slot with one same-filesystem rename. Nothing is copied, read or extracted.
-pub fn adopt_legacy_profile_in(
+fn adopt_legacy_profile_in(
     cache_dir: &Path,
     scope: &ProjectBrowserScope,
     chat_id: &str,
-    confirmed: bool,
     active_profiles: &[PathBuf],
-    project_runtime_registered: bool,
-) -> Result<AdoptOutcome, String> {
-    if !confirmed {
-        return Err("adopting a chat browser profile requires explicit confirmation".into());
-    }
+) -> Result<(), String> {
     if !valid_legacy_chat_id(chat_id) {
         return Err("invalid chat id for browser profile adoption".into());
-    }
-    if project_runtime_registered {
-        return Err("the project browser is running; stop it before adopting a profile".into());
     }
     let target = scope.profile_dir(cache_dir);
     if profile_resolved(&target)? {
@@ -480,7 +611,8 @@ pub fn adopt_legacy_profile_in(
         return Err("that chat's browser is still running; close it before adopting".into());
     }
     let source = cache_dir.join(LEGACY_PROFILES_DIR).join(chat_id);
-    clear_stale_profile_lock(&source)?;
+    clear_stale_profile_lock(&source)
+        .map_err(|_| "that chat's browser is still running; close it before adopting")?;
     let parent = target
         .parent()
         .ok_or("project browser profile has no parent directory")?;
@@ -495,9 +627,11 @@ pub fn adopt_legacy_profile_in(
     if profile_is_active(&source, active_profiles) {
         return Err("that chat's browser is still running; close it before adopting".into());
     }
-    std::fs::rename(&source, &target).map_err(|error| {
-        if error.raw_os_error() == Some(libc::EXDEV) {
+    rename_no_replace(&source, &target).map_err(|error| {
+        if is_cross_device(&error) {
             "the chat profile is on a different filesystem; it was left untouched".to_string()
+        } else if error.kind() == std::io::ErrorKind::AlreadyExists {
+            "the project browser profile already exists; adoption is one-time".to_string()
         } else {
             format!("moving the chat browser profile failed; it was left in place: {error}")
         }
@@ -506,77 +640,105 @@ pub fn adopt_legacy_profile_in(
         "Adopted browser profile of chat {chat_id} as project profile {}",
         scope.project_id()
     );
-    Ok(AdoptOutcome {
-        project_id: scope.project_id().to_string(),
-        adopted_chat_id: chat_id.to_string(),
-    })
+    Ok(())
 }
 
-pub async fn project_profile_state(
-    app: &crate::app_state::AppState,
-    scope: &ProjectBrowserScope,
-) -> Result<ProjectProfileState, String> {
-    let cache_dir = app.gcx.cache_dir.clone();
-    let resolved = profile_resolved(&scope.profile_dir(&cache_dir))?;
-    let runtime = find_project_runtime(app, scope).await;
-    let runtime_live = runtime
-        .as_ref()
-        .and_then(|(id, _)| runtime_owner_record(id))
-        .is_some_and(|record| record.is_connected());
-    let candidates = if resolved {
-        Vec::new()
-    } else {
-        let active = registered_profile_dirs(app).await;
-        list_legacy_candidates_in(&cache_dir, scope.source_root(), &active)
-    };
-    Ok(ProjectProfileState {
-        project_id: scope.project_id().to_string(),
-        resolved,
-        runtime_id: runtime.map(|(id, _)| id),
-        runtime_live,
-        candidates,
-    })
+fn is_cross_device(error: &std::io::Error) -> bool {
+    #[cfg(windows)]
+    const CROSS_DEVICE: i32 = 17; // ERROR_NOT_SAME_DEVICE
+    #[cfg(not(windows))]
+    const CROSS_DEVICE: i32 = libc::EXDEV;
+    error.raw_os_error() == Some(CROSS_DEVICE)
 }
 
-pub async fn adopt_legacy_profile(
-    app: &crate::app_state::AppState,
-    scope: &ProjectBrowserScope,
-    chat_id: &str,
-    confirmed: bool,
-) -> Result<AdoptOutcome, String> {
-    if !valid_legacy_chat_id(chat_id) {
-        return Err("invalid chat id for browser profile adoption".into());
-    }
-    let owner_guard = relaunch_lock_for_chat(&scope.owner_id()).lock_owned().await;
-    let chat_guard = relaunch_lock_for_chat(chat_id).lock_owned().await;
-    let registered = find_project_runtime(app, scope).await.is_some();
-    let active = registered_profile_dirs(app).await;
-    let cache_dir = app.gcx.cache_dir.clone();
-    let scope = scope.clone();
-    let chat_id = chat_id.to_string();
-    tokio::task::spawn_blocking(move || {
-        let (_owner, _chat) = (owner_guard, chat_guard);
-        adopt_legacy_profile_in(&cache_dir, &scope, &chat_id, confirmed, &active, registered)
-    })
-    .await
-    .map_err(|error| format!("profile adoption task failed: {error}"))?
-}
-
-/// Records the decision to start the project with a fresh profile.
-pub async fn skip_legacy_adoption(
-    app: &crate::app_state::AppState,
-    scope: &ProjectBrowserScope,
-) -> Result<ProjectProfileState, String> {
+/// Moves a directory only if nothing exists at the destination, so an empty profile
+/// created concurrently is never replaced. Where the filesystem has no atomic no-replace
+/// rename, the destination is checked right before a plain rename under the owner lock.
+#[cfg(not(windows))]
+fn rename_no_replace(source: &Path, target: &Path) -> std::io::Result<()> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
-        let lock = relaunch_lock_for_chat(&scope.owner_id());
-        let _guard = lock.lock().await;
-        let profile_dir = scope.profile_dir(&app.gcx.cache_dir);
-        if !profile_resolved(&profile_dir)? {
-            std::fs::create_dir_all(&profile_dir)
-                .map_err(|error| format!("cannot create the project browser profile: {error}"))?;
+        use std::os::unix::ffi::OsStrExt;
+        let path = |path: &Path| {
+            std::ffi::CString::new(path.as_os_str().as_bytes())
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
+        };
+        let (from, to) = (path(source)?, path(target)?);
+        #[cfg(target_os = "linux")]
+        let renamed = unsafe {
+            libc::renameat2(
+                libc::AT_FDCWD,
+                from.as_ptr(),
+                libc::AT_FDCWD,
+                to.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
+        };
+        #[cfg(target_os = "macos")]
+        let renamed = unsafe { libc::renamex_np(from.as_ptr(), to.as_ptr(), libc::RENAME_EXCL) };
+        if renamed == 0 {
+            return Ok(());
+        }
+        let error = std::io::Error::last_os_error();
+        if !matches!(
+            error.raw_os_error(),
+            Some(libc::EINVAL | libc::ENOSYS | libc::ENOTSUP)
+        ) {
+            return Err(error);
         }
     }
-    project_profile_state(app, scope).await
+    if std::fs::symlink_metadata(target).is_ok() {
+        return Err(std::io::ErrorKind::AlreadyExists.into());
+    }
+    std::fs::rename(source, target)
+}
+
+/// `MoveFileExW` without `MOVEFILE_REPLACE_EXISTING` fails when the destination exists;
+/// `std::fs::rename` may replace an empty directory on current Windows.
+#[cfg(windows)]
+fn rename_no_replace(source: &Path, target: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn MoveFileExW(existing: *const u16, new: *const u16, flags: u32) -> i32;
+    }
+    let wide = |path: &Path| {
+        path.as_os_str()
+            .encode_wide()
+            .chain(Some(0))
+            .collect::<Vec<u16>>()
+    };
+    let (from, to) = (wide(source), wide(target));
+    if unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), 0) } != 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+/// Resolves the project profile once: the most recently used inactive chat profile of this
+/// project is adopted, otherwise an empty profile is created. A candidate that started or
+/// vanished while its chat lock was awaited is skipped for the next one.
+async fn resolve_project_profile(
+    app: &crate::app_state::AppState,
+    scope: &ProjectBrowserScope,
+    deadline: Instant,
+) -> Result<(), String> {
+    let cache_dir = app.gcx.cache_dir.clone();
+    let active = registered_profile_dirs(app).await;
+    let candidates = list_legacy_candidates_in(&cache_dir, scope.source_root(), &active);
+    for candidate in candidates.into_iter().filter(|candidate| !candidate.active) {
+        let lock = relaunch_lock_for_chat(&candidate.chat_id);
+        let _chat_guard = before_deadline(deadline, lock.lock()).await?;
+        let active = registered_profile_dirs(app).await;
+        let source = cache_dir.join(LEGACY_PROFILES_DIR).join(&candidate.chat_id);
+        if !is_real_dir(&source) || profile_is_active(&source, &active) {
+            continue;
+        }
+        return adopt_legacy_profile_in(&cache_dir, scope, &candidate.chat_id, &active);
+    }
+    std::fs::create_dir_all(scope.profile_dir(&cache_dir))
+        .map_err(|error| format!("cannot create the project browser profile: {error}"))
 }
 
 #[cfg(test)]
@@ -697,15 +859,7 @@ mod tests {
         let project_refact = fx.project.path().join(".refact");
         symlink(&foreign_refact, &project_refact).unwrap();
         assert!(list_legacy_candidates_in(fx.cache.path(), fx.scope.source_root(), &[]).is_empty());
-        assert!(adopt_legacy_profile_in(
-            fx.cache.path(),
-            &fx.scope,
-            "chat-foreign",
-            true,
-            &[],
-            false
-        )
-        .is_err());
+        assert!(adopt_legacy_profile_in(fx.cache.path(), &fx.scope, "chat-foreign", &[]).is_err());
         assert!(source.exists() && !fx.scope.profile_dir(fx.cache.path()).exists());
 
         std::fs::remove_file(project_refact).unwrap();
@@ -730,15 +884,7 @@ mod tests {
         let unrelated = legacy(&fx, "chat-c", false);
         let target = fx.scope.profile_dir(fx.cache.path());
 
-        let refused =
-            adopt_legacy_profile_in(fx.cache.path(), &fx.scope, "chat-a", false, &[], false);
-        assert!(refused.unwrap_err().contains("confirmation"));
-        assert!(chosen.exists() && !target.exists());
-
-        let outcome =
-            adopt_legacy_profile_in(fx.cache.path(), &fx.scope, "chat-a", true, &[], false)
-                .unwrap();
-        assert_eq!(outcome.adopted_chat_id, "chat-a");
+        adopt_legacy_profile_in(fx.cache.path(), &fx.scope, "chat-a", &[]).unwrap();
         assert!(!chosen.exists());
         assert_eq!(
             std::fs::read(target.join("Default").join("Cookies")).unwrap(),
@@ -746,35 +892,24 @@ mod tests {
         );
         assert!(other.exists() && unrelated.exists());
 
-        let again = adopt_legacy_profile_in(fx.cache.path(), &fx.scope, "chat-b", true, &[], false);
+        let again = adopt_legacy_profile_in(fx.cache.path(), &fx.scope, "chat-b", &[]);
         assert!(again.unwrap_err().contains("already exists"));
         assert!(other.exists());
     }
 
     #[test]
-    fn adoption_rejects_active_foreign_invalid_and_live_targets() {
+    fn adoption_rejects_active_foreign_and_invalid_targets() {
         let fx = fixture();
         let busy = legacy(&fx, "chat-busy", true);
         legacy(&fx, "chat-foreign", false);
         let target = fx.scope.profile_dir(fx.cache.path());
         let active = vec![busy.clone()];
-        let error = adopt_legacy_profile_in(
-            fx.cache.path(),
-            &fx.scope,
-            "chat-busy",
-            true,
-            &active,
-            false,
-        )
-        .unwrap_err();
-        assert!(error.contains("still running"), "{error}");
         let error =
-            adopt_legacy_profile_in(fx.cache.path(), &fx.scope, "chat-busy", true, &[], true)
-                .unwrap_err();
-        assert!(error.contains("running"), "{error}");
+            adopt_legacy_profile_in(fx.cache.path(), &fx.scope, "chat-busy", &active).unwrap_err();
+        assert!(error.contains("still running"), "{error}");
         for id in ["chat-foreign", "../chat-busy", "subchat-1", ""] {
             assert!(
-                adopt_legacy_profile_in(fx.cache.path(), &fx.scope, id, true, &[], false).is_err(),
+                adopt_legacy_profile_in(fx.cache.path(), &fx.scope, id, &[]).is_err(),
                 "{id}"
             );
         }
@@ -793,16 +928,147 @@ mod tests {
         .unwrap();
         let candidates = list_legacy_candidates_in(fx.cache.path(), fx.project.path(), &[]);
         assert!(candidates[0].active);
-        assert!(adopt_legacy_profile_in(
-            fx.cache.path(),
-            &fx.scope,
-            "chat-locked",
-            true,
-            &[],
-            false
-        )
-        .is_err());
+        assert!(adopt_legacy_profile_in(fx.cache.path(), &fx.scope, "chat-locked", &[]).is_err());
         assert!(locked.exists());
+    }
+
+    #[test]
+    fn trajectories_recording_another_projects_worktree_are_not_candidates() {
+        let fx = fixture();
+        let other = tempfile::tempdir().unwrap();
+        let dir = fx.project.path().join(".refact").join("trajectories");
+        let write = |chat_id: &str, body: serde_json::Value| {
+            legacy(&fx, chat_id, true);
+            std::fs::write(dir.join(format!("{chat_id}.json")), body.to_string()).unwrap();
+        };
+        write(
+            "chat-plain",
+            serde_json::json!({"id": "chat-plain", "worktree": null}),
+        );
+        write(
+            "chat-same",
+            serde_json::json!({"worktree": {"id": "w1", "source_workspace_root": fx.project.path()}}),
+        );
+        write(
+            "chat-other",
+            serde_json::json!({"worktree": {"id": "w2", "source_workspace_root": other.path()}}),
+        );
+        write(
+            "chat-rootless",
+            serde_json::json!({"worktree": {"id": "w3"}}),
+        );
+        legacy(&fx, "chat-corrupt", true);
+        std::fs::write(dir.join("chat-corrupt.json"), b"{not json").unwrap();
+        let mut ids = list_legacy_candidates_in(fx.cache.path(), fx.scope.source_root(), &[])
+            .into_iter()
+            .map(|candidate| candidate.chat_id)
+            .collect::<Vec<_>>();
+        ids.sort();
+        assert_eq!(ids, ["chat-plain", "chat-same"]);
+        assert!(adopt_legacy_profile_in(fx.cache.path(), &fx.scope, "chat-other", &[]).is_err());
+    }
+
+    #[test]
+    fn cross_device_moves_are_recognised() {
+        #[cfg(not(windows))]
+        let cross = std::io::Error::from_raw_os_error(libc::EXDEV);
+        #[cfg(windows)]
+        let cross = std::io::Error::from_raw_os_error(17);
+        assert!(is_cross_device(&cross));
+        assert!(!is_cross_device(&std::io::Error::from(
+            std::io::ErrorKind::AlreadyExists
+        )));
+    }
+
+    #[test]
+    fn adoption_never_replaces_a_concurrently_created_profile() {
+        let fx = fixture();
+        let source = legacy(&fx, "chat-a", true);
+        let target = fx.scope.profile_dir(fx.cache.path());
+        std::fs::create_dir_all(&target).unwrap();
+        let error = rename_no_replace(&source, &target).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert!(source.join("Default").join("Cookies").exists());
+        assert_eq!(std::fs::read_dir(&target).unwrap().count(), 0);
+        std::fs::remove_dir(&target).unwrap();
+        rename_no_replace(&source, &target).unwrap();
+        assert!(target.join("Default").join("Cookies").exists() && !source.exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn unverifiable_profile_locks_count_as_in_use() {
+        assert!(lock_owner_unverified(true, None));
+        assert!(!lock_owner_unverified(true, Some(false)));
+        assert!(!lock_owner_unverified(false, None));
+        let fx = fixture();
+        let garbled = legacy(&fx, "chat-garbled", true);
+        std::os::unix::fs::symlink("no-pid-here", garbled.join("SingletonLock")).unwrap();
+        let stale = legacy(&fx, "chat-stale", true);
+        std::os::unix::fs::symlink(
+            format!("{}-{}", local_hostname(), std::process::id()),
+            stale.join("SingletonLock"),
+        )
+        .unwrap();
+        assert!(profile_possibly_in_use(&garbled));
+        assert!(!profile_possibly_in_use(&stale));
+        let plain = legacy(&fx, "chat-plain-lock", true);
+        std::fs::write(plain.join("SingletonLock"), b"").unwrap();
+        assert!(profile_possibly_in_use(&plain));
+        let unreadable = legacy(&fx, "chat-unreadable", true);
+        let fresh = legacy(&fx, "chat-fresh", true);
+        assert!(!profile_possibly_in_use(&fresh));
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o000)).unwrap();
+            let in_use = profile_possibly_in_use(&unreadable);
+            std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let root_reads_everything = unsafe { libc::geteuid() } == 0;
+            assert!(
+                in_use || root_reads_everything,
+                "an unreadable SingletonLock must count as in use"
+            );
+        }
+        let mut ids = list_legacy_candidates_in(fx.cache.path(), fx.scope.source_root(), &[])
+            .into_iter()
+            .filter(|candidate| !candidate.active)
+            .map(|candidate| candidate.chat_id)
+            .collect::<Vec<_>>();
+        ids.sort();
+        assert_eq!(ids, ["chat-fresh", "chat-stale", "chat-unreadable"]);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_candidate_started_while_awaiting_its_lock_is_skipped_for_the_next() {
+        let fx = fixture();
+        let app = app_with_cache(&fx).await;
+        let older = legacy_used_at(&fx, "chat-older", true, 200);
+        let recent = legacy_used_at(&fx, "chat-recent", true, 100);
+        let target = fx.scope.profile_dir(fx.cache.path());
+        let lock = relaunch_lock_for_chat("chat-recent");
+        let guard = lock.lock().await;
+        let resolving = tokio::spawn({
+            let app = app.clone();
+            let scope = fx.scope.clone();
+            async move {
+                resolve_project_profile(&app, &scope, Instant::now() + Duration::from_secs(10))
+                    .await
+            }
+        });
+        while Arc::strong_count(&lock) < 3 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        std::os::unix::fs::symlink(
+            format!("not-{}-4242", local_hostname()),
+            recent.join("SingletonLock"),
+        )
+        .unwrap();
+        drop(guard);
+        resolving.await.unwrap().unwrap();
+        assert!(recent.join("Default").join("Cookies").exists());
+        assert!(!older.exists());
+        assert!(target.join("Default").join("Cookies").exists());
     }
 
     #[tokio::test]
@@ -832,47 +1098,181 @@ mod tests {
         let via_root = project_scope_for_context(&app, None, "subchat-1", "a")
             .await
             .unwrap();
-        assert_eq!(via_root, a);
+        assert_eq!(via_root, Some(a));
+        assert_eq!(
+            project_scope_for_context(&app, None, "unbound", "unbound")
+                .await
+                .unwrap(),
+            None
+        );
     }
 
     #[tokio::test]
-    async fn unresolved_profile_with_candidates_requires_a_decision_and_skip_resolves_it() {
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
-        let project = tempfile::tempdir().unwrap();
-        let scope = ProjectBrowserScope::from_source_root(project.path()).unwrap();
-        let legacy_dir = gcx.cache_dir.join(LEGACY_PROFILES_DIR).join("chat-old");
-        std::fs::create_dir_all(&legacy_dir).unwrap();
-        let trajectories = project.path().join(".refact").join("trajectories");
-        std::fs::create_dir_all(&trajectories).unwrap();
-        std::fs::write(trajectories.join("chat-old.json"), b"{}").unwrap();
-
-        let state = project_profile_state(&app, &scope).await.unwrap();
-        assert!(!state.resolved);
-        assert_eq!(state.candidates.len(), 1);
-        let result = ensure_project_runtime(
-            &app,
-            &scope,
-            BrowserLaunchOptions::default(),
-            Instant::now() + Duration::from_secs(5),
-        )
-        .await;
+    async fn managed_worker_tools_use_only_the_pinned_project() {
+        let project_a = tempfile::tempdir().unwrap();
+        let project_b = tempfile::tempdir().unwrap();
+        let mut gcx = crate::global_context::tests::make_test_gcx().await;
+        {
+            let cmdline = &mut Arc::get_mut(&mut gcx).unwrap().cmdline;
+            cmdline.daemon_endpoint = "http://127.0.0.1:8488".into();
+            cmdline.project_id = "project-a".into();
+            cmdline.workspace_folder = project_a.path().to_str().unwrap().into();
+        }
+        let app = crate::app_state::AppState::from_gcx(gcx).await;
+        {
+            let mut sessions = app.chat.sessions.write().await;
+            for (id, root) in [("on-a", project_a.path()), ("on-b", project_b.path())] {
+                let mut session = crate::chat::types::ChatSession::new(id.into());
+                session.work_project_root = Some(root.into());
+                sessions.insert(id.into(), Arc::new(AMutex::new(session)));
+            }
+        }
+        let pinned = ProjectBrowserScope::from_source_root(project_a.path()).unwrap();
         assert_eq!(
-            result.err(),
-            Some(EnsureError::DecisionRequired {
-                candidate_count: 1
-            })
+            project_scope_for_context(&app, None, "on-a", "on-a")
+                .await
+                .unwrap(),
+            Some(pinned.clone())
         );
-        assert!(!scope.profile_dir(&gcx.cache_dir).exists());
+        assert!(project_scope_for_context(&app, None, "on-b", "on-b")
+            .await
+            .is_err());
+        assert!(project_scope_for_context(&app, None, "sub", "on-b")
+            .await
+            .is_err());
+        let deleted = tempfile::tempdir().unwrap();
+        {
+            let mut sessions = app.chat.sessions.write().await;
+            let mut on_deleted = crate::chat::types::ChatSession::new("on-deleted".into());
+            on_deleted.work_project_root = Some(deleted.path().into());
+            sessions.insert("on-deleted".into(), Arc::new(AMutex::new(on_deleted)));
+            let unbound = crate::chat::types::ChatSession::new("unbound".into());
+            sessions.insert("unbound".into(), Arc::new(AMutex::new(unbound)));
+        }
+        drop(deleted);
+        let error = project_scope_for_context(&app, None, "on-deleted", "on-deleted")
+            .await
+            .unwrap_err();
+        assert!(error.contains("no longer accessible"), "{error}");
+        assert_eq!(
+            project_scope_for_context(&app, None, "unbound", "unbound")
+                .await
+                .unwrap(),
+            Some(pinned.clone())
+        );
+        assert_eq!(
+            project_scope_for_context(&app, None, "sub", "unbound")
+                .await
+                .unwrap(),
+            Some(pinned)
+        );
+        assert_eq!(
+            project_scope_for_context(&app, None, "http-only", "")
+                .await
+                .unwrap(),
+            None
+        );
+    }
 
-        let state = skip_legacy_adoption(&app, &scope).await.unwrap();
-        assert!(state.resolved && state.candidates.is_empty());
-        assert!(legacy_dir.exists());
-        let error = adopt_legacy_profile(&app, &scope, "chat-old", true)
+    #[tokio::test]
+    async fn direct_worker_tools_follow_the_chat_project() {
+        let project_b = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        assert!(gcx.cmdline.daemon_endpoint.is_empty());
+        let app = crate::app_state::AppState::from_gcx(gcx).await;
+        let mut session = crate::chat::types::ChatSession::new("on-b".into());
+        session.work_project_root = Some(project_b.path().into());
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert("on-b".into(), Arc::new(AMutex::new(session)));
+        assert!(pinned_project_scope(&app).is_none());
+        assert_eq!(
+            project_scope_for_context(&app, None, "on-b", "on-b")
+                .await
+                .unwrap(),
+            Some(ProjectBrowserScope::from_source_root(project_b.path()).unwrap())
+        );
+    }
+
+    fn legacy_used_at(fx: &Fixture, chat_id: &str, in_project: bool, age_secs: u64) -> PathBuf {
+        let profile = legacy(fx, chat_id, in_project);
+        std::fs::File::open(&profile)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - Duration::from_secs(age_secs))
+            .unwrap();
+        profile
+    }
+
+    async fn app_with_cache(fx: &Fixture) -> crate::app_state::AppState {
+        let mut gcx = crate::global_context::tests::make_test_gcx().await;
+        Arc::get_mut(&mut gcx).unwrap().cache_dir = fx.cache.path().to_path_buf();
+        crate::app_state::AppState::from_gcx(gcx).await
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unresolved_profile_adopts_the_most_recent_inactive_project_profile_once() {
+        let fx = fixture();
+        let app = app_with_cache(&fx).await;
+        let oldest = legacy_used_at(&fx, "chat-oldest", true, 300);
+        let older = legacy_used_at(&fx, "chat-older", true, 200);
+        let recent = legacy_used_at(&fx, "chat-recent", true, 100);
+        std::fs::write(recent.join("Default").join("Cookies"), b"recent").unwrap();
+        let locked = legacy_used_at(&fx, "chat-locked", true, 10);
+        std::os::unix::fs::symlink(
+            format!("not-{}-4242", local_hostname()),
+            locked.join("SingletonLock"),
+        )
+        .unwrap();
+        let foreign = legacy_used_at(&fx, "chat-foreign", false, 0);
+        let target = fx.scope.profile_dir(fx.cache.path());
+        let deadline = Instant::now() + Duration::from_secs(5);
+
+        resolve_project_profile(&app, &fx.scope, deadline)
+            .await
+            .unwrap();
+        assert!(!recent.exists());
+        assert_eq!(
+            std::fs::read(target.join("Default").join("Cookies")).unwrap(),
+            b"recent"
+        );
+        assert!(oldest.exists() && older.exists() && locked.exists() && foreign.exists());
+        assert!(profile_resolved(&target).unwrap());
+
+        let error = resolve_project_profile(&app, &fx.scope, deadline)
             .await
             .unwrap_err();
         assert!(error.contains("already exists"), "{error}");
-        assert!(legacy_dir.exists());
+        assert!(oldest.exists() && older.exists());
+        assert_eq!(
+            std::fs::read(target.join("Default").join("Cookies")).unwrap(),
+            b"recent"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unresolved_profile_without_eligible_candidates_starts_fresh() {
+        let fx = fixture();
+        let app = app_with_cache(&fx).await;
+        let locked = legacy(&fx, "chat-locked", true);
+        std::os::unix::fs::symlink(
+            format!("not-{}-4242", local_hostname()),
+            locked.join("SingletonLock"),
+        )
+        .unwrap();
+        let foreign = legacy(&fx, "chat-foreign", false);
+        let target = fx.scope.profile_dir(fx.cache.path());
+
+        resolve_project_profile(&app, &fx.scope, Instant::now() + Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert!(profile_resolved(&target).unwrap());
+        assert_eq!(std::fs::read_dir(&target).unwrap().count(), 0);
+        assert!(locked.join("Default").join("Cookies").exists());
+        assert!(foreign.join("Default").join("Cookies").exists());
     }
 
     #[cfg(unix)]

@@ -31,6 +31,7 @@ mod routing;
 pub mod screencast;
 pub mod sessions;
 mod snapshot;
+pub mod tab_gate;
 mod us_keyboard_layout;
 pub mod webauthn;
 pub mod websocket;
@@ -81,6 +82,7 @@ pub use keyboard::{
     CdpKeyboardDispatcher, KeyEventPayload, KeyEventType, Keyboard, KeyboardDispatch,
     KeyboardDispatcher, KeyboardModifier, modifier_bitmask,
 };
+pub use us_keyboard_layout::has as is_known_key;
 pub use launch::{
     BrowserGpuMode, BrowserLaunchOptions, BrowserProxyOptions, DEFAULT_IDLE_TIMEOUT,
     IGNORED_CHROME_DEFAULT_ARGS, MANDATORY_CHROME_ARGS, TRANSPORT_READ_TIMEOUT,
@@ -449,6 +451,117 @@ impl BrowserBuffers {
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TabMeta {
+    pub name: Option<String>,
+    pub opened_by_chat: Option<String>,
+    pub last_chat: Option<String>,
+    pub last_used_ms: Option<u64>,
+}
+
+impl TabMeta {
+    pub fn is_unowned(&self) -> bool {
+        self.opened_by_chat.is_none() && self.last_chat.is_none()
+    }
+}
+
+/// Viewport sizes the Browser UI asked for, per tab, with the last requested size as the
+/// default for tabs that have none yet. Entries live and die with their runtime and tab.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PaneSizes {
+    size: Option<(u32, u32)>,
+    tab_sizes: HashMap<String, (u32, u32)>,
+}
+
+impl PaneSizes {
+    pub fn desired(&self, tab_id: Option<&str>) -> Option<(u32, u32)> {
+        tab_id
+            .and_then(|id| self.tab_sizes.get(id).copied())
+            .or(self.size)
+    }
+
+    pub fn tab_size(&self, tab_id: &str) -> Option<(u32, u32)> {
+        self.tab_sizes.get(tab_id).copied()
+    }
+
+    pub fn remember(&mut self, tab_id: Option<&str>, size: (u32, u32)) {
+        self.size = Some(size);
+        if let Some(tab_id) = tab_id {
+            self.tab_sizes.insert(tab_id.to_string(), size);
+        }
+    }
+
+    /// A tab shown at the default size keeps it when the default later changes.
+    pub fn keep_tab_size(&mut self, tab_id: &str, size: (u32, u32)) {
+        self.tab_sizes.entry(tab_id.to_string()).or_insert(size);
+    }
+
+    pub fn forget_tab(&mut self, tab_id: &str) {
+        self.tab_sizes.remove(tab_id);
+    }
+
+    pub fn retain_tabs(&mut self, live: &BTreeSet<String>) {
+        self.tab_sizes.retain(|id, _| live.contains(id));
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChatTabChoice {
+    Own(String),
+    ClaimActive(String),
+    CreateNew,
+}
+
+/// Default tab for a chat's shared-runtime call: its most recently used live tab, else the
+/// active tab while nobody owns it, else a fresh tab of its own.
+pub fn choose_chat_tab(
+    chat_id: &str,
+    live_tab_ids: &[String],
+    tab_meta: &HashMap<String, TabMeta>,
+    active_tab_id: Option<&str>,
+) -> ChatTabChoice {
+    let own = live_tab_ids
+        .iter()
+        .filter_map(|id| Some((id, tab_meta.get(id)?)))
+        .filter(|(_, meta)| meta.last_chat.as_deref() == Some(chat_id))
+        .max_by_key(|(_, meta)| meta.last_used_ms);
+    if let Some((id, _)) = own {
+        return ChatTabChoice::Own(id.clone());
+    }
+    match active_tab_id {
+        Some(active) if tab_meta.get(active).is_none_or(TabMeta::is_unowned) => {
+            ChatTabChoice::ClaimActive(active.to_string())
+        }
+        _ => ChatTabChoice::CreateNew,
+    }
+}
+
+/// Records one chat call: tabs it opened become its own unless already owned, and the tab
+/// it ended on becomes its most recently used tab, named when `tab_name` is given.
+pub fn record_chat_tab_use(
+    tab_meta: &mut HashMap<String, TabMeta>,
+    chat_id: &str,
+    new_tab_ids: &[String],
+    tab_id: Option<&str>,
+    tab_name: Option<&str>,
+    now_ms: u64,
+) {
+    for id in new_tab_ids {
+        let meta = tab_meta.entry(id.clone()).or_default();
+        if meta.opened_by_chat.is_none() {
+            meta.opened_by_chat = Some(chat_id.to_string());
+        }
+    }
+    if let Some(id) = tab_id {
+        let meta = tab_meta.entry(id.to_string()).or_default();
+        meta.last_chat = Some(chat_id.to_string());
+        meta.last_used_ms = Some(now_ms);
+        if let Some(name) = tab_name {
+            meta.name = Some(name.to_string());
+        }
+    }
+}
+
 pub struct BrowserRuntime {
     pub runtime_id: String,
     pub ownership: Arc<RuntimeOwnership>,
@@ -463,10 +576,16 @@ pub struct BrowserRuntime {
     pub download_monitor: Arc<DownloadMonitor>,
     cdp_session: Option<Arc<cdp::CdpSession>>,
     pub active_tab_target_id: Option<String>,
+    request_tab: Option<Option<String>>,
+    closed_tab_target_ids: BTreeSet<String>,
     pub recording_tab_target_id: Option<String>,
     pub adopted_tab_target_ids: Vec<String>,
     pub tab_openers: HashMap<String, refact_integrations::browser_models::TabOpener>,
     pub tab_opened_by_step: HashMap<String, usize>,
+    pub tab_meta: HashMap<String, TabMeta>,
+    pub pane: PaneSizes,
+    tab_gates: HashMap<String, Arc<tab_gate::TabGate>>,
+    pub tab_devices: HashMap<String, context_state::ViewportState>,
     pub profile_dir: PathBuf,
     pub downloads_dir: PathBuf,
     pub artifacts_dir: PathBuf,
@@ -908,6 +1027,10 @@ impl BrowserRuntime {
         self.ownership
             .connection_epoch
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        for (_, gate) in self.tab_gates.drain() {
+            gate.retire();
+        }
+        self.tab_devices.clear();
         self.browser = connection;
         *self
             .ownership
@@ -1130,10 +1253,16 @@ impl BrowserRuntime {
             download_monitor,
             cdp_session: None,
             active_tab_target_id: None,
+            request_tab: None,
+            closed_tab_target_ids: BTreeSet::new(),
             recording_tab_target_id: None,
             adopted_tab_target_ids: Vec::new(),
             tab_openers: HashMap::new(),
             tab_opened_by_step: HashMap::new(),
+            tab_meta: HashMap::new(),
+            pane: PaneSizes::default(),
+            tab_gates: HashMap::new(),
+            tab_devices: HashMap::new(),
             profile_dir,
             downloads_dir,
             artifacts_dir,
@@ -1208,10 +1337,16 @@ impl BrowserRuntime {
             download_monitor,
             cdp_session: None,
             active_tab_target_id: None,
+            request_tab: None,
+            closed_tab_target_ids: BTreeSet::new(),
             recording_tab_target_id: None,
             adopted_tab_target_ids: Vec::new(),
             tab_openers: HashMap::new(),
             tab_opened_by_step: HashMap::new(),
+            tab_meta: HashMap::new(),
+            pane: PaneSizes::default(),
+            tab_gates: HashMap::new(),
+            tab_devices: HashMap::new(),
             profile_dir: PathBuf::new(),
             downloads_dir,
             artifacts_dir,
@@ -1314,17 +1449,24 @@ impl BrowserRuntime {
     }
 
     pub fn reconcile_route_interception(&mut self) -> Result<(), String> {
+        self.reconcile_route_interception_on(&self.tabs_snapshot())
+    }
+
+    fn reconcile_route_interception_on(
+        &mut self,
+        tabs: &[Arc<headless_chrome::Tab>],
+    ) -> Result<(), String> {
         let required = self.route_interception_required();
         if required == self.route_interception_enabled {
             return Ok(());
         }
         let handle_auth = self.context_state.http_credentials.is_some();
         let mut errors = Vec::new();
-        for tab in self.tabs_snapshot() {
+        for tab in tabs {
             let outcome = if required {
-                self.route_registry.enable_for_tab(&tab, handle_auth)
+                self.route_registry.enable_for_tab(tab, handle_auth)
             } else {
-                self.route_registry.disable_for_tab(&tab)
+                self.route_registry.disable_for_tab(tab)
             };
             if let Err(error) = outcome {
                 errors.push(error);
@@ -1361,11 +1503,19 @@ impl BrowserRuntime {
         &mut self,
         pattern: Option<&refact_integrations::browser_models::UrlPattern>,
     ) -> Result<usize, String> {
+        self.remove_routes_on(pattern, &self.tabs_snapshot())
+    }
+
+    pub fn remove_routes_on(
+        &mut self,
+        pattern: Option<&refact_integrations::browser_models::UrlPattern>,
+        tabs: &[Arc<headless_chrome::Tab>],
+    ) -> Result<usize, String> {
         let previous_routes = self.route_registry.snapshot();
         let removed = self.route_registry.remove(pattern);
-        if let Err(error) = self.reconcile_route_interception() {
+        if let Err(error) = self.reconcile_route_interception_on(tabs) {
             self.route_registry.restore(previous_routes)?;
-            let _ = self.reconcile_route_interception();
+            let _ = self.reconcile_route_interception_on(tabs);
             return Err(error);
         }
         Ok(removed)
@@ -1511,8 +1661,44 @@ impl BrowserRuntime {
         self.active_tab_target_id.as_deref()
     }
 
-    pub fn list_tab_infos(&self) -> Vec<refact_integrations::browser_models::TabInfo> {
-        let active_id = self.active_tab_target_id();
+    /// While set, `get_active_tab` resolves only to this request-local tab (nothing once it
+    /// is closed) instead of the runtime-wide active tab. Holders clear it before releasing
+    /// the runtime lock.
+    pub fn set_request_tab(&mut self, tab: Option<Option<String>>) {
+        self.request_tab = tab;
+    }
+
+    /// Every browser tab except those closed through this runtime, in browser order.
+    pub fn open_tabs(&self) -> Vec<Arc<headless_chrome::Tab>> {
+        self.browser
+            .get_tabs()
+            .lock()
+            .map(|tabs| {
+                tabs.iter()
+                    .filter(|tab| !self.closed_tab_target_ids.contains(tab.get_target_id()))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// An open tab by target id; a tab closed through this runtime is never returned, even
+    /// while the browser still lists it.
+    pub fn find_tab(&self, target_id: &str) -> Option<Arc<headless_chrome::Tab>> {
+        if self.closed_tab_target_ids.contains(target_id) {
+            return None;
+        }
+        self.browser
+            .get_tabs()
+            .lock()
+            .ok()?
+            .iter()
+            .find(|tab| tab.get_target_id() == target_id)
+            .cloned()
+    }
+
+    /// Adopted tabs that are still open, in adoption order; no CDP command is sent.
+    pub fn live_tabs(&self) -> Vec<Arc<headless_chrome::Tab>> {
         self.browser
             .get_tabs()
             .lock()
@@ -1520,24 +1706,44 @@ impl BrowserRuntime {
                 self.adopted_tab_target_ids
                     .iter()
                     .filter_map(|target_id| {
-                        let tab = tabs.iter().find(|tab| tab.get_target_id() == target_id)?;
-                        let target_id = tab.get_target_id().to_string();
-                        Some(refact_integrations::browser_models::TabInfo {
-                            id: target_id.clone(),
-                            target_id: target_id.clone(),
-                            url: tab.get_url(),
-                            title: tab.get_title().unwrap_or_default(),
-                            active: active_id == Some(target_id.as_str()),
-                            opener: self.tab_openers.get(&target_id).cloned(),
-                            opened_by_step: self.tab_opened_by_step.get(&target_id).copied(),
-                        })
+                        tabs.iter()
+                            .find(|tab| tab.get_target_id() == target_id)
+                            .cloned()
                     })
                     .collect()
             })
             .unwrap_or_default()
     }
 
-    pub fn known_tab_ids(&self) -> BTreeSet<String> {
+    pub fn tab_info(
+        &self,
+        tab: &headless_chrome::Tab,
+        title: String,
+    ) -> refact_integrations::browser_models::TabInfo {
+        let target_id = tab.get_target_id().to_string();
+        refact_integrations::browser_models::TabInfo {
+            id: target_id.clone(),
+            target_id: target_id.clone(),
+            url: tab.get_url(),
+            title,
+            active: self.active_tab_target_id() == Some(target_id.as_str()),
+            opener: self.tab_openers.get(&target_id).cloned(),
+            opened_by_step: self.tab_opened_by_step.get(&target_id).copied(),
+            name: self
+                .tab_meta
+                .get(&target_id)
+                .and_then(|meta| meta.name.clone()),
+        }
+    }
+
+    pub fn list_tab_infos(&self) -> Vec<refact_integrations::browser_models::TabInfo> {
+        self.live_tabs()
+            .iter()
+            .map(|tab| self.tab_info(tab, tab.get_title().unwrap_or_default()))
+            .collect()
+    }
+
+    fn browser_tab_ids(&self) -> BTreeSet<String> {
         self.browser
             .get_tabs()
             .lock()
@@ -1549,16 +1755,49 @@ impl BrowserRuntime {
             .unwrap_or_default()
     }
 
+    pub fn known_tab_ids(&self) -> BTreeSet<String> {
+        let mut ids = self.browser_tab_ids();
+        ids.retain(|id| !self.closed_tab_target_ids.contains(id));
+        ids
+    }
+
     pub fn remove_tab_metadata(&mut self, target_id: &str) {
         self.adopted_tab_target_ids
             .retain(|adopted| adopted != target_id);
         self.tab_openers.remove(target_id);
         self.tab_opened_by_step.remove(target_id);
+        self.tab_meta.remove(target_id);
+        self.pane.forget_tab(target_id);
+        if let Some(gate) = self.tab_gates.remove(target_id) {
+            gate.retire();
+        }
+        self.tab_devices.remove(target_id);
+    }
+
+    /// The dispatch gate of one tab of this runtime generation.
+    pub fn tab_gate(&mut self, target_id: &str) -> Arc<tab_gate::TabGate> {
+        self.tab_gates
+            .entry(target_id.to_string())
+            .or_default()
+            .clone()
+    }
+
+    /// The gates of every open tab, in target id order.
+    pub fn open_tab_gates(&mut self) -> Vec<(String, Arc<tab_gate::TabGate>)> {
+        self.known_tab_ids()
+            .into_iter()
+            .map(|id| {
+                let gate = self.tab_gate(&id);
+                (id, gate)
+            })
+            .collect()
     }
 
     pub fn select_tab_after_close(&mut self, closed_target_id: &str) -> Option<String> {
         let fallback = tab_fallback_after_close(&mut self.adopted_tab_target_ids, closed_target_id);
         self.remove_tab_metadata(closed_target_id);
+        self.closed_tab_target_ids
+            .insert(closed_target_id.to_string());
         if self.active_tab_target_id.as_deref() == Some(closed_target_id) {
             self.active_tab_target_id = fallback.clone();
         }
@@ -1569,6 +1808,8 @@ impl BrowserRuntime {
     }
 
     pub fn reconcile_tabs(&mut self) {
+        let listed = self.browser_tab_ids();
+        self.closed_tab_target_ids.retain(|id| listed.contains(id));
         let present = self.known_tab_ids();
         self.adopted_tab_target_ids
             .retain(|target_id| present.contains(target_id));
@@ -1576,6 +1817,17 @@ impl BrowserRuntime {
             .retain(|target_id, _| present.contains(target_id));
         self.tab_opened_by_step
             .retain(|target_id, _| present.contains(target_id));
+        self.tab_meta
+            .retain(|target_id, _| present.contains(target_id));
+        self.pane.retain_tabs(&present);
+        self.tab_gates.retain(|target_id, gate| {
+            let live = present.contains(target_id);
+            if !live {
+                gate.retire();
+            }
+            live
+        });
+        self.tab_devices.retain(|id, _| present.contains(id));
         if self
             .active_tab_target_id
             .as_ref()
@@ -1592,8 +1844,32 @@ impl BrowserRuntime {
         }
     }
 
+    /// Headless tabs sharing a window are hidden and throttled whenever another tab is in
+    /// front, so each tab opened here gets its own window and stays visible.
+    pub fn open_tab(&self) -> Result<Arc<headless_chrome::Tab>, String> {
+        self.browser
+            .new_tab_with_options(headless_chrome::protocol::cdp::Target::CreateTarget {
+                url: "about:blank".to_string(),
+                left: None,
+                top: None,
+                width: None,
+                height: None,
+                window_state: None,
+                browser_context_id: None,
+                enable_begin_frame_control: None,
+                new_window: self.headless().then_some(true),
+                background: None,
+                for_tab: None,
+                hidden: None,
+            })
+            .map_err(|error| error.to_string())
+    }
+
     pub fn get_active_tab(&self) -> Option<Arc<headless_chrome::Tab>> {
-        let tabs_guard = self.browser.get_tabs().lock().ok()?;
+        if let Some(request_tab) = &self.request_tab {
+            return self.find_tab(request_tab.as_deref()?);
+        }
+        let tabs_guard = self.open_tabs();
         if tabs_guard.is_empty() {
             return None;
         }
@@ -2106,9 +2382,17 @@ pub fn adopt_new_tabs(
     let mut adopted = Vec::new();
     for tab in tabs {
         let target_id = tab.get_target_id().to_string();
-        if runtime.adopted_tab_target_ids.contains(&target_id) {
+        if runtime.adopted_tab_target_ids.contains(&target_id)
+            || runtime.closed_tab_target_ids.contains(&target_id)
+        {
             continue;
         }
+        let Ok(guard) = runtime
+            .tab_gate(&target_id)
+            .acquire(tab_gate::GateUse::Tool, Instant::now())
+        else {
+            continue;
+        };
         if let Ok(info) = tab.get_target_info() {
             if let Some(opener) = tab_opener(info.opener_id, info.opener_frame_id) {
                 runtime.tab_openers.insert(target_id.clone(), opener);
@@ -2128,6 +2412,7 @@ pub fn adopt_new_tabs(
                 adopted.push(info);
             }
         }
+        guard.update_view(|view| view.applied_pane = None);
     }
     adopted
 }
@@ -2213,7 +2498,7 @@ pub fn setup_recording_for_runtime(runtime: &mut BrowserRuntime) -> Result<(), S
         .find(|tab| tab.get_url() != "about:blank")
         .cloned()
         .or_else(|| startup_tabs.first().cloned())
-        .or_else(|| runtime.browser.new_tab().ok())
+        .or_else(|| runtime.open_tab().ok())
         .ok_or_else(|| "Failed to select recording tab".to_string())?;
 
     let url = primary_tab.get_url();
@@ -2253,6 +2538,137 @@ pub fn setup_recording_for_runtime(runtime: &mut BrowserRuntime) -> Result<(), S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn meta(opened_by: Option<&str>, last: Option<&str>, used: Option<u64>) -> TabMeta {
+        TabMeta {
+            name: None,
+            opened_by_chat: opened_by.map(str::to_string),
+            last_chat: last.map(str::to_string),
+            last_used_ms: used,
+        }
+    }
+
+    #[test]
+    fn pane_sizes_are_per_tab_and_drop_with_their_tab() {
+        let mut pane = PaneSizes::default();
+        assert_eq!(pane.desired(Some("a")), None);
+        pane.remember(None, (800, 600));
+        assert_eq!(pane.desired(Some("a")), Some((800, 600)));
+        assert_eq!(pane.desired(None), Some((800, 600)));
+        pane.remember(Some("a"), (640, 480));
+        pane.remember(Some("b"), (1024, 768));
+        assert_eq!(pane.desired(Some("a")), Some((640, 480)));
+        assert_eq!(pane.desired(Some("b")), Some((1024, 768)));
+        assert_eq!(pane.desired(Some("c")), Some((1024, 768)));
+        pane.keep_tab_size("c", (1024, 768));
+        pane.remember(Some("a"), (700, 500));
+        assert_eq!(pane.desired(Some("c")), Some((1024, 768)));
+        assert_eq!(pane.desired(Some("a")), Some((700, 500)));
+        pane.keep_tab_size("a", (1, 1));
+        assert_eq!(pane.tab_size("a"), Some((700, 500)));
+        pane.forget_tab("b");
+        assert_eq!(pane.tab_size("b"), None);
+        for index in 0..300 {
+            pane.remember(Some(&format!("t{index}")), (900, 700));
+        }
+        pane.retain_tabs(&["a".to_string(), "t299".to_string()].into_iter().collect());
+        assert_eq!(pane.tab_size("a"), Some((700, 500)));
+        assert_eq!(pane.tab_size("t299"), Some((900, 700)));
+        assert_eq!(pane.tab_size("c"), None);
+        assert_eq!(pane.tab_size("t0"), None);
+    }
+
+    #[test]
+    fn chat_tab_choice_prefers_own_recent_tab_then_unowned_active_then_new() {
+        let live = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let mut tabs = HashMap::from([
+            (
+                "a".to_string(),
+                meta(Some("chat-1"), Some("chat-1"), Some(10)),
+            ),
+            (
+                "b".to_string(),
+                meta(Some("chat-2"), Some("chat-1"), Some(30)),
+            ),
+            (
+                "c".to_string(),
+                meta(Some("chat-2"), Some("chat-2"), Some(40)),
+            ),
+            ("gone".to_string(), meta(None, Some("chat-1"), Some(99))),
+        ]);
+        assert_eq!(
+            choose_chat_tab("chat-1", &live, &tabs, Some("c")),
+            ChatTabChoice::Own("b".into())
+        );
+        assert_eq!(
+            choose_chat_tab("chat-2", &live, &tabs, Some("a")),
+            ChatTabChoice::Own("c".into())
+        );
+        assert_eq!(
+            choose_chat_tab("chat-3", &live, &tabs, Some("c")),
+            ChatTabChoice::CreateNew
+        );
+        tabs.insert("c".into(), meta(Some("chat-2"), None, None));
+        assert_eq!(
+            choose_chat_tab("chat-3", &live, &tabs, Some("c")),
+            ChatTabChoice::CreateNew
+        );
+        tabs.insert("c".into(), meta(None, Some("chat-2"), Some(40)));
+        assert_eq!(
+            choose_chat_tab("chat-3", &live, &tabs, Some("c")),
+            ChatTabChoice::CreateNew
+        );
+        tabs.insert("c".into(), TabMeta::default());
+        assert_eq!(
+            choose_chat_tab("chat-3", &live, &tabs, Some("c")),
+            ChatTabChoice::ClaimActive("c".into())
+        );
+        tabs.remove("c");
+        assert_eq!(
+            choose_chat_tab("chat-3", &live, &tabs, Some("c")),
+            ChatTabChoice::ClaimActive("c".into())
+        );
+        assert_eq!(
+            choose_chat_tab("chat-3", &live, &tabs, None),
+            ChatTabChoice::CreateNew
+        );
+        assert_eq!(
+            choose_chat_tab("chat-1", &["a".to_string()], &tabs, Some("a")),
+            ChatTabChoice::Own("a".into())
+        );
+    }
+
+    #[test]
+    fn chat_tab_use_claims_new_tabs_once_and_marks_the_final_tab() {
+        let mut tabs = HashMap::from([("old".to_string(), meta(Some("chat-1"), None, None))]);
+        record_chat_tab_use(
+            &mut tabs,
+            "chat-2",
+            &["old".to_string(), "popup".to_string()],
+            Some("popup"),
+            Some("Docs"),
+            50,
+        );
+        assert_eq!(tabs["old"], meta(Some("chat-1"), None, None));
+        assert_eq!(
+            tabs["popup"],
+            TabMeta {
+                name: Some("Docs".into()),
+                ..meta(Some("chat-2"), Some("chat-2"), Some(50))
+            }
+        );
+        record_chat_tab_use(&mut tabs, "chat-1", &[], Some("popup"), None, 70);
+        assert_eq!(
+            tabs["popup"],
+            TabMeta {
+                name: Some("Docs".into()),
+                ..meta(Some("chat-2"), Some("chat-1"), Some(70))
+            }
+        );
+        record_chat_tab_use(&mut tabs, "chat-1", &[], None, Some("ignored"), 90);
+        assert_eq!(tabs.len(), 2);
+        assert_eq!(tabs["popup"].last_used_ms, Some(70));
+    }
 
     #[cfg(windows)]
     #[test]

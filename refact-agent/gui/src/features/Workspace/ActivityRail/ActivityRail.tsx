@@ -4,6 +4,7 @@ import {
 } from "../../../services/refact/types";
 import { useGetPythonWorkspaceQuery } from "../../../services/refact/pythonWorkspace";
 import { AppRail } from "../../Apps/AppRail";
+import { BrowserRail } from "../../Browser/BrowserRail";
 import classNames from "classnames";
 import {
   Activity,
@@ -319,6 +320,7 @@ export function ActivityRail() {
         );
       })}
       <AppRail className={styles.button} />
+      <BrowserRail className={styles.button} />
       <BuddyRailButton className={styles.bottomSlot} />
     </nav>
   );

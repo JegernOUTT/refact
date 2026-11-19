@@ -80,6 +80,23 @@ describe("workspace dock persistence", () => {
     });
   });
 
+  it("persists and rehydrates the browser dock section", async () => {
+    const store = makePersistedStore();
+    store.dispatch(setDockSection("browser"));
+    store.dispatch(setDockOpen(true));
+
+    await flushPersist();
+
+    expect(JSON.parse(readPersistedWorkspace()?.dock ?? "null")).toMatchObject({
+      open: true,
+      section: "browser",
+    });
+
+    const rehydrated = makePersistedStore();
+    await flushPersist();
+    expect(rehydrated.getState().workspace.dock?.section).toBe("browser");
+  });
+
   it("does not persist tabs, groups, or panelsForced", async () => {
     const store = makePersistedStore();
     store.dispatch(createChatWithId({ id: "chat-a", title: "Chat Alpha" }));

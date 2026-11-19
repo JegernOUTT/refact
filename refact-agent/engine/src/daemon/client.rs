@@ -19,15 +19,6 @@ const CONTROL_READINESS_TIMEOUT: Duration = Duration::from_secs(125);
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
 const DAEMON_NO_UPGRADE_ENV: &str = "REFACT_DAEMON_NO_UPGRADE";
 
-#[cfg(target_os = "linux")]
-pub(crate) async fn request_browser_launch(
-    info: &DaemonInfo,
-    project_id: &str,
-    root: &Path,
-) -> Result<super::browser_launch::LaunchReply, String> {
-    super::browser_launch::request(info.pid, info.port, project_id, root).await
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DaemonUpgradeReason {
     OlderVersion,

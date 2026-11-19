@@ -34,10 +34,10 @@ describe("Drawer", () => {
         sessionAdded({
           chatId: "chat-a",
           session: {
-            process_id: "killed-three",
+            process_id: "starting-build",
             label: "build",
-            title: "build · killed",
-            status: "killed",
+            title: "build · starting",
+            status: "starting",
           },
         }),
       );
@@ -45,10 +45,10 @@ describe("Drawer", () => {
         sessionAdded({
           chatId: "chat-a",
           session: {
-            process_id: "failed-two",
+            process_id: "running-tests",
             label: "tests",
-            title: "tests · failed",
-            status: "failed",
+            title: "tests · running",
+            status: "running",
           },
         }),
       );
@@ -66,8 +66,12 @@ describe("Drawer", () => {
     expect(drawer).toHaveAttribute("data-open", "false");
     expect(contentGrid).toHaveAttribute("data-open", "false");
     expect(screen.getByLabelText("zsh · running: running")).toBeInTheDocument();
-    expect(screen.getByLabelText("tests · failed: failed")).toBeInTheDocument();
-    expect(screen.getByLabelText("build · killed: killed")).toBeInTheDocument();
+    expect(
+      screen.getByLabelText("tests · running: running"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByLabelText("build · starting: starting"),
+    ).toBeInTheDocument();
 
     await view.user.click(
       screen.getByRole("button", {

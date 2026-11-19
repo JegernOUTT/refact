@@ -482,4 +482,24 @@ describe("real Task pane lifecycle", () => {
     expect(group && collectTabIds(group.root)).not.toContain("task:owned-task");
     expect(store.getState().chat.threads["pane-a"]).toBeDefined();
   });
+
+  it("persists browser view layout changes immediately", () => {
+    const { store } = setup();
+    store.dispatch(
+      actions.showBrowserTabForChat({ chatId: "pane-b", tabId: "t1" }),
+    );
+    const persisted = () =>
+      Object.values(loadPersistedWorkspace().groups).flatMap((group) =>
+        group ? collectTabIds(group.root) : [],
+      );
+    expect(persisted()).toContain("browser:t1");
+    store.dispatch(actions.hideBrowserTabsForChat("pane-b"));
+    expect(persisted()).not.toContain("browser:t1");
+    store.dispatch(
+      actions.showBrowserTabForChat({ chatId: "pane-b", tabId: "t2" }),
+    );
+    expect(persisted()).toContain("browser:t2");
+    store.dispatch(actions.pruneBrowserTabSurfaces({ liveTabIds: [] }));
+    expect(persisted()).not.toContain("browser:t2");
+  });
 });
