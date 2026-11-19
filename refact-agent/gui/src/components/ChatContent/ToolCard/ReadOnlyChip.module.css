@@ -1,0 +1,28 @@
+.chip {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+.chip:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: var(--rf-hairline);
+}
+.chip .icon {
+  display: none;
+}
+/* A narrow script row keeps its title and status: the chip shrinks to its icon. */
+@container script-row (max-width: 560px) {
+  .chip .icon {
+    display: block;
+  }
+  .label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
+}

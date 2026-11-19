@@ -1290,6 +1290,27 @@ where
     s.parse().map_err(D::Error::custom)
 }
 
+/// A history patch queued by `chat.patch`, with the pins it is applied under (K5).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueuedPatch {
+    pub ops: Vec<serde_json::Value>,
+    /// Privacy records of the run, carried into the messages the patch writes.
+    #[serde(default)]
+    pub records: Vec<serde_json::Value>,
+    /// Digest of the history the patch was planned on: the messages before the assistant message
+    /// of the turn that queued it.
+    pub prefix: String,
+    /// How many messages that history held.
+    pub tail: usize,
+    /// When the turn that queued it started.
+    pub turn_at_ms: u64,
+    /// Id of the latest compression report when it was queued.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boundary: Option<String>,
+    /// Digest of the card items the person approved.
+    pub items: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ChatCommand {
@@ -1400,6 +1421,11 @@ pub enum ChatCommand {
         message_id: String,
         #[serde(default)]
         regenerate: bool,
+    },
+    /// A history patch that `chat.patch` of a python script queued during a turn of this chat,
+    /// applied after that turn; the command route refuses it.
+    PatchMessages {
+        patch: QueuedPatch,
     },
     Regenerate {},
     RestoreMessages {
@@ -1788,6 +1814,13 @@ impl CommandRequest {
             } => (
                 "remove_message".to_string(),
                 message_id.clone(),
+                String::new(),
+            ),
+            ChatCommand::PatchMessages {
+                patch,
+            } => (
+                "patch_messages".to_string(),
+                format!("chat.patch from a script: {} ops", patch.ops.len()),
                 String::new(),
             ),
             ChatCommand::Regenerate {} => ("regenerate".to_string(), String::new(), String::new()),

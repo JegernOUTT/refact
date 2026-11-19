@@ -17,7 +17,9 @@ use crate::ext::hooks::HookEvent;
 use crate::ext::hooks_runner::{get_project_dir_string, HookPayload};
 #[cfg(test)]
 use crate::chat::types::ChatSession;
-use crate::exec::{ExecStatus, ProcessCompletionEvent, ProcessSpawnEvent};
+use crate::exec::{
+    ExecMode, ExecProcessSnapshot, ExecStatus, ProcessCompletionEvent, ProcessSpawnEvent,
+};
 use crate::global_context::SharedGlobalContext;
 
 const SEALED_PROCESS_SWEEP_INTERVAL: Duration = Duration::from_secs(30);
@@ -262,6 +264,33 @@ pub(crate) async fn handle_process_spawn(gcx: SharedGlobalContext, event: Proces
             started_at: event.started_at_ms,
         },
     });
+}
+
+pub(crate) async fn emit_attached_foreground_completion_sse(
+    gcx: &SharedGlobalContext,
+    snapshot: &ExecProcessSnapshot,
+    exit_code: Option<i32>,
+) {
+    if snapshot.meta.mode != ExecMode::Foreground || !snapshot.status.is_terminal() {
+        return;
+    }
+    let Some(chat_id) = snapshot.meta.owner.chat_id.as_deref() else {
+        return;
+    };
+    let session = gcx.chat_sessions.read().await.get(chat_id).cloned();
+    let Some(session) = session else {
+        return;
+    };
+    let mut session = session.lock().await;
+    if !session.closed {
+        session.emit(ChatEvent::ProcessCompleted {
+            process_id: snapshot.meta.process_id.to_string(),
+            status: status_label(&snapshot.status).to_string(),
+            exit_code,
+            short_description: snapshot.meta.short_description.clone(),
+            mode: snapshot.meta.mode.to_string(),
+        });
+    }
 }
 
 /// Deliver a background/service process completion into its owning chat using

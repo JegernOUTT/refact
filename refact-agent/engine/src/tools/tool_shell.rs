@@ -656,6 +656,14 @@ impl Tool for ToolShell {
             };
             match completed {
                 Ok(Ok((snapshot, Some(observation)))) => {
+                    if nested_python {
+                        crate::chat::notifications::emit_attached_foreground_completion_sse(
+                            &gcx,
+                            &snapshot,
+                            exec_exit_code(&snapshot.status),
+                        )
+                        .await;
+                    }
                     result.snapshot = snapshot;
                     result.observation = observation;
                 }
@@ -1694,6 +1702,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn attached_shell_emits_live_completion_only_when_nested_in_python() {
+        use crate::chat::types::ChatSession;
+
+        for nested in [true, false] {
+            let (gcx, ccx) = ccx_with_gcx_and_abort(None).await;
+            let session = Arc::new(AMutex::new(ChatSession::new("chat".into())));
+            let mut events = session.lock().await.subscribe();
+            gcx.chat_sessions
+                .write()
+                .await
+                .insert("chat".into(), session.clone());
+            if nested {
+                ccx.lock()
+                    .await
+                    .app
+                    .python_tool
+                    .nested_parents
+                    .lock()
+                    .unwrap()
+                    .insert(("chat".into(), "nested".into()), "outer".into());
+            }
+            let mut registry_completions = gcx.exec_registry.subscribe_completion();
+            let (_, messages) = ToolShell::default()
+                .tool_execute(
+                    ccx,
+                    &"nested".into(),
+                    &args(vec![
+                        ("command", json!(success_command())),
+                        ("description", json!("Check foreground settlement")),
+                        ("timeout", json!(10)),
+                    ]),
+                )
+                .await
+                .unwrap();
+            let message = only_chat_message(messages);
+            assert_eq!(exec(&message)["status"], "exited");
+            assert_ne!(exec(&message)["detached"], true);
+
+            let mut completions = Vec::new();
+            while let Ok(event) = events.try_recv() {
+                let event: Value = serde_json::from_str(&event).unwrap();
+                if event["type"] == "process_completed" {
+                    completions.push(event);
+                }
+            }
+            assert_eq!(completions.len(), usize::from(nested));
+            if let Some(event) = completions.first() {
+                assert_eq!(event["chat_id"], "chat");
+                assert_eq!(event["process_id"], exec(&message)["process_id"]);
+                assert_eq!(event["status"], "exited");
+                assert_eq!(event["exit_code"], 0);
+                assert_eq!(event["mode"], "foreground");
+            }
+            assert!(registry_completions.try_recv().is_err());
+            assert!(session.lock().await.messages.is_empty());
+        }
+    }
+
+    #[tokio::test]
     async fn shell_request_has_no_implicit_timeout_but_preserves_an_explicit_one() {
         let (_gcx, ccx) = ccx_with_gcx_and_abort(None).await;
         let base = HashMap::from([
@@ -1715,6 +1782,7 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(30), async {
             for nested in [true, false] {
                 let (gcx, ccx) = ccx_with_gcx_and_abort(None).await;
+                let mut registry_completions = gcx.exec_registry.subscribe_completion();
                 let app = ccx.lock().await.app.clone();
                 if nested {
                     app.python_tool
@@ -1771,9 +1839,14 @@ mod tests {
                     });
                     assert!(text(&message).contains("done"));
                     assert_ne!(exec(&message)["detached"], true);
+                    assert!(registry_completions.try_recv().is_err());
                 } else {
                     assert_eq!(exec(&message)["detached"], true);
                     gcx.exec_registry.wait(&process_id(&message)).await.unwrap();
+                    let completion = registry_completions.recv().await.unwrap();
+                    assert_eq!(completion.process_id, process_id(&message));
+                    assert_eq!(completion.mode, crate::exec::ExecMode::Foreground);
+                    assert_eq!(completion.exit_code, Some(0));
                 }
             }
         })

@@ -1,4 +1,8 @@
 pub mod operations;
+pub mod read;
+pub mod script;
+#[cfg(test)]
+mod test_repo;
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;

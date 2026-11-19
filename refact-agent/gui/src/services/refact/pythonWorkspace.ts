@@ -28,6 +28,8 @@ export type PythonWorkspace = {
     variables_total?: number;
     /** Optional: the last run restored this session from disk. */
     last_run_restored?: boolean;
+    /** Optional: the variables could not be listed, so an empty list says nothing. */
+    variables_unknown?: boolean;
   };
   artifacts: {
     path: string;
@@ -53,6 +55,8 @@ export type PythonWorkspace = {
     displays_total?: number;
     /** Optional count of the engine changes the run applied. */
     engine_changes?: number;
+    /** Optional: the run's scripts could write files only under ARTIFACTS_DIR. */
+    read_only?: boolean;
   }[];
   runs_truncated: boolean;
   /** Optional newest displays of recent runs, newest first (at most 8). */
@@ -109,6 +113,7 @@ export function dropInvalidOptionals(value: unknown): unknown {
     session: keepValid(value.session, {
       variables_total: count,
       last_run_restored: isBoolean,
+      variables_unknown: isBoolean,
     }),
     runs: Array.isArray(value.runs)
       ? value.runs.map((run: unknown) =>
@@ -119,6 +124,7 @@ export function dropInvalidOptionals(value: unknown): unknown {
                 llm_calls: count,
                 displays_total: count,
                 engine_changes: count,
+                read_only: isBoolean,
               })
             : run,
         )
@@ -156,6 +162,8 @@ export function isPythonWorkspace(value: unknown): value is PythonWorkspace {
     (session.variables_total === undefined || count(session.variables_total)) &&
     (session.last_run_restored === undefined ||
       isBoolean(session.last_run_restored)) &&
+    (session.variables_unknown === undefined ||
+      isBoolean(session.variables_unknown)) &&
     list(
       session.variables,
       (v) =>
@@ -186,7 +194,8 @@ export function isPythonWorkspace(value: unknown): value is PythonWorkspace {
         (v.code_preview === undefined || isString(v.code_preview)) &&
         (v.llm_calls === undefined || count(v.llm_calls)) &&
         (v.displays_total === undefined || count(v.displays_total)) &&
-        (v.engine_changes === undefined || count(v.engine_changes)),
+        (v.engine_changes === undefined || count(v.engine_changes)) &&
+        (v.read_only === undefined || isBoolean(v.read_only)),
     ) &&
     (value.displays === undefined ||
       (Array.isArray(value.displays) &&

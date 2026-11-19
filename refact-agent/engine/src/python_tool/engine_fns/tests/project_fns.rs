@@ -437,6 +437,218 @@ async fn processes_classify_raw_previews_and_preserve_own_identity() {
     finish(task).await;
 }
 
+#[tokio::test]
+async fn processes_hide_blocked_paths_the_shown_description_does_not_carry() {
+    let (dir, app, _) = fixture().await;
+    let blocked = project(&dir).join(format!("zone_{}.txt", "a".repeat(80)));
+    let mut policy = (*app.gcx.privacy_policy_load.read().unwrap().policy).clone();
+    policy.blocked = vec![blocked.to_string_lossy().into_owned()];
+    crate::privacy::save_privacy_policy(app.gcx.clone(), policy)
+        .await
+        .unwrap();
+    let mut cut = exec_meta("other-chat", &format!("cat {}", blocked.display()));
+    assert!(cut.short_description.ends_with('\u{2026}'));
+    let mut described = exec_meta("other-chat", &format!("wc -l {}", blocked.display()))
+        .with_short_description("Count the lines".into());
+    let mut running = Vec::new();
+    for meta in [&mut cut, &mut described] {
+        meta.owner.workspace = Some(project(&dir));
+        running.push(
+            app.runtime
+                .exec_registry
+                .register_test_process(meta.clone())
+                .await,
+        );
+    }
+    let listed = result(&run(&app, "(await engine('processes.list'))['data']").await);
+    let mut cards = Vec::new();
+    for process in &running {
+        let task = spawn(
+            &app,
+            &format!(
+                "await engine('processes.kill', process_id={:?})",
+                process.process_id().as_str()
+            ),
+        );
+        let request = next_request(&app, &task).await;
+        decide(&app, &request.request_id, Decision::Deny)
+            .await
+            .unwrap();
+        finish(task).await;
+        cards.push(request.engine.unwrap().items[0].old.clone().unwrap());
+    }
+    let previews: Vec<_> = listed["processes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["command_preview"].clone())
+        .collect();
+    assert_eq!(previews.len(), 2, "{listed}");
+    assert!(
+        previews.iter().all(|p| p == "<hidden: other chat>")
+            && cards
+                .iter()
+                .all(|c| c.as_str().unwrap().starts_with("<hidden: other chat>")),
+        "list: {previews:?}, kill cards: {cards:?}"
+    );
+}
+
+#[tokio::test]
+async fn processes_never_show_a_described_path_cut_by_the_description_limit() {
+    let (dir, app, _) = fixture().await;
+    let blocked = project(&dir).join(format!("zone_{}.txt", "b".repeat(80)));
+    let mut policy = (*app.gcx.privacy_policy_load.read().unwrap().policy).clone();
+    policy.blocked = vec![blocked.to_string_lossy().into_owned()];
+    crate::privacy::save_privacy_policy(app.gcx.clone(), policy)
+        .await
+        .unwrap();
+    let mut meta = exec_meta("other-chat", "sleep 100")
+        .with_short_description(format!("Count {}", blocked.display()));
+    assert!(meta.short_description.ends_with('\u{2026}'));
+    meta.owner.workspace = Some(project(&dir));
+    let process = app.runtime.exec_registry.register_test_process(meta).await;
+    let listed = result(&run(&app, "(await engine('processes.list'))['data']").await);
+    let preview = listed["processes"][0]["command_preview"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let task = spawn(
+        &app,
+        &format!(
+            "await engine('processes.kill', process_id={:?})",
+            process.process_id().as_str()
+        ),
+    );
+    let request = next_request(&app, &task).await;
+    decide(&app, &request.request_id, Decision::Deny)
+        .await
+        .unwrap();
+    finish(task).await;
+    let card = request.engine.unwrap().items[0].old.clone().unwrap();
+    for shown in [preview.as_str(), card.as_str().unwrap()] {
+        assert!(!shown.contains("zone_"), "{shown}");
+        assert!(shown.starts_with("Count"), "{shown}");
+    }
+}
+
+#[tokio::test]
+async fn processes_hide_quoted_escaped_relative_and_unsplittable_foreign_commands() {
+    let (dir, app, _) = fixture().await;
+    let spaced = project(&dir).join("customer records.txt");
+    let relative = project(&dir).join("customer-records.txt");
+    let mut policy = (*app.gcx.privacy_policy_load.read().unwrap().policy).clone();
+    policy.blocked = vec![
+        spaced.to_string_lossy().into_owned(),
+        relative.to_string_lossy().into_owned(),
+    ];
+    crate::privacy::save_privacy_policy(app.gcx.clone(), policy)
+        .await
+        .unwrap();
+    let mut running = Vec::new();
+    for command in [
+        format!("cat '{}'", spaced.display()),
+        format!("cat {}", spaced.display().to_string().replace(' ', "\\ ")),
+        "cat customer-records.txt".to_string(),
+        "cat 'unterminated".to_string(),
+        "cat notes.txt".to_string(),
+    ] {
+        let mut meta = exec_meta("other-chat", &command);
+        meta.owner.workspace = Some(project(&dir));
+        meta.cwd = Some(project(&dir));
+        running.push(app.runtime.exec_registry.register_test_process(meta).await);
+    }
+    let listed = result(&run(&app, "(await engine('processes.list'))['data']").await);
+    let mut previews: Vec<String> = listed["processes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["command_preview"].as_str().unwrap().to_string())
+        .collect();
+    previews.sort();
+    assert_eq!(
+        previews,
+        [
+            "<hidden: other chat>",
+            "<hidden: other chat>",
+            "<hidden: other chat>",
+            "<hidden: other chat>",
+            "cat notes.txt",
+        ],
+        "{listed}"
+    );
+}
+
+#[tokio::test]
+async fn processes_list_hides_a_foreign_workspace_the_model_may_not_see() {
+    let (dir, app, _) = fixture().await;
+    let private = dir.path().join("zone-private-workspace");
+    std::fs::create_dir_all(&private).unwrap();
+    let mut policy = (*app.gcx.privacy_policy_load.read().unwrap().policy).clone();
+    policy.blocked = vec![private.to_string_lossy().into_owned()];
+    crate::privacy::save_privacy_policy(app.gcx.clone(), policy)
+        .await
+        .unwrap();
+    let mut running = Vec::new();
+    for workspace in [private.clone(), project(&dir)] {
+        let mut meta = exec_meta("other-chat", "sleep 100");
+        meta.owner.workspace = Some(workspace);
+        running.push(app.runtime.exec_registry.register_test_process(meta).await);
+    }
+    let listed = result(&run(&app, "(await engine('processes.list'))['data']").await);
+    let workspaces: Vec<_> = listed["processes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["workspace"].clone())
+        .collect();
+    assert!(
+        workspaces.contains(&json!("<hidden: other chat>")),
+        "{listed}"
+    );
+    assert!(
+        workspaces.contains(&json!(project(&dir).to_string_lossy())),
+        "{listed}"
+    );
+    assert!(
+        !listed.to_string().contains("zone-private-workspace"),
+        "{listed}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn processes_kill_reaches_a_process_in_a_workspace_folder_opened_through_a_link() {
+    let (dir, app, _) = fixture().await;
+    let alias = dir.path().join("alias");
+    std::os::unix::fs::symlink(project(&dir), &alias).unwrap();
+    *app.gcx.documents_state.workspace_folders.lock().unwrap() = vec![alias.clone()];
+    let meta = exec_meta("other-chat", "sleep 100").with_workspace(alias);
+    assert_eq!(
+        meta.owner.workspace,
+        Some(std::fs::canonicalize(project(&dir)).unwrap())
+    );
+    let mut running = app.runtime.exec_registry.register_test_process(meta).await;
+    let id = running.process_id().as_str().to_string();
+    let task = spawn(
+        &app,
+        &format!("(await engine('processes.kill', process_id={id:?}))['data']"),
+    );
+    let request = next_request(&app, &task).await;
+    let acknowledge = tokio::spawn(async move {
+        running.acknowledge_kill().await;
+        running
+    });
+    decide(&app, &request.request_id, Decision::AllowOnce)
+        .await
+        .unwrap();
+    let out = result(&finish(task).await);
+    assert_eq!(out["status"], "killed", "{out}");
+    tokio::time::timeout(Duration::from_secs(15), acknowledge)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
 fn job_binding(chat: &str, tool: &str) -> crate::tool_jobs::JobBinding {
     crate::tool_jobs::JobBinding {
         scope_keys: vec![],

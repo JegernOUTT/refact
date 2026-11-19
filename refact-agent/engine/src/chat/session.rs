@@ -12,6 +12,7 @@ use crate::chat::diagnostics::make_ui_only_error_message;
 use crate::chat::internal_roles::{event, EventSubkind, GOAL_ROLE};
 use crate::chat::perf_diagnostics::{self, PerfComponent, PerfOutcome};
 use refact_chat_api::role_projection::{checkpoint_provenance, CHECKPOINT_SOURCE};
+use refact_chat_history::history_patch;
 
 use super::types::*;
 
@@ -928,6 +929,8 @@ impl ChatSession {
             runner_lease: None,
             runner_message_digest: None,
             native_commands_in_flight: Default::default(),
+            commands_taken: 0,
+            turn_origin: None,
             derived_privacy_zones: crate::privacy::records::new_derived_privacy_zones(),
             recovery_budget: None,
             recovery_policy_source: refact_core::recovery::RecoveryPolicySource::Global,
@@ -1100,6 +1103,8 @@ impl ChatSession {
             runner_lease: None,
             runner_message_digest: None,
             native_commands_in_flight: Default::default(),
+            commands_taken: 0,
+            turn_origin: None,
             derived_privacy_zones: crate::privacy::records::new_derived_privacy_zones(),
             recovery_budget: None,
             recovery_policy_source: refact_core::recovery::RecoveryPolicySource::Global,
@@ -2120,6 +2125,11 @@ impl ChatSession {
     }
 
     pub fn is_idle_for_cleanup(&self) -> bool {
+        self.is_idle_to_close() && self.last_activity.elapsed() > session_idle_timeout()
+    }
+
+    /// What the idle cleanup requires of a chat besides its inactivity timeout.
+    pub fn is_idle_to_close(&self) -> bool {
         let is_idle_like = matches!(
             self.runtime.state,
             SessionState::Idle | SessionState::Completed | SessionState::WaitingUserInput
@@ -2129,7 +2139,6 @@ impl ChatSession {
             && self.native_commands_in_flight.load(Ordering::SeqCst) == 0
             && !self.is_pending_wake_up()
             && self.command_queue.is_empty()
-            && self.last_activity.elapsed() > session_idle_timeout()
     }
 
     pub fn is_runner_owned_subagent_view(&self) -> bool {
@@ -2924,45 +2933,11 @@ impl ChatSession {
         tool_call_id: Option<&str>,
     ) -> Option<(usize, Vec<String>)> {
         let start = self.mutable_message_start()?;
-        self.messages
-            .iter()
-            .enumerate()
-            .skip(start)
-            .rev()
-            .find_map(|(idx, message)| {
-                if message.role != "assistant" {
-                    return None;
-                }
-                let tool_calls = message.tool_calls.as_ref()?;
-                if tool_calls.is_empty() {
-                    None
-                } else if tool_call_id.map_or(true, |id| tool_calls.iter().any(|tc| tc.id == id)) {
-                    Some((idx, tool_calls.iter().map(|tc| tc.id.clone()).collect()))
-                } else {
-                    None
-                }
-            })
+        history_patch::latest_tool_call_window(&self.messages, start, tool_call_id)
     }
 
     fn result_ids_after_assistant(&self, assistant_index: usize) -> HashSet<String> {
-        let mut result_ids = HashSet::new();
-        for message in self.messages.iter().skip(assistant_index + 1) {
-            match message.role.as_str() {
-                "tool" | "diff" if !message.tool_call_id.is_empty() => {
-                    result_ids.insert(message.tool_call_id.clone());
-                }
-                role if role == "assistant"
-                    || role == "user"
-                    || role == crate::chat::internal_roles::EVENT_ROLE
-                    || role == crate::chat::internal_roles::PLAN_ROLE
-                    || role == crate::chat::internal_roles::GOAL_ROLE =>
-                {
-                    break;
-                }
-                _ => {}
-            }
-        }
-        result_ids
+        history_patch::tool_results_after(&self.messages, assistant_index)
     }
 
     fn answered_tool_call_ids_for_interruption(&self, assistant_index: usize) -> HashSet<String> {
@@ -2992,11 +2967,8 @@ impl ChatSession {
     }
 
     pub(super) fn has_pending_tool_result_window(&self) -> bool {
-        self.latest_assistant_tool_call_window(None)
-            .map(|(assistant_index, tool_call_ids)| {
-                !self.all_tool_call_ids_have_results_after(assistant_index, &tool_call_ids)
-            })
-            .unwrap_or(false)
+        self.mutable_message_start()
+            .is_some_and(|start| history_patch::pending_tool_result_window(&self.messages, start))
     }
 
     fn tool_result_window_closed_for_tool_call(&self, tool_call_id: &str) -> bool {
@@ -3489,7 +3461,7 @@ impl ChatSession {
         DeliveryOutcome::Sealed
     }
 
-    fn record_dropped_delivery(&mut self, id: String, status: DeliveryStatus) {
+    pub(crate) fn record_dropped_delivery(&mut self, id: String, status: DeliveryStatus) {
         self.dropped_deliveries.retain(|known| known.id != id);
         self.dropped_deliveries.push_back(DeliveryStatusRecord {
             id,

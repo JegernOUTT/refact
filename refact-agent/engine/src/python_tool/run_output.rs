@@ -39,13 +39,23 @@ pub fn merge_taint(message: &mut ChatMessage, values: &[Value]) -> Result<(), St
     Ok(())
 }
 
+/// Labels every spelling of each recorded path (its canonical path and registered aliases), so
+/// a fresh session finds an artifact's label however a script names the file.
 pub async fn restore_ledger(
     workspace: &Path,
     gcx: &std::sync::Arc<crate::global_context::GlobalContext>,
     zones: &records::DerivedPrivacyZones,
 ) -> Result<(), String> {
     let entries = read_ledger(workspace).await?.unwrap_or_default();
-    records::merge_derived_zones(gcx, zones, entries)
+    let mappings =
+        crate::files_correction::registered_worktree_path_mappings(gcx.cache_dir.as_path());
+    let mut spellings = Vec::with_capacity(entries.len());
+    for (path, zone) in entries {
+        for spelling in records::record_path_candidates(gcx, &path, &mappings) {
+            spellings.push((spelling, zone.clone()));
+        }
+    }
+    records::merge_derived_zones(gcx, zones, spellings)
 }
 
 async fn read_ledger(
@@ -301,8 +311,9 @@ mod native_artifacts_tests {
                 "restricted"
             );
             if directory {
+                let moved = moved_source(&gcx, &source, &destination).await.unwrap();
                 tokio::fs::rename(&source, &destination).await.unwrap();
-                reconcile_native_artifact_move(&gcx, Some(&source), &destination)
+                reconcile_native_artifact_move(&gcx, Some(&moved), &destination)
                     .await
                     .unwrap();
             } else {
@@ -362,6 +373,74 @@ mod native_artifacts_tests {
     #[tokio::test]
     async fn native_move_carries_source_derived_zone_to_destination() {
         let temp = tempfile::tempdir().unwrap();
+        move_carries_source_derived_zone(temp.path()).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn native_move_under_a_linked_parent_carries_source_derived_zone() {
+        let temp = tempfile::tempdir().unwrap();
+        tokio::fs::create_dir(temp.path().join("private"))
+            .await
+            .unwrap();
+        std::os::unix::fs::symlink(temp.path().join("private"), temp.path().join("var")).unwrap();
+        move_carries_source_derived_zone(&temp.path().join("var")).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn native_move_through_a_lexical_alias_carries_a_label_kept_under_the_canonical_path() {
+        let temp = tempfile::tempdir().unwrap();
+        tokio::fs::create_dir(temp.path().join("private"))
+            .await
+            .unwrap();
+        std::os::unix::fs::symlink(temp.path().join("private"), temp.path().join("alias")).unwrap();
+        let base = temp.path().join("alias");
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
+        let session = crate::chat::types::ChatSession::new("canonical-actor".into());
+        let zones = session.derived_privacy_zones.clone();
+        app.chat.sessions.write().await.insert(
+            "canonical-actor".into(),
+            std::sync::Arc::new(tokio::sync::Mutex::new(session)),
+        );
+        let source = base.join("source");
+        let workspace = base.join("trajectories/python/native");
+        let destination = workspace.join("artifacts/moved");
+        tokio::fs::create_dir_all(destination.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(&source, "sensitive").await.unwrap();
+        let canonical = std::fs::canonicalize(&source).unwrap();
+        assert_ne!(canonical, source);
+        zones.write().unwrap().insert(
+            canonical,
+            records::DerivedZone {
+                zone: "blocked".into(),
+                origin: Some("original".into()),
+            },
+        );
+        crate::file_activity::TOOL_ACTOR
+            .scope("canonical-actor".into(), async {
+                crate::tools::file_edit::move_file::move_file(
+                    gcx.clone(),
+                    Some("canonical-actor"),
+                    &source,
+                    &destination,
+                    false,
+                )
+                .await
+                .unwrap();
+            })
+            .await;
+        let entries = read_ledger(&workspace).await.unwrap().unwrap();
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        assert_eq!(entries[0].0, destination);
+        assert_eq!(entries[0].1.zone, "blocked");
+        assert_eq!(entries[0].1.origin.as_deref(), Some("original"));
+    }
+
+    async fn move_carries_source_derived_zone(base: &Path) {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
         let session = crate::chat::types::ChatSession::new("move-actor".into());
@@ -370,8 +449,8 @@ mod native_artifacts_tests {
             "move-actor".into(),
             std::sync::Arc::new(tokio::sync::Mutex::new(session)),
         );
-        let source = temp.path().join("source");
-        let workspace = temp.path().join("trajectories/python/native");
+        let source = base.join("source");
+        let workspace = base.join("trajectories/python/native");
         let destination = workspace.join("artifacts/moved");
         tokio::fs::create_dir_all(destination.parent().unwrap())
             .await
@@ -403,6 +482,16 @@ mod native_artifacts_tests {
         assert_eq!(entries[0].0, destination);
         assert_eq!(entries[0].1.zone, "blocked");
         assert_eq!(entries[0].1.origin.as_deref(), Some("original"));
+        let fresh = records::new_derived_privacy_zones();
+        restore_ledger(&workspace, &gcx, &fresh).await.unwrap();
+        let canonical = std::fs::canonicalize(&destination).unwrap();
+        for spelling in [&destination, &canonical] {
+            assert_eq!(
+                records::derived_zone_for_path(&gcx, spelling, &fresh).map(|zone| zone.zone),
+                Some("blocked".to_string()),
+                "{spelling:?}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -537,18 +626,89 @@ pub(crate) async fn reconcile_native_artifact_write(
     reconcile_native_artifact_move(gcx, None, path).await
 }
 
-pub(crate) async fn reconcile_native_artifact_move(
-    gcx: &std::sync::Arc<crate::global_context::GlobalContext>,
-    source: Option<&Path>,
-    path: &Path,
-) -> Result<(), String> {
-    let Some(artifacts) = path.ancestors().find(|p| {
+fn artifacts_root(path: &Path) -> Option<&Path> {
+    path.ancestors().find(|p| {
         p.file_name().is_some_and(|n| n == "artifacts")
             && p.parent()
                 .and_then(Path::parent)
                 .is_some_and(|p| p.file_name().is_some_and(|n| n == "python"))
             && super::workspace::is_python_workspace_path(p)
-    }) else {
+    })
+}
+
+async fn actor_zones(
+    gcx: &std::sync::Arc<crate::global_context::GlobalContext>,
+) -> records::DerivedPrivacyZones {
+    let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
+    let session = match crate::file_activity::current_actor() {
+        Some(actor) => app.chat.sessions.read().await.get(&actor).cloned(),
+        None => None,
+    };
+    match session {
+        Some(session) => session.lock().await.derived_privacy_zones.clone(),
+        None => records::new_derived_privacy_zones(),
+    }
+}
+
+/// A native move's source as it was before the rename: for each file below it (an empty path
+/// for a file) the derived zones and the classification found under its given and its
+/// canonical spelling, which the rename makes unreachable.
+pub(crate) struct MovedSource {
+    path: PathBuf,
+    files: Vec<(
+        PathBuf,
+        Vec<records::DerivedZone>,
+        Vec<refact_privacy::FileRecord>,
+    )>,
+}
+
+/// Reads the source's labels before a native move renames it; only a move into a Python
+/// artifacts folder needs them.
+pub(crate) async fn moved_source(
+    gcx: &std::sync::Arc<crate::global_context::GlobalContext>,
+    source: &Path,
+    destination: &Path,
+) -> Result<MovedSource, String> {
+    let mut moved = MovedSource {
+        path: source.to_path_buf(),
+        files: vec![],
+    };
+    if artifacts_root(destination).is_none() {
+        return Ok(moved);
+    }
+    let files = match tokio::fs::symlink_metadata(source).await {
+        Ok(meta) if meta.is_dir() => bounded_files_if_complete(source)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default(),
+        Ok(_) => vec![source.to_path_buf()],
+        Err(_) => vec![],
+    };
+    let zones = actor_zones(gcx).await;
+    for file in files {
+        let relative = file
+            .strip_prefix(source)
+            .map_err(|e| e.to_string())?
+            .to_path_buf();
+        let mut spellings = vec![file.clone()];
+        spellings.extend(tokio::fs::canonicalize(&file).await.ok());
+        let derived = spellings
+            .iter()
+            .filter_map(|spelling| records::derived_zone_for_path(gcx, spelling, &zones))
+            .collect();
+        let reads = records::observed_file_records_with_derived(gcx, spellings, &zones)?;
+        moved.files.push((relative, derived, reads));
+    }
+    Ok(moved)
+}
+
+pub(crate) async fn reconcile_native_artifact_move(
+    gcx: &std::sync::Arc<crate::global_context::GlobalContext>,
+    source: Option<&MovedSource>,
+    path: &Path,
+) -> Result<(), String> {
+    let Some(artifacts) = artifacts_root(path) else {
         return Ok(());
     };
     let chat_id = artifacts
@@ -575,15 +735,7 @@ pub(crate) async fn reconcile_native_artifact_move(
     } else {
         vec![path.to_path_buf()]
     };
-    let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
-    let session = match crate::file_activity::current_actor() {
-        Some(actor) => app.chat.sessions.read().await.get(&actor).cloned(),
-        None => None,
-    };
-    let zones = match session {
-        Some(session) => session.lock().await.derived_privacy_zones.clone(),
-        None => records::new_derived_privacy_zones(),
-    };
+    let zones = actor_zones(gcx).await;
     let _guard = LEDGER_WRITE
         .get_or_init(|| tokio::sync::Mutex::new(()))
         .lock()
@@ -630,16 +782,35 @@ pub(crate) async fn reconcile_native_artifact_move(
     }
     if let Some(source) = source {
         let policy = gcx.privacy_policy_load.read().unwrap().policy.clone();
+        let mappings =
+            crate::files_correction::registered_worktree_path_mappings(gcx.cache_dir.as_path());
         for destination in &paths {
-            let original = if destination == path {
-                source.to_path_buf()
-            } else {
-                source.join(destination.strip_prefix(path).map_err(|e| e.to_string())?)
+            let relative = destination.strip_prefix(path).map_err(|e| e.to_string())?;
+            let (derived, reads) = match source.files.iter().find(|(r, _, _)| r == relative) {
+                Some((_, derived, reads)) => (derived.clone(), reads.clone()),
+                None => {
+                    let original = if relative.as_os_str().is_empty() {
+                        source.path.clone()
+                    } else {
+                        source.path.join(relative)
+                    };
+                    (
+                        records::derived_zone_for_path(gcx, &original, &zones)
+                            .into_iter()
+                            .collect(),
+                        records::observed_file_records_with_derived(gcx, [original], &zones)?,
+                    )
+                }
             };
-            if let Some(zone) = records::derived_zone_for_path(gcx, &original, &zones) {
-                records::merge_derived_zones(gcx, &zones, [(destination.clone(), zone)])?;
+            for zone in derived {
+                records::merge_derived_zones(
+                    gcx,
+                    &zones,
+                    records::record_path_candidates(gcx, destination, &mappings)
+                        .into_iter()
+                        .map(|spelling| (spelling, zone.clone())),
+                )?;
             }
-            let reads = records::observed_file_records_with_derived(gcx, [original], &zones)?;
             records::inherit_observed_write_zones(
                 gcx,
                 &policy,
@@ -721,7 +892,9 @@ pub async fn written_files_budget(
                 chunk.file_name_rename = Some(dst.clone());
                 chunk.file_action = "rename".into();
             }
-            if chunks.is_empty() && text(Path::new(dst)).await.is_some() {
+            if chunks.is_empty()
+                && (entry_only(Path::new(dst)).await || text(Path::new(dst)).await.is_some())
+            {
                 chunks.push(DiffChunk {
                     file_name: path.clone(),
                     file_name_rename: Some(dst.clone()),
@@ -748,11 +921,33 @@ pub async fn written_files_budget(
     }
     Ok(files)
 }
+/// An entry that is there but is not a regular file: a link or a folder changes as an entry,
+/// and nothing behind it is read.
+async fn entry_only(path: &Path) -> bool {
+    tokio::fs::symlink_metadata(path)
+        .await
+        .is_ok_and(|meta| !meta.is_file())
+}
+/// The text of a regular file of at most 2 MiB; a link is never followed.
 async fn text(path: &Path) -> Option<String> {
-    if tokio::fs::metadata(path).await.ok()?.len() > 2 * 1024 * 1024 {
+    use tokio::io::AsyncReadExt;
+    let meta = tokio::fs::symlink_metadata(path).await.ok()?;
+    if !meta.is_file() || meta.len() > 2 * 1024 * 1024 {
         return None;
     }
-    let bytes = tokio::fs::read(path).await.ok()?;
+    let mut options = tokio::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    options.custom_flags(libc::O_NOFOLLOW);
+    let mut bytes = Vec::new();
+    options
+        .open(path)
+        .await
+        .ok()?
+        .take(2 * 1024 * 1024 + 1)
+        .read_to_end(&mut bytes)
+        .await
+        .ok()?;
     if bytes.len() > 2 * 1024 * 1024 || bytes.contains(&0) {
         return None;
     }
@@ -770,13 +965,13 @@ async fn captured_diff(path: &str, original: Option<&WriteOriginal>) -> Vec<Diff
         },
         _ => return vec![],
     };
-    let after = if path.exists() {
-        match text(path).await {
-            Some(s) => s,
+    let after = match tokio::fs::symlink_metadata(path).await {
+        Ok(meta) if meta.is_file() => match text(path).await {
+            Some(s) => Some(s),
             None => return vec![],
-        }
-    } else {
-        String::new()
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        _ => return vec![],
     };
     if matches!(original, Some(WriteOriginal::Missing)) {
         return vec![DiffChunk {
@@ -784,11 +979,11 @@ async fn captured_diff(path: &str, original: Option<&WriteOriginal>) -> Vec<Diff
             file_action: "add".into(),
             line1: 1,
             line2: 1,
-            lines_add: after,
+            lines_add: after.unwrap_or_default(),
             ..Default::default()
         }];
     }
-    if !path.exists() {
+    let Some(after) = after else {
         return vec![DiffChunk {
             file_name: path.to_string_lossy().into_owned(),
             file_action: "remove".into(),
@@ -797,7 +992,7 @@ async fn captured_diff(path: &str, original: Option<&WriteOriginal>) -> Vec<Diff
             lines_remove: before,
             ..Default::default()
         }];
-    }
+    };
     crate::tools::file_edit::auxiliary::convert_edit_to_diffchunks(
         path.to_path_buf(),
         &before,
@@ -1253,6 +1448,53 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("run directory"));
+    }
+}
+
+#[cfg(all(test, unix))]
+mod link_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_renamed_or_written_link_is_an_entry_change_and_its_target_is_never_read() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = temp.path().join("secret.txt");
+        std::fs::write(&secret, "SECRET CONTENT\n").unwrap();
+        let original = temp.path().join("original");
+        std::fs::write(&original, "before\n").unwrap();
+        let src = temp.path().join("src").to_string_lossy().into_owned();
+        let dst = temp.path().join("dst");
+        let created = temp.path().join("created");
+        for link in [&dst, &created] {
+            std::os::unix::fs::symlink(&secret, link).unwrap();
+        }
+        let dst = dst.to_string_lossy().into_owned();
+        let created = created.to_string_lossy().into_owned();
+        let writes = BTreeMap::from([(src.clone(), 1), (created.clone(), 0)]);
+        let captures = BTreeMap::from([
+            (
+                src.clone(),
+                WriteOriginal::File {
+                    capture_path: original.to_string_lossy().into_owned(),
+                },
+            ),
+            (created.clone(), WriteOriginal::Missing),
+        ]);
+        let renames = BTreeMap::from([(src.clone(), dst.clone())]);
+        let files = written_files(&writes, &captures, &renames, temp.path())
+            .await
+            .unwrap();
+        let text = serde_json::to_string(&files).unwrap();
+        assert!(!text.contains("SECRET"), "{text}");
+        let renamed = files.iter().find(|f| f["path"] == src.as_str()).unwrap();
+        assert_eq!(renamed["diffs"].as_array().unwrap().len(), 1, "{text}");
+        assert_eq!(renamed["diffs"][0]["file_action"], "rename");
+        assert_eq!(renamed["diffs"][0]["file_name_rename"], dst.as_str());
+        let written = files
+            .iter()
+            .find(|f| f["path"] == created.as_str())
+            .unwrap();
+        assert_eq!(written["diffs"], json!([]), "{text}");
     }
 }
 

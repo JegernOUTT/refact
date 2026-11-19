@@ -21,6 +21,7 @@ use crate::llm::params::CacheControl;
 use crate::scratchpad_abstract::HasTokenizerAndEot;
 use crate::scratchpads::scratchpad_utils::HasRagResults;
 use refact_chat_api::FrozenRequestPrefix;
+use refact_chat_history::history_patch::tool_prerun_calls;
 use refact_chat_history::trajectory_ops::COMPRESSION_REPORT_ROLE;
 use refact_tool_api::{build_registry_from_names, ToolAliasRegistry, ToolDesc};
 use super::tools::execute_tools;
@@ -540,49 +541,22 @@ pub async fn prepare_chat_passthrough(
     //   - The tool calls have not been answered yet (no subsequent tool result messages)
     // This prevents executing tools from injected/external assistant messages.
     if options.supports_tools && options.allow_tool_prerun {
-        if let Some(last_msg) = messages.last() {
-            if last_msg.role == "assistant" {
-                if let Some(ref tool_calls) = last_msg.tool_calls {
-                    // Verify these tool calls are pending (no tool results exist for them)
-                    let pending_call_ids: HashSet<String> =
-                        tool_calls.iter().map(|tc| tc.id.clone()).collect();
-                    let answered_call_ids: HashSet<String> = messages
-                        .iter()
-                        .filter(|m| m.role == "tool" || m.role == "diff")
-                        .map(|m| m.tool_call_id.clone())
-                        .collect();
-                    let unanswered_calls: Vec<_> = tool_calls
-                        .iter()
-                        .filter(|tc| !answered_call_ids.contains(&tc.id))
-                        .filter(|tc| tool_names.contains(&tc.function.name))
-                        .cloned()
-                        .collect();
-
-                    if !unanswered_calls.is_empty()
-                        && pending_call_ids.len()
-                            == unanswered_calls.len()
-                                + answered_call_ids
-                                    .iter()
-                                    .filter(|id| pending_call_ids.contains(*id))
-                                    .count()
-                    {
-                        let mut prerun_thread = thread.clone();
-                        prerun_thread.context_tokens_cap = Some(effective_n_ctx);
-                        prerun_thread.model = model_id.to_string();
-                        let (tool_results, _) = execute_tools(
-                            app.clone(),
-                            &unanswered_calls,
-                            &messages,
-                            &prerun_thread,
-                            "agent",
-                            Some(&prerun_thread.model),
-                            super::tools::ExecuteToolsOptions::default(),
-                        )
-                        .await;
-                        messages.extend(tool_results);
-                    }
-                }
-            }
+        let unanswered_calls = tool_prerun_calls(&messages, |name| tool_names.contains(name));
+        if !unanswered_calls.is_empty() {
+            let mut prerun_thread = thread.clone();
+            prerun_thread.context_tokens_cap = Some(effective_n_ctx);
+            prerun_thread.model = model_id.to_string();
+            let (tool_results, _) = execute_tools(
+                app.clone(),
+                &unanswered_calls,
+                &messages,
+                &prerun_thread,
+                "agent",
+                Some(&prerun_thread.model),
+                super::tools::ExecuteToolsOptions::default(),
+            )
+            .await;
+            messages.extend(tool_results);
         }
     }
 

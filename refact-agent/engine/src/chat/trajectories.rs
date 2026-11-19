@@ -889,13 +889,21 @@ pub(super) fn retain_in_snapshot(message: &ChatMessage) -> bool {
 }
 
 pub(crate) fn trajectory_snapshot_from_session(session: &ChatSession) -> TrajectorySnapshot {
+    trajectory_snapshot_with(session, &session.thread, &session.messages)
+}
+
+/// The snapshot `session` would save with `thread` and `messages` in place of its own.
+pub(crate) fn trajectory_snapshot_with(
+    session: &ChatSession,
+    thread: &ThreadParams,
+    messages: &[ChatMessage],
+) -> TrajectorySnapshot {
     let span = perf_diagnostics::span(
         PerfComponent::TrajectorySnapshot,
         Some(&session.chat_id),
         None,
     );
-    let messages = session
-        .messages
+    let messages = messages
         .iter()
         .filter(|message| retain_in_snapshot(message))
         .cloned()
@@ -903,7 +911,7 @@ pub(crate) fn trajectory_snapshot_from_session(session: &ChatSession) -> Traject
 
     let mut snapshot = TrajectorySnapshot::from_thread_parts(
         session.chat_id.clone(),
-        &session.thread,
+        thread,
         messages,
         session.created_at.clone(),
         session.trajectory_version,
@@ -2188,6 +2196,38 @@ async fn trajectory_candidate_paths(gcx: Arc<GlobalContext>, chat_id: &str) -> V
     let mut candidates = normal_trajectory_candidate_paths(gcx.clone(), chat_id).await;
     candidates.extend(task_trajectory_candidate_paths(gcx, chat_id).await);
     candidates
+}
+
+/// How many saved files hold this chat (normal, task and chat-folder copies); two or more make
+/// the chat ambiguous to delete.
+/// The size of the largest file that could hold `chat_id`, from file metadata only, so that an
+/// oversized chat can be refused before any copy of it is read and parsed.
+pub(crate) async fn largest_trajectory_candidate(gcx: Arc<GlobalContext>, chat_id: &str) -> u64 {
+    let mut paths = trajectory_candidate_paths(gcx.clone(), chat_id).await;
+    paths.extend(nested_chat_folder_candidate_paths(gcx, chat_id).await);
+    let mut largest = 0;
+    for path in paths {
+        if let Ok(metadata) = fs::metadata(&path).await {
+            largest = largest.max(metadata.len());
+        }
+    }
+    largest
+}
+
+pub(crate) async fn trajectory_copy_count(gcx: Arc<GlobalContext>, chat_id: &str) -> usize {
+    let mut paths = trajectory_candidate_paths(gcx.clone(), chat_id).await;
+    paths.extend(nested_chat_folder_candidate_paths(gcx, chat_id).await);
+    let mut files: Vec<PathBuf> = Vec::new();
+    for path in paths {
+        if !is_real_file(&path).await {
+            continue;
+        }
+        let path = fs::canonicalize(&path).await.unwrap_or(path);
+        if !files.contains(&path) {
+            files.push(path);
+        }
+    }
+    files.len()
 }
 
 async fn nested_chat_folder_candidate_paths(
@@ -4609,6 +4649,55 @@ async fn trajectory_stamp_matches(path: &Path, expected: &TrajectoryFileStamp) -
     trajectory_file_stamp(path).await.as_ref() == Some(expected)
 }
 
+/// A chat's backing file as an engine change saw it. `save_snapshot_if_unchanged` publishes only
+/// over exactly that file; several engines on one project folder are coordinated only by this.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct TrajectoryDiskPin {
+    path: Option<PathBuf>,
+    stamp: Option<TrajectoryFileStamp>,
+}
+
+impl TrajectoryDiskPin {
+    /// Plain text for plan states: the path and the file's size, time and identity.
+    pub(crate) fn fingerprint(&self) -> String {
+        let mut text = self
+            .path
+            .as_ref()
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if let Some(stamp) = &self.stamp {
+            text.push_str(&format!("|{}|{}", stamp.len, stamp.modified_unix_nanos));
+            #[cfg(unix)]
+            text.push_str(&format!("|{}|{}", stamp.device, stamp.inode));
+            #[cfg(not(unix))]
+            text.push_str(&format!("|{:?}", stamp.content_hash));
+        }
+        text
+    }
+}
+
+impl TrajectoryDiskPin {
+    /// The same file as it is on disk now.
+    pub(crate) async fn refreshed(&self) -> TrajectoryDiskPin {
+        trajectory_disk_pin_at(self.path.clone()).await
+    }
+
+    pub(crate) fn path(&self) -> Option<&Path> {
+        self.path.as_deref()
+    }
+}
+
+pub(crate) async fn trajectory_disk_pin_at(path: Option<PathBuf>) -> TrajectoryDiskPin {
+    let stamp = match &path {
+        Some(path) => trajectory_file_stamp(path).await,
+        None => None,
+    };
+    TrajectoryDiskPin {
+        path,
+        stamp,
+    }
+}
+
 async fn cached_existing_trajectory_object(
     path: &Path,
     chat_id: &str,
@@ -5143,7 +5232,7 @@ fn test_message_serialization_should_fail(message: &ChatMessage) -> bool {
 }
 
 #[cfg(test)]
-fn set_test_message_serialization_failure(message_id: Option<String>) {
+pub(crate) fn set_test_message_serialization_failure(message_id: Option<String>) {
     *TEST_MESSAGE_SERIALIZATION_FAILURE_ID
         .get_or_init(|| std::sync::Mutex::new(None))
         .lock()
@@ -5430,12 +5519,43 @@ async fn serialize_trajectory_snapshot_messages(
 }
 
 #[cfg(test)]
-fn test_snapshot_prepared_hooks(
+pub(crate) fn test_snapshot_prepared_hooks(
 ) -> &'static StdMutex<std::collections::HashMap<PathBuf, (Arc<Notify>, Arc<Notify>)>> {
     static HOOKS: OnceLock<
         StdMutex<std::collections::HashMap<PathBuf, (Arc<Notify>, Arc<Notify>)>>,
     > = OnceLock::new();
     HOOKS.get_or_init(|| StdMutex::new(std::collections::HashMap::new()))
+}
+
+/// Barriers of a checked delete right after it deleted the chat's Python workspace, by chat id:
+/// `(deleted, release)`.
+#[cfg(test)]
+pub(crate) fn test_workspace_deleted_hooks(
+) -> &'static StdMutex<std::collections::HashMap<String, (Arc<Notify>, Arc<Notify>)>> {
+    static HOOKS: OnceLock<
+        StdMutex<std::collections::HashMap<String, (Arc<Notify>, Arc<Notify>)>>,
+    > = OnceLock::new();
+    HOOKS.get_or_init(|| StdMutex::new(std::collections::HashMap::new()))
+}
+
+/// Barriers right after a save renamed a chat's file into place, by chat id:
+/// `(renamed, release)`.
+#[cfg(test)]
+pub(crate) fn test_rename_hooks(
+) -> &'static StdMutex<std::collections::HashMap<String, (Arc<Notify>, Arc<Notify>)>> {
+    static HOOKS: OnceLock<
+        StdMutex<std::collections::HashMap<String, (Arc<Notify>, Arc<Notify>)>>,
+    > = OnceLock::new();
+    HOOKS.get_or_init(|| StdMutex::new(std::collections::HashMap::new()))
+}
+
+#[cfg(test)]
+async fn wait_for_test_rename(chat_id: &str) {
+    let hook = test_rename_hooks().lock().unwrap().remove(chat_id);
+    if let Some((renamed, release)) = hook {
+        renamed.notify_one();
+        release.notified().await;
+    }
 }
 
 #[cfg(test)]
@@ -5456,6 +5576,7 @@ async fn persist_trajectory_snapshot_file(
     trajectory: serde_json::Value,
     message_count: usize,
     serialize_span: perf_diagnostics::PerfSpan,
+    expected: Option<&TrajectoryDiskPin>,
 ) -> Result<(PathBuf, String, serde_json::Value, [u8; 32]), String> {
     let mut first_span = Some(serialize_span);
     for _ in 0..4 {
@@ -5475,10 +5596,15 @@ async fn persist_trajectory_snapshot_file(
             trajectory.clone(),
             message_count,
             span,
+            expected,
         )
         .await?
         {
             SnapshotPersistAttempt::Saved(saved) => return Ok(saved),
+            SnapshotPersistAttempt::Conflict if expected.is_some() => return Err(
+                "the chat's file changed on disk since the change was planned; nothing was saved"
+                    .into(),
+            ),
             SnapshotPersistAttempt::Conflict => continue,
         }
     }
@@ -5499,6 +5625,7 @@ async fn persist_trajectory_snapshot_file_coordinated(
     mut trajectory: serde_json::Value,
     message_count: usize,
     mut serialize_span: perf_diagnostics::PerfSpan,
+    expected: Option<&TrajectoryDiskPin>,
 ) -> Result<SnapshotPersistAttempt, String> {
     snapshot_write_stage("resolve_backing_file");
     let bound_task = crate::tasks::storage::bound_task_matches(
@@ -5566,6 +5693,18 @@ async fn persist_trajectory_snapshot_file_coordinated(
         }
     };
     let observed_stamp = trajectory_file_stamp(&file_path).await;
+    if expected.is_some_and(|pin| {
+        pin.stamp != observed_stamp || pin.path.as_ref().is_some_and(|path| *path != file_path)
+    }) {
+        serialize_span.finish(
+            PerfOutcome::Failure,
+            None,
+            Some(message_count as u64),
+            Some(snapshot.version),
+            None,
+        );
+        return Ok(SnapshotPersistAttempt::Conflict);
+    }
     let existing_trajectory = match cached_path_and_metadata.and_then(|(_, metadata, stamp)| {
         (Some(&stamp) == observed_stamp.as_ref()).then_some(metadata)
     }) {
@@ -5724,6 +5863,8 @@ async fn persist_trajectory_snapshot_file_coordinated(
     };
     #[cfg(test)]
     record_trajectory_physical_write(&snapshot.chat_id);
+    #[cfg(test)]
+    wait_for_test_rename(&snapshot.chat_id).await;
 
     let backing_stamp = cache_written_trajectory_metadata(
         &file_path,
@@ -5963,6 +6104,57 @@ pub(crate) async fn save_tool_refresh_snapshot(
     save_trajectory_snapshot_inner_options(gcx, snapshot, None, false).await
 }
 
+/// Saves `snapshot` only over the file `pin` saw: when another writer changed that file since,
+/// nothing is written and the save fails instead of publishing over the newer file. The index
+/// entry and the chat events are not part of this commit; the caller publishes them afterwards.
+pub(crate) async fn save_snapshot_if_unchanged(
+    gcx: Arc<GlobalContext>,
+    snapshot: TrajectorySnapshot,
+    pin: &TrajectoryDiskPin,
+) -> Result<SnapshotPublication, String> {
+    persist_trajectory_snapshot(gcx, snapshot, None, false, Some(pin))
+        .await?
+        .ok_or_else(|| "there was nothing to save".to_string())
+}
+
+/// What a saved snapshot still has to publish: its index entry and its chat events.
+pub(crate) struct SnapshotPublication {
+    gcx: Arc<GlobalContext>,
+    app: AppState,
+    snapshot: TrajectorySnapshot,
+    source: TrajectorySourceIdentity,
+    file_path: PathBuf,
+    trajectory: serde_json::Value,
+    source_sha256: [u8; 32],
+    message_count: usize,
+    metrics: Option<TrajectoryMetrics>,
+    background_messages_json: Option<Vec<serde_json::Value>>,
+    updated_at: String,
+    should_generate_title: bool,
+    allow_background_generation: bool,
+}
+
+impl SnapshotPublication {
+    pub(crate) async fn publish(self) -> Result<(), String> {
+        publish_trajectory_snapshot_updates(
+            self.gcx,
+            &self.app,
+            &self.snapshot,
+            &self.source,
+            &self.file_path,
+            self.trajectory,
+            self.source_sha256,
+            self.message_count,
+            self.metrics,
+            self.background_messages_json,
+            self.updated_at,
+            self.should_generate_title,
+            self.allow_background_generation,
+        )
+        .await
+    }
+}
+
 fn trajectory_save_projects_index_entry(snapshot: &TrajectorySnapshot) -> bool {
     !is_internal_trace_link_type(snapshot.link_type.as_deref())
 }
@@ -5978,10 +6170,33 @@ fn trajectory_save_needs_metrics(snapshot: &TrajectorySnapshot) -> bool {
 
 async fn save_trajectory_snapshot_inner_options(
     gcx: Arc<GlobalContext>,
-    mut snapshot: TrajectorySnapshot,
+    snapshot: TrajectorySnapshot,
     write_cache: Option<Arc<AMutex<DetachedTrajectoryWriteCache>>>,
     allow_background_generation: bool,
 ) -> Result<(), String> {
+    match persist_trajectory_snapshot(
+        gcx,
+        snapshot,
+        write_cache,
+        allow_background_generation,
+        None,
+    )
+    .await?
+    {
+        Some(publication) => publication.publish().await,
+        None => Ok(()),
+    }
+}
+
+/// Writes the snapshot's file; `None` when there is nothing to save. The index entry and the
+/// chat events are left to the returned publication.
+async fn persist_trajectory_snapshot(
+    gcx: Arc<GlobalContext>,
+    mut snapshot: TrajectorySnapshot,
+    write_cache: Option<Arc<AMutex<DetachedTrajectoryWriteCache>>>,
+    allow_background_generation: bool,
+    expected: Option<&TrajectoryDiskPin>,
+) -> Result<Option<SnapshotPublication>, String> {
     validate_trajectory_id(&snapshot.chat_id).map_err(|e| e.message)?;
     let chat_id = snapshot.chat_id.clone();
     snapshot_write_stage("resolve_app");
@@ -6011,7 +6226,7 @@ async fn save_trajectory_snapshot_inner_options(
         && snapshot.title.is_empty()
         && existing_no_meta_path.is_none()
     {
-        return Ok(());
+        return Ok(None);
     }
 
     let message_count = snapshot.messages.len();
@@ -6054,14 +6269,15 @@ async fn save_trajectory_snapshot_inner_options(
         trajectory,
         message_count,
         serialize_span,
+        expected,
     )
     .await?;
-    publish_trajectory_snapshot_updates(
+    Ok(Some(SnapshotPublication {
         gcx,
-        &app,
-        &snapshot,
-        &source,
-        &file_path,
+        app,
+        snapshot,
+        source,
+        file_path,
         trajectory,
         source_sha256,
         message_count,
@@ -6070,8 +6286,7 @@ async fn save_trajectory_snapshot_inner_options(
         updated_at,
         should_generate_title,
         allow_background_generation,
-    )
-    .await
+    }))
 }
 
 pub async fn try_save_trajectory(
@@ -10252,23 +10467,94 @@ pub async fn handle_v1_trajectories_delete(
 /// Deletes a saved trajectory, its Python workspace and its index entry; true when another
 /// copy of the trajectory (for example in a task directory) remains and was announced instead.
 pub(crate) async fn delete_trajectory(app: &AppState, id: &str) -> Result<bool, ScratchError> {
+    delete_trajectory_checked(app, id, None)
+        .await
+        .map_err(|(error, _)| error)
+}
+
+/// `delete_trajectory` bound to the file a delete checked: nothing is deleted unless the file is
+/// still exactly the one `pin` saw, and the file is checked again before it is unlinked. An error
+/// says with its flag whether the Python workspace was already deleted, at least in part.
+pub(crate) async fn delete_trajectory_at(
+    app: &AppState,
+    id: &str,
+    pin: &TrajectoryDiskPin,
+) -> Result<bool, (ScratchError, bool)> {
+    delete_trajectory_checked(app, id, Some(pin)).await
+}
+
+async fn delete_trajectory_checked(
+    app: &AppState,
+    id: &str,
+    pin: Option<&TrajectoryDiskPin>,
+) -> Result<bool, (ScratchError, bool)> {
     let id = id.to_string();
     let gcx = app.gcx.clone();
-    validate_trajectory_id(&id)?;
+    validate_trajectory_id(&id).map_err(|e| (e, false))?;
     let candidate = find_trajectory_file(gcx.clone(), &id)
         .await
         .ok_or_else(|| {
-            ScratchError::new(StatusCode::NOT_FOUND, "Trajectory not found".to_string())
+            (
+                ScratchError::new(StatusCode::NOT_FOUND, "Trajectory not found".to_string()),
+                false,
+            )
         })?;
     let file_path = candidate.path;
+    let unchanged = |path: &Path, pin: &TrajectoryDiskPin| {
+        let path = path.to_path_buf();
+        let pin = pin.clone();
+        async move {
+            pin.path.as_deref() == Some(path.as_path())
+                && trajectory_file_stamp(&path).await == pin.stamp
+        }
+    };
+    if let Some(pin) = pin {
+        if !unchanged(&file_path, pin).await {
+            return Err((
+                ScratchError::new(
+                    StatusCode::CONFLICT,
+                    "its file changed on disk since it was checked; nothing was deleted".into(),
+                ),
+                false,
+            ));
+        }
+    }
     app.python_tool.registry.drop_chat(&id).await;
     crate::python_tool::workspace::delete_for_trajectory(&file_path)
         .await
-        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|e| {
+            let message = match pin {
+                Some(_) => format!("its Python workspace could not be deleted completely ({e}), so it may be partly deleted; the chat's file was kept"),
+                None => e,
+            };
+            (ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, message), pin.is_some())
+        })?;
+    if let Some(pin) = pin {
+        #[cfg(test)]
+        {
+            let hook = test_workspace_deleted_hooks().lock().unwrap().remove(&id);
+            if let Some((deleted, release)) = hook {
+                deleted.notify_one();
+                release.notified().await;
+            }
+        }
+        if !unchanged(&file_path, pin).await {
+            return Err((
+                ScratchError::new(
+                    StatusCode::CONFLICT,
+                    "its Python workspace was deleted, but its file changed on disk meanwhile, so the file was kept".into(),
+                ),
+                true,
+            ));
+        }
+    }
     fs::remove_file(&file_path).await.map_err(|e| {
-        ScratchError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("its Python workspace was deleted, but the trajectory file was not: {e}"),
+        (
+            ScratchError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("its Python workspace was deleted, but the trajectory file was not: {e}"),
+            ),
+            true,
         )
     })?;
     if let Some(dir) = index_dir_for_trajectory_file(gcx.clone(), &file_path).await {
@@ -19309,6 +19595,8 @@ mod tests {
             runner_lease: None,
             runner_message_digest: None,
             native_commands_in_flight: Default::default(),
+            commands_taken: 0,
+            turn_origin: None,
             recovery_budget: None,
             recovery_notify: Arc::new(tokio::sync::Notify::new()),
             recovery_policy_source: refact_core::recovery::RecoveryPolicySource::Global,
@@ -19506,6 +19794,8 @@ mod tests {
             runner_lease: None,
             runner_message_digest: None,
             native_commands_in_flight: Default::default(),
+            commands_taken: 0,
+            turn_origin: None,
             recovery_budget: None,
             recovery_notify: Arc::new(tokio::sync::Notify::new()),
             recovery_policy_source: refact_core::recovery::RecoveryPolicySource::Global,

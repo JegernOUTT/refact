@@ -1292,6 +1292,32 @@ pub fn ls_files_limited(
     Ok(out)
 }
 
+/// Like `ls_files_limited`, recursive, but walks only `path`: the additional indexing
+/// directories are left out.
+pub fn ls_dir_files_limited(
+    indexing_everywhere: &IndexingEverywhere,
+    path: &PathBuf,
+    max_entries: usize,
+    abort: Option<&AtomicBool>,
+) -> Result<LsFilesLimited, String> {
+    if !path.is_dir() {
+        return Err(format!("path '{}' is not a directory", path.display()));
+    }
+    let mut out = LsFilesLimited::default();
+    let mut budget = max_entries;
+    _ls_files_limited(
+        indexing_everywhere,
+        path.as_path(),
+        path,
+        true,
+        true,
+        &mut budget,
+        abort,
+        &mut out,
+    );
+    Ok(out)
+}
+
 pub async fn detect_vcs_for_a_file_path(file_path: &Path) -> Option<(PathBuf, &'static str)> {
     let mut dir = file_path.to_path_buf();
     if dir.is_file() {

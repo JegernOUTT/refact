@@ -15,7 +15,11 @@ import {
   RUN_PERMIT_HINT,
 } from "./PythonApprovalBar";
 import { pythonApproval } from "../../__tests__/pythonFixtures";
-import { engineRequest } from "../ChatContent/ToolCard/engineFixtures";
+import {
+  PATCH_LONG_LINE,
+  chatsPatchRequest,
+  engineRequest,
+} from "../ChatContent/ToolCard/engineFixtures";
 import {
   UNREADABLE_ENGINE_WARNING,
   normalizePythonApprovalRequest,
@@ -715,6 +719,65 @@ describe("PythonApprovalBar", () => {
       expect(container.querySelector("[class*=content]")).not.toContainElement(
         screen.getByRole("button", { name: "Deny" }),
       );
+    });
+    it("keeps a chats.patch request with long multi-line texts readable and its actions outside the scroll area", () => {
+      approvals.list = [chatsPatchRequest];
+      const { container } = render(<PythonApprovalBar chatId="chat" />);
+      const prompt = screen.getByRole("region", {
+        name: "Script approval for engine.chats.patch",
+      });
+      expect(prompt.querySelector("[data-tone=danger]")).toHaveTextContent(
+        "Destructive change. The original messages will be overwritten and cannot be restored.",
+      );
+      const [edit, removed, inserted] = screen.getAllByTestId("engine-item");
+      const diff = within(edit).getByLabelText("Changes to message 2 (user)");
+      expect(diff).toHaveTextContent("Keep the public API unchanged.");
+      expect(diff).toHaveTextContent(
+        "Keep the public API unchanged; deprecate nothing.",
+      );
+      expect(within(diff).getByText(PATCH_LONG_LINE).className).toMatch(
+        /lineContent/,
+      );
+      expect(diff).toHaveTextContent("@@ -2 +2 @@+1−1");
+      expect(diff).toHaveTextContent("@@ -5 +5 @@+1−1");
+      expect(within(removed).getByText("removed")).toBeInTheDocument();
+      expect(within(removed).getByText("Was")).toBeInTheDocument();
+      expect(
+        within(removed).getByRole("button", { name: "Show 6 more lines" }),
+      ).toBeInTheDocument();
+      expect(within(inserted).getByText("not set")).toBeInTheDocument();
+      expect(inserted).toHaveTextContent("Do not touch the CLI.");
+      const content = container.querySelector("[class*=content]");
+      for (const item of [edit, removed, inserted])
+        expect(content).toContainElement(item);
+      for (const name of ["Allow once", "Deny", "Stop script"])
+        expect(content).not.toContainElement(
+          screen.getByRole("button", { name }),
+        );
+      expect(
+        screen.queryByRole("button", { name: /Allow for this/ }),
+      ).toBeNull();
+    });
+    it("shows the first 20 changes of a text pair and the rest on request", () => {
+      const before = Array.from({ length: 60 }, (_, index) => `line ${index}`);
+      const after = before.map((line, index) =>
+        index % 2 === 0 ? `${line} changed` : line,
+      );
+      approvals.list = [
+        engineRequest({
+          title: "change a long message",
+          items: [
+            { label: "message", old: before.join("\n"), new: after.join("\n") },
+          ],
+        }),
+      ];
+      render(<PythonApprovalBar chatId="chat" />);
+      const diff = screen.getByLabelText("Changes to message");
+      expect(diff.querySelectorAll("[class*=diffBlock]")).toHaveLength(20);
+      fireEvent.click(
+        within(diff).getByRole("button", { name: "Show 10 more changes" }),
+      );
+      expect(diff.querySelectorAll("[class*=diffBlock]")).toHaveLength(30);
     });
     it("shows bidi overrides and zero-width characters in labels, titles and values as markers", () => {
       approvals.list = [

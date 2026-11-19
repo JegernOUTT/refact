@@ -101,6 +101,13 @@ pub(super) async fn apply(gcx: Arc<GlobalContext>, plan: &ApplyPatchResult) -> R
             } else {
                 None
             };
+            let moved = match &source {
+                Some(source) => Some(
+                    crate::python_tool::run_output::moved_source(&gcx, source, &result.path)
+                        .await?,
+                ),
+                None => None,
+            };
             if result.action == "delete" {
                 tokio::fs::remove_file(&result.path)
                     .await
@@ -169,7 +176,7 @@ pub(super) async fn apply(gcx: Arc<GlobalContext>, plan: &ApplyPatchResult) -> R
                 Box::pin(
                     crate::python_tool::run_output::reconcile_native_artifact_move(
                         &gcx,
-                        source.as_deref(),
+                        moved.as_ref(),
                         &result.path,
                     ),
                 )

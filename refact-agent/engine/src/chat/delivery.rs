@@ -36,6 +36,13 @@ tokio::task_local! {
     pub(crate) static BEFORE_REPLY_ACCEPT: (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>);
 }
 
+/// Barriers after a delivery to the named chat is stored and before the lock that accepts it:
+/// `(chat id, entered, release)`; each is passed once.
+#[cfg(test)]
+pub(crate) static ACCEPT_GATE: std::sync::Mutex<
+    Vec<(String, Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
+> = std::sync::Mutex::new(Vec::new());
+
 /// Deliver a batch of messages to `chat_id`.
 ///
 /// Restores the target session from its trajectory when needed and rejects
@@ -84,7 +91,7 @@ pub(crate) async fn deliver_to_open_chat_with_receipt(
     if session.lock().await.closed {
         return Err("chat closed".into());
     }
-    deliver_to_chat_internal(app, chat_id, delivery, Some(session)).await
+    deliver_to_chat_internal(app, chat_id, delivery, Some(session), None).await
 }
 
 pub async fn deliver_to_chat_with_receipt(
@@ -92,7 +99,21 @@ pub async fn deliver_to_chat_with_receipt(
     chat_id: &str,
     delivery: PendingDelivery,
 ) -> Result<DeliveryReceipt, String> {
-    deliver_to_chat_internal(app, chat_id, delivery, None).await
+    deliver_to_chat_internal(app, chat_id, delivery, None, None).await
+}
+
+/// What a caller checks under the lock that accepts its delivery; an error refuses it.
+pub(crate) type DeliveryAdmission = dyn Fn(&ChatSession) -> Result<(), String> + Send + Sync;
+
+/// Like [`deliver_to_chat_with_receipt`], but `admit` decides under the session lock that
+/// accepts the delivery; a refused delivery is recorded as failed and never retried.
+pub(crate) async fn deliver_to_chat_admitted(
+    app: AppState,
+    chat_id: &str,
+    delivery: PendingDelivery,
+    admit: &DeliveryAdmission,
+) -> Result<DeliveryReceipt, String> {
+    deliver_to_chat_internal(app, chat_id, delivery, None, Some(admit)).await
 }
 
 async fn deliver_to_chat_internal(
@@ -100,6 +121,7 @@ async fn deliver_to_chat_internal(
     chat_id: &str,
     delivery: PendingDelivery,
     open_session: Option<Arc<AMutex<ChatSession>>>,
+    admit: Option<&DeliveryAdmission>,
 ) -> Result<DeliveryReceipt, String> {
     if delivery.deferred_job.is_some() && open_session.is_none() {
         return Err("deferred tool job delivery requires an already open chat".into());
@@ -121,7 +143,8 @@ async fn deliver_to_chat_internal(
     }
 
     let planner_reply = crate::tools::tool_agent_planner_qna::is_planner_reply_delivery(&delivery);
-    if open_session.is_none()
+    if admit.is_none()
+        && open_session.is_none()
         && !planner_reply
         && (!delivery.wake || !crate::agents::seal::is_sealed(&app, chat_id).await)
     {
@@ -183,6 +206,12 @@ async fn deliver_to_chat_internal(
             .ok_or_else(|| format!("chat '{chat_id}' is unavailable"))?,
     };
 
+    // An admitted delivery is checked once before anything durable exists, so a refusal leaves no
+    // outbox entry that could be replayed; the check under the accepting lock below decides.
+    if let Some(admit) = admit {
+        admit(&*session_arc.lock().await)?;
+    }
+
     // Durability first, and with no session lock held across store I/O. A store
     // this engine cannot use costs the message its durability, not its
     // delivery: the outbox drops out, the loss is reported, and the rest of the
@@ -191,10 +220,34 @@ async fn deliver_to_chat_internal(
     let project = outbox::project_key_for_root(&app, source_root.clone()).await;
     let delivery_id = delivery.id.clone();
     let causal_event = crate::coordination::causal::delivery_event(chat_id, &delivery);
-    let outbox = match outbox::outbox_for(&app, project).await {
-        Some(outbox) if outbox.accept_for_dispatch(chat_id, &delivery).await => Some(outbox),
-        _ => None,
+    let (outbox, outbox_durable) = match outbox::outbox_for(&app, project).await {
+        Some(outbox) if admit.is_some() => {
+            if outbox.accept_for_admission(chat_id, &delivery).await {
+                (Some(outbox), true)
+            } else {
+                (None, false)
+            }
+        }
+        Some(outbox) => match outbox.accept_for_dispatch(chat_id, &delivery).await {
+            Some(dispatched) => (Some(outbox), dispatched),
+            None => (None, false),
+        },
+        None => (None, false),
     };
+    #[cfg(test)]
+    {
+        let gate = {
+            let mut gates = ACCEPT_GATE.lock().unwrap();
+            gates
+                .iter()
+                .position(|(id, _, _)| id == chat_id)
+                .map(|at| gates.remove(at))
+        };
+        if let Some((_, entered, release)) = gate {
+            entered.notify_one();
+            release.notified().await;
+        }
+    }
 
     let sealed = delivery.wake && crate::agents::seal::is_sealed(&app, chat_id).await;
     let enqueue = |session: &mut ChatSession, delivery: PendingDelivery| {
@@ -204,6 +257,8 @@ async fn deliver_to_chat_internal(
             && session.runtime.state != SessionState::Interrupted;
         let accepted = if session.closed {
             Err(format!("chat '{chat_id}' is closed"))
+        } else if let Some(Err(refusal)) = admit.map(|admit| admit(&*session)) {
+            Err(refusal)
         } else if sealed {
             Ok(session.drop_sealed_delivery(delivery.id))
         } else {
@@ -283,6 +338,11 @@ async fn deliver_to_chat_internal(
             return Err(error);
         }
     };
+    if let (Some(outbox), Some(_)) = (outbox.as_ref(), admit) {
+        if let Err(error) = outbox.admitted(&delivery_id).await {
+            tracing::warn!(%delivery_id, %error, "outbox could not record that the delivery was admitted");
+        }
+    }
     // Causality is recorded after the delivery is already accepted, so a
     // recorder that cannot write costs the trace, never the message.
     crate::coordination::causal::record(&app, causal_event).await;
@@ -326,7 +386,7 @@ async fn deliver_to_chat_internal(
         outcome,
         delivery_id,
         trajectory_persistence: persistence,
-        outbox_durable: outbox.is_some(),
+        outbox_durable,
         note: (persistence == TrajectoryPersistence::Pending)
             .then(|| "Persistence pending; do not resend".into()),
     })
@@ -362,6 +422,32 @@ pub async fn update_pending_delivery_in_chat(
         session.update_pending_delivery(delivery_id, push, cancel)?
     };
 
+    if ready {
+        drain_deliveries_at_boundary(app.clone(), session_arc.clone()).await;
+    }
+    try_save_trajectory_with_intent(app, session_arc, TrajectoryCommitIntent::Required).await?;
+    Ok(())
+}
+
+/// Cancels a pending delivery of an open chat under its lock once `admit` passed there; unlike
+/// `update_pending_delivery_in_chat` it never routes to a background runner.
+pub(crate) async fn cancel_pending_delivery_admitted(
+    app: AppState,
+    session_arc: Arc<AMutex<ChatSession>>,
+    delivery_id: &str,
+    admit: &(dyn Fn(&ChatSession, &PendingDelivery) -> Result<(), String> + Send + Sync),
+) -> Result<(), String> {
+    let ready = {
+        let mut session = session_arc.lock().await;
+        let pending = session
+            .pending_deliveries
+            .iter()
+            .find(|pending| pending.id == delivery_id)
+            .cloned()
+            .ok_or_else(|| format!("{delivery_id} is no longer pending; nothing was removed"))?;
+        admit(&session, &pending)?;
+        session.update_pending_delivery(delivery_id, None, true)?
+    };
     if ready {
         drain_deliveries_at_boundary(app.clone(), session_arc.clone()).await;
     }

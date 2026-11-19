@@ -159,6 +159,7 @@ async fn logs_refuse_when_the_privacy_policy_cannot_be_loaded() {
         },
         plan: Default::default(),
         run: None,
+        completing: Default::default(),
     };
     for name in ["system.logs", "system.errors"] {
         let function = super::super::lookup(name).unwrap();
@@ -343,6 +344,26 @@ async fn bug_bundle_writes_a_redacted_zip_under_the_cache_dir() {
             .unwrap()
             .count(),
         1
+    );
+}
+
+#[tokio::test]
+async fn session_status_says_when_the_variables_could_not_be_listed() {
+    let (_dir, app, _) = fixture().await;
+    run(&app, "def locals():\n    return {}").await;
+    let m = run(
+        &app,
+        "s = await engine('session.status')\n[s['data'].get('variables_unknown'), s['text']]",
+    )
+    .await;
+    let out = result(&m);
+    assert_eq!(out[0], true, "{out}");
+    assert!(
+        out[1]
+            .as_str()
+            .unwrap()
+            .contains("variables could not be listed"),
+        "{out}"
     );
 }
 

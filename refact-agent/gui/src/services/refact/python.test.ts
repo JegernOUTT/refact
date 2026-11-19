@@ -76,6 +76,61 @@ describe("Python wire guards", () => {
       normalizePythonRunExtra({ ...extra, state: { ...extra.state, note: 4 } }),
     ).toBeUndefined();
   });
+  it("reads the engine's null state notes as absent and keeps the written ones", () => {
+    const nulls = normalizePythonRunExtra({
+      ...extra,
+      state: { ...extra.state, not_saved: null, note: null, notes: null },
+    });
+    expect(nulls?.state).toEqual(extra.state);
+    const written = {
+      not_saved:
+        "not saved (disk full); variables come from the last successful save",
+      note: "the session holds 18.0 MB of variables",
+      notes: ["variables were not copied from chat a: it is running"],
+    };
+    expect(
+      normalizePythonRunExtra({
+        ...extra,
+        state: { ...extra.state, ...written },
+      })?.state,
+    ).toEqual({ ...extra.state, ...written });
+    for (const state of [
+      { not_saved: 4 },
+      { notes: "one note" },
+      { notes: ["ok", 2] },
+    ])
+      expect(
+        normalizePythonRunExtra({
+          ...extra,
+          state: { ...extra.state, ...state },
+        }),
+      ).toBeUndefined();
+  });
+  it("keeps a string error hint and read_only only when it is true", () => {
+    const error = { type: "TypeError", message: "bad", traceback: "" };
+    expect(
+      normalizePythonRunExtra({
+        ...extra,
+        error: { ...error, hint: "Use x = None." },
+      })?.error?.hint,
+    ).toBe("Use x = None.");
+    const mistyped = normalizePythonRunExtra({
+      ...extra,
+      error: { ...error, hint: 3 },
+    });
+    expect(mistyped?.error).toEqual(error);
+    expect(
+      normalizePythonRunExtra({ ...extra, read_only: true })?.read_only,
+    ).toBe(true);
+    for (const value of [false, "yes", 1]) {
+      const normalized = normalizePythonRunExtra({
+        ...extra,
+        read_only: value,
+      });
+      expect(normalized).toBeDefined();
+      expect(normalized && "read_only" in normalized).toBe(false);
+    }
+  });
   it("validates each update variant and snapshots", () => {
     for (const value of [
       { kind: "started", background: false },

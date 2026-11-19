@@ -317,6 +317,10 @@ pub struct ChatSession {
     pub(crate) verifier_readiness_resume_nonce: Option<String>,
     pub(crate) delivery_save_id: uuid::Uuid,
     pub(crate) native_commands_in_flight: Arc<std::sync::atomic::AtomicUsize>,
+    /// Commands the queue processor has taken off the queue and not finished handling.
+    pub(crate) commands_taken: usize,
+    /// Who started the current turn, latched when it started; `None` until a turn starts.
+    pub(crate) turn_origin: Option<refact_chat_history::history_gates::TurnOrigin>,
     pub(crate) runner_lease: Option<(String, Arc<AtomicBool>)>,
     pub(crate) runner_message_digest: Option<[u8; 32]>,
     pub recovery_policy_source: refact_core::recovery::RecoveryPolicySource,

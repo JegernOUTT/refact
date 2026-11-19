@@ -5,7 +5,7 @@ pub(crate) mod browser_decisions;
 pub mod cache_diagnostics;
 pub mod cache_guard;
 #[cfg(test)]
-mod cache_stability_tests;
+pub(crate) mod cache_stability_tests;
 pub mod cloud_token_count;
 #[cfg(test)]
 mod compaction_hook_tests;

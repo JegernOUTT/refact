@@ -206,7 +206,7 @@ fn claude_code_settings(model_name: &str) -> AdapterSettings {
     }
 }
 
-async fn prepare_request(
+pub(crate) async fn prepare_request(
     gcx: Arc<GlobalContext>,
     model_id: &str,
     messages: Vec<ChatMessage>,

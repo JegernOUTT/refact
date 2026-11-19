@@ -1,7 +1,7 @@
 use refact_python_catalog::{build_catalog, CatalogOptions, PythonCatalog};
 use refact_tool_api::ToolDesc;
 
-pub const INTRO: &str = "Run Python 3 (Monty subset), including top-level await, to compose tools. The last expression is returned. Nested tools return ToolResult envelopes (ok, data, text, files, diffs, images, error, truncated). PermissionError means a call was denied; TypeError means invalid arguments. Variables persist per chat; restart clears variables, not files. Long runs detach with a tool_job receipt and deliver their result later in this chat.\n\n";
+pub const INTRO: &str = "Run Python 3 (Monty subset), including top-level await, to compose tools. The last expression is returned. Nested tools return ToolResult envelopes (ok, data, text, files, diffs, images, error, truncated). PermissionError means a call was denied; TypeError means invalid arguments. Variables persist per chat; restart clears variables, not files. A long run continues in the background; its result arrives in this chat by itself and starts your next turn, so do not poll for it.\n\n";
 pub fn catalog(tools: &[ToolDesc], mcp_lazy: bool, max_chars: usize) -> PythonCatalog {
     catalog_with_llm(tools, mcp_lazy, max_chars, false)
 }

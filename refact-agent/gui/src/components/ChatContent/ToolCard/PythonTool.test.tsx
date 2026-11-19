@@ -35,6 +35,7 @@ import {
   engineChange,
   unknownOutcomeChange,
 } from "./engineFixtures";
+import { READ_ONLY_NOTE } from "./ReadOnlyChip";
 
 vi.mock("./useToolCallActivity", async (original) => ({
   ...(await original<typeof import("./useToolCallActivity")>()),
@@ -1753,6 +1754,144 @@ describe("PythonTool", () => {
       expect(
         screen.getByRole("region", { name: "Result" }),
       ).not.toHaveTextContent("cut by the engine");
+    });
+  });
+
+  describe("error hint, session state and read-only", () => {
+    const HINT = "del is not supported: use x = None to drop a value.";
+    const failure = (hint?: string, more: Partial<PythonRunExtra> = {}) =>
+      done({
+        status: "failed",
+        error: {
+          type: "NotImplementedError",
+          message: "no del",
+          traceback: "",
+          ...(hint === undefined ? {} : { hint }),
+        },
+        ...more,
+      });
+    beforeEach(() => {
+      live.status = undefined;
+    });
+    it("shows the error's hint under the message, quieter, never a blank one", () => {
+      const view = render(
+        <PythonTool toolCall={call} result={failure(HINT)} />,
+      );
+      openCard();
+      const error = screen.getByText("NotImplementedError").closest("p");
+      if (!error) throw new Error("no error line");
+      const hint = screen.getByText(HINT);
+      expect(error.compareDocumentPosition(hint)).toBe(
+        Node.DOCUMENT_POSITION_FOLLOWING,
+      );
+      expect(hint.className).toMatch(/stateHint/);
+      expect(hint.className).not.toMatch(/stateDanger/);
+      expect(error).not.toHaveTextContent(HINT);
+      view.unmount();
+      render(<PythonTool toolCall={call} result={failure("   ")} />);
+      openCard();
+      expect(screen.getByText("NotImplementedError")).toBeInTheDocument();
+      expect(document.querySelector("[class*=stateHint]")).toBeNull();
+    });
+    it("announces the hint with a failure that happens while the card is watched", () => {
+      live.status = "running";
+      const view = render(<PythonTool toolCall={call} />);
+      openCard();
+      live.status = undefined;
+      view.rerender(<PythonTool toolCall={call} result={failure(HINT)} />);
+      expect(screen.getByRole("alert")).toHaveTextContent(
+        `NotImplementedError: no del${HINT}`,
+      );
+    });
+    it("warns when the state was not saved and lists each engine note on its own line", () => {
+      render(
+        <PythonTool
+          toolCall={call}
+          result={done({
+            state: {
+              ...extra.state,
+              persisted: false,
+              not_saved:
+                "not saved (disk full); variables come from the last successful save",
+              note: "the session holds 18.0 MB of variables",
+              notes: [
+                "variables were not copied from chat a: a script there was running",
+              ],
+            },
+          })}
+        />,
+      );
+      openCard();
+      const warning = screen.getByText(
+        "State not saved (disk full); variables come from the last successful save.",
+      );
+      expect(warning.className).toMatch(/stateWarning/);
+      const lines = [
+        screen.getByText("The session holds 18.0 MB of variables."),
+        screen.getByText(
+          "Variables were not copied from chat a: a script there was running.",
+        ),
+      ];
+      for (const line of lines) {
+        expect(line.className).toMatch(/stateMuted/);
+        expect(warning.compareDocumentPosition(line)).toBe(
+          Node.DOCUMENT_POSITION_FOLLOWING,
+        );
+        expect(
+          line.compareDocumentPosition(
+            screen.getByRole("region", { name: "Result" }),
+          ),
+        ).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+      }
+    });
+    it("keeps the card structured for the engine's state with null notes", () => {
+      render(
+        <PythonTool
+          toolCall={call}
+          result={{
+            tool_call_id: "t",
+            content: "RAW TEXT",
+            extra: {
+              python: {
+                ...extra,
+                state: { ...extra.state, not_saved: null, note: null },
+              },
+            },
+          }}
+        />,
+      );
+      openCard();
+      expect(card()).toHaveAttribute("data-python-run-id", "r");
+      expect(screen.getByRole("region", { name: "Result" })).toHaveTextContent(
+        "answer",
+      );
+      expect(screen.queryByText("RAW TEXT")).toBeNull();
+      expect(document.querySelector("[class*=stateWarning]")).toBeNull();
+    });
+    it("marks a read-only run with a chip after its status, explained in a tooltip", async () => {
+      const view = render(
+        <PythonTool
+          toolCall={call}
+          result={failure(undefined, { read_only: true })}
+        />,
+      );
+      const chip = screen.getByText("Read-only").closest("[tabindex]");
+      if (!(chip instanceof HTMLElement)) throw new Error("no focusable chip");
+      expect(
+        screen
+          .getByTestId("transcript-status-pill")
+          .compareDocumentPosition(chip),
+      ).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+      expect(chip).toHaveAttribute("tabindex", "0");
+      await view.user.hover(chip);
+      expect(await screen.findByRole("tooltip")).toHaveTextContent(
+        READ_ONLY_NOTE,
+      );
+      expect(READ_ONLY_NOTE).toMatch(/artifacts/);
+    });
+    it("shows no read-only chip for a run that could write files", () => {
+      render(<PythonTool toolCall={call} result={done({})} />);
+      expect(screen.queryByText("Read-only")).toBeNull();
     });
   });
 });

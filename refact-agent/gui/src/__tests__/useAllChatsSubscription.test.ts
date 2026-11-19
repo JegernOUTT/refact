@@ -31,6 +31,14 @@ import {
   agentRecoveryRequested,
   selectAgentRosterSource,
 } from "../features/AgentsPanel/agentsPanelSlice";
+import {
+  selectProcessCompletions,
+  selectUnreadNotificationCountByThread,
+} from "../features/Notifications";
+import {
+  selectTerminalSessions,
+  sessionAdded,
+} from "../features/Workspace/TerminalPanel/terminalSlice";
 
 const ReduxProvider = Provider as unknown as (props: {
   store: AppStore;
@@ -488,6 +496,79 @@ describe("per-chat isolation on the shared stream", () => {
       store.getState().connection.sseConnections[chatId]?.status;
     return { fetcher, signals, streams, store, send, advance, status, view };
   };
+
+  it.each([
+    ["foreground", "spawn first"],
+    ["foreground", "completion first"],
+    ["background", "spawn first"],
+    ["service", "spawn first"],
+  ])(
+    "applies %s completion (%s) without disturbing an explicitly opened terminal",
+    async (mode, order) => {
+      const { store, send, advance, view } = setup(["chat-a"]);
+      await advance(0);
+      await send(0, snapshot("chat-a"));
+      syncAct(() => {
+        store.dispatch(
+          sessionAdded({
+            chatId: "chat-a",
+            session: {
+              process_id: "manual-terminal",
+              label: "shell",
+              title: "shell",
+              status: "running",
+              tty: true,
+            },
+          }),
+        );
+      });
+      const openIds = () =>
+        selectTerminalSessions(store.getState(), "chat-a").map(
+          ({ process_id }) => process_id,
+        );
+      const spawn = (seq: string) =>
+        send(0, {
+          type: "exec_process_spawned",
+          chat_id: "chat-a",
+          seq,
+          process: {
+            processId: "exec-test",
+            commandPreview: "Local fixture",
+            status: "running",
+            mode,
+            tty: false,
+            startedAt: 1,
+          },
+        });
+      const complete = (seq: string) =>
+        send(0, {
+          type: "process_completed",
+          chat_id: "chat-a",
+          seq,
+          process_id: "exec-test",
+          status: "exited",
+          exit_code: 0,
+          short_description: "Local fixture",
+          mode,
+        });
+      if (order === "spawn first") {
+        await spawn("1");
+        expect(openIds()).toEqual(["manual-terminal", "exec-test"]);
+        await complete("2");
+      } else {
+        await complete("1");
+        await spawn("2");
+      }
+      expect(openIds()).toEqual(["manual-terminal"]);
+      const state = store.getState();
+      const count = mode === "foreground" ? 0 : 1;
+      expect(selectUnreadNotificationCountByThread(state, "chat-a")).toBe(
+        count,
+      );
+      expect(selectProcessCompletions(state)).toHaveLength(count);
+      view.unmount();
+    },
+  );
 
   it("backs off a repeatedly failing chat on its own count while a sibling stays healthy", async () => {
     const { fetcher, signals, send, advance, status, view } = setup([

@@ -277,7 +277,7 @@
   flex: 0 0 auto;
 }
 .scriptRow {
-  container-type: inline-size;
+  container: script-row / inline-size;
 }
 .metaNarrow {
   display: none;
@@ -327,6 +327,19 @@
 }
 .stateDanger {
   color: var(--rf-color-danger);
+}
+.errorState {
+  display: grid;
+  gap: var(--rf-space-2xs);
+  min-width: 0;
+}
+.stateHint {
+  margin: 0;
+  min-width: 0;
+  color: var(--rf-color-muted);
+  font-size: var(--rf-transcript-meta-size);
+  line-height: var(--rf-line-1);
+  overflow-wrap: anywhere;
 }
 .mono {
   font-family: var(--rf-font-mono);

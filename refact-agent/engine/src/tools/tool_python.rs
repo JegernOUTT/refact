@@ -12,6 +12,7 @@ use crate::{
     app_state::AppState,
     at_commands::at_commands::AtCommandsContext,
     call_validation::{ChatMessage, ChatContent, ContextEnum},
+    privacy::classification_cache::Snapshot,
     python_tool::{CallSink, NestedDispatcher, NestedDispatchConfig, workspace::PythonWorkspace},
     tools::tools_description::{Tool, ToolDesc},
 };
@@ -201,14 +202,20 @@ impl Tool for ToolPython {
             app = invocation.app;
             ccx.lock().await.app = app.clone();
         }
-        let root = match scope {
+        let (root, workspace_folders) = match scope {
             Some(scope) => {
                 scope.ensure_active_root()?;
-                scope.effective_root().to_path_buf()
+                (
+                    scope.effective_root().to_path_buf(),
+                    scope.effective_project_dirs(),
+                )
             }
-            None => crate::files_correction::get_active_project_path(app.gcx.clone())
-                .await
-                .ok_or("Python requires an active project")?,
+            None => (
+                crate::files_correction::get_active_project_path(app.gcx.clone())
+                    .await
+                    .ok_or("Python requires an active project")?,
+                crate::files_correction::get_project_dirs(app.gcx.clone()).await,
+            ),
         };
         let settings = crate::runtime_settings::coordination_for_project(&root).await?;
         if !settings.python_tool_enabled {
@@ -339,6 +346,14 @@ impl Tool for ToolPython {
             ))
         });
         let run_privacy = Arc::new(Mutex::new(crate::python_tool::llm::RunPrivacy::default()));
+        let writable =
+            script_writes(&app, &ccx, &tool_catalog, &allowed_tools, &mode, &model).await;
+        let (mut deny_write, mut deny_read) = protected_paths(&app, &root, &workspace).await;
+        deny_write.read_only = (!writable).then(|| read_only_reason(&workspace.artifacts_dir()));
+        deny_read.allow_prefixes = vec![workspace.dir().to_path_buf()];
+        deny_read
+            .allow_prefixes
+            .extend(parent_artifacts.iter().cloned());
 
         if let Some(session) = app.chat.sessions.read().await.get(&chat).cloned() {
             session
@@ -398,6 +413,10 @@ impl Tool for ToolPython {
             llm: llm_budget.clone(),
             run_privacy: run_privacy.clone(),
             engine: engine_state.clone(),
+            project_root: root.clone(),
+            workspace_folders,
+            deny_read: deny_read.clone(),
+            workspace_dir: workspace.dir().to_path_buf(),
         }));
         let mut globals: Vec<GlobalBinding> = catalog
             .functions
@@ -412,6 +431,24 @@ impl Tool for ToolPython {
                             .map(|name| name.to_string())
                             .collect(),
                     )
+                } else if f.py_name == refact_python_catalog::GIT_HELPER
+                    && f.tool_name == refact_python_catalog::GIT_HELPER
+                {
+                    GlobalKind::AsyncFnPositional(
+                        refact_python_catalog::GIT_POSITIONAL
+                            .iter()
+                            .map(|name| name.to_string())
+                            .collect(),
+                    )
+                } else if f.py_name == refact_python_catalog::RUN_HELPER
+                    && f.tool_name == refact_python_catalog::RUN_HELPER
+                {
+                    GlobalKind::AsyncFnPositional(
+                        refact_python_catalog::RUN_POSITIONAL
+                            .iter()
+                            .map(|name| name.to_string())
+                            .collect(),
+                    )
                 } else if f.py_name == refact_python_catalog::ENGINE_HELPER
                     && f.tool_name == refact_python_catalog::ENGINE_HELPER
                 {
@@ -420,6 +457,10 @@ impl Tool for ToolPython {
                     ])
                 } else if f.is_async {
                     GlobalKind::AsyncFn
+                } else if f.py_name == f.tool_name
+                    && refact_python_catalog::FILE_HELPERS.contains(&f.tool_name.as_str())
+                {
+                    GlobalKind::HostHelper
                 } else {
                     GlobalKind::SyncFn
                 },
@@ -469,16 +510,13 @@ impl Tool for ToolPython {
         )
         .into_iter()
         .collect();
-        let (deny_write, mut deny_read) = protected_paths(&app, &root, &workspace).await;
-        deny_read.allow_prefixes = vec![workspace.dir().to_path_buf()];
-        deny_read
-            .allow_prefixes
-            .extend(parent_artifacts.iter().cloned());
         let mut privacy = ChatMessage::default();
         lease.remember_reset_reason(start.reset_reason.clone());
         lease.remember_restored(start.restored);
-        let session_taint: Vec<Value> = lease
-            .taint()
+        let session_taint: Vec<Value> = lease.taint();
+        run_privacy.lock().unwrap().unobserved_output =
+            crate::python_tool::llm::has_unobserved_output_mark(&session_taint);
+        let session_taint: Vec<Value> = session_taint
             .into_iter()
             .filter(|value| value.get("files").is_some())
             .collect();
@@ -555,7 +593,13 @@ impl Tool for ToolPython {
         let deadline =
             tokio::time::Instant::now() + Duration::from_millis(settings.python_max_run_ms);
         app.python_tool.set_run_deadline(&chat, id, deadline);
+        let stop = || {
+            cancel.is_cancelled()
+                || abort.load(Ordering::Acquire)
+                || tokio::time::Instant::now() >= deadline
+        };
         let run_outcome: Result<&str, String> = async {
+            let mut grep_admission: Option<(u32, Arc<Snapshot>)> = None;
             Ok(loop {
             if let Err(message) = &feed {
                 usable = false;
@@ -695,8 +739,10 @@ impl Tool for ToolPython {
                     truncated,
                     line,
                     col,
+                    exceeded,
                     ..
                 }) => {
+                    let too_large = too_large(truncated, exceeded);
                     seq += 1;
                     let d = dispatcher.clone();
                     let n = seq;
@@ -704,17 +750,25 @@ impl Tool for ToolPython {
                         && catalog.resolve(&function).is_some_and(|f| f.tool_name == refact_python_catalog::LLM_HELPER);
                     let engine = function == refact_python_catalog::ENGINE_HELPER
                         && catalog.resolve(&function).is_some_and(|f| f.tool_name == refact_python_catalog::ENGINE_HELPER);
+                    let git = function == refact_python_catalog::GIT_HELPER
+                        && catalog.resolve(&function).is_some_and(|f| f.tool_name == refact_python_catalog::GIT_HELPER);
+                    let run_helper = function == refact_python_catalog::RUN_HELPER
+                        && catalog.resolve(&function).is_some_and(|f| f.tool_name == refact_python_catalog::RUN_HELPER);
                     pending.insert(
                         call_id,
                         tokio::spawn(async move {
                             if engine {
-                                return d.dispatch_engine(n, kwargs, truncated, (line, col)).await;
+                                return d.dispatch_engine(n, kwargs, too_large, (line, col)).await;
                             }
                             let _call = d.enter_call().await;
                             if llm {
-                                d.dispatch_llm(n, kwargs, truncated, (line, col)).await
+                                d.dispatch_llm(n, kwargs, too_large, (line, col)).await
+                            } else if git {
+                                d.dispatch_git(n, kwargs, too_large, (line, col)).await
+                            } else if run_helper {
+                                d.dispatch_run(n, kwargs, too_large, (line, col)).await
                             } else {
-                                d.dispatch_at(n, &function, kwargs, truncated, (line, col)).await
+                                d.dispatch_at(n, &function, kwargs, too_large, (line, col)).await
                             }
                         }),
                     );
@@ -728,13 +782,48 @@ impl Tool for ToolPython {
                     args,
                     kwargs,
                     truncated,
+                    exceeded,
                     ..
                 }) => {
-                    let answer = if function == refact_python_catalog::SHOW_HELPER {
-                        if truncated {
+                    let too_large = too_large(truncated, exceeded);
+                    let answer = if function == GREP_FILES {
+                        grep_admission = None;
+                        let stopped = async {
+                            while !stop() {
+                                tokio::time::sleep(Duration::from_millis(25)).await;
+                            }
+                        };
+                        let listing = tokio::task::spawn_blocking({
+                            let (gcx, args, abort) = (app.gcx.clone(), args.clone(), abort.clone());
+                            move || {
+                                tokio::runtime::Handle::current()
+                                    .block_on(grep_files(gcx, &args, &abort))
+                            }
+                        });
+                        let answer = tokio::select! {
+                            answer = listing => Some(answer),
+                            _ = stopped => None,
+                        };
+                        match answer {
+                            Some(answer) if !stop() => match answer {
+                                Ok(Ok((list, snapshot))) => {
+                                    grep_admission = Some((call_id, snapshot));
+                                    HostResult::Ok(list)
+                                }
+                                Ok(Err(message)) => grep_listing_error(message),
+                                Err(e) => grep_listing_error(e.to_string()),
+                            },
+                            _ => {
+                                // The kernel waits for this answer: abort it at the top of the loop and keep the session.
+                                suspended = Some(vec![]);
+                                continue;
+                            }
+                        }
+                    } else if function == refact_python_catalog::SHOW_HELPER {
+                        if let Some(size) = too_large {
                             HostResult::Err {
                                 exc_type: "TypeError".into(),
-                                message: "show(): the value is too large to display; aggregate it first or write it to a file".into(),
+                                message: format!("show(): the value is too large to display ({size}); aggregate it first or write it to a file"),
                             }
                         } else {
                             match displays
@@ -758,7 +847,7 @@ impl Tool for ToolPython {
                             }
                         }
                     } else {
-                        sync_helper(&catalog, &function, &args, truncated, settings.python_max_result_chars)
+                        sync_helper(&catalog, &function, &args, too_large.as_deref(), settings.python_max_result_chars)
                     };
                     lease
                         .client()
@@ -766,6 +855,25 @@ impl Tool for ToolPython {
                             call_id,
                             result: answer,
                         })
+                        .await
+                        .map_err(|e| e.to_string())?;
+                }
+                ClientEvent::Kernel(KernelEvent::GrepRevalidate {
+                    run_id,
+                    call_id,
+                }) => {
+                    #[cfg(test)]
+                    crate::python_tool::workspace::pause_point(&root, "grep_scanned").await;
+                    let allowed = grep_admission.take().is_some_and(|(admitted_id, snapshot)| {
+                        run_id == run && call_id == admitted_id && snapshot.finish(&app.gcx).is_ok()
+                    });
+                    if stop() {
+                        suspended = Some(vec![]);
+                        continue;
+                    }
+                    lease
+                        .client()
+                        .send(KernelCommand::GrepRevalidated { run_id, call_id, allowed })
                         .await
                         .map_err(|e| e.to_string())?;
                 }
@@ -844,9 +952,13 @@ impl Tool for ToolPython {
                     line,
                     ..
                 }) => {
+                    let hint = crate::python_tool::hints::hint(&exc_type, &message);
                     error = json!({"type":exc_type,"message":message,"traceback":traceback});
                     if let Some(line) = line {
                         error["line"] = json!(line);
+                    }
+                    if let Some(hint) = hint {
+                        error["hint"] = json!(hint);
                     }
                     break "failed";
                 }
@@ -955,14 +1067,34 @@ impl Tool for ToolPython {
                 .map_err(|e| e.to_string())?;
         }
         // Observation markers belong to this run's message only, never to the session.
-        let taint: Vec<Value> = privacy.extra.get("privacy").cloned().into_iter().collect();
+        let taint: Vec<Value> = privacy
+            .extra
+            .get("privacy")
+            .cloned()
+            .into_iter()
+            .chain(
+                run_privacy
+                    .lock()
+                    .unwrap()
+                    .unobserved_output
+                    .then(crate::python_tool::llm::unobserved_output_mark),
+            )
+            .collect();
+        let mut not_saved = None;
         let persisted = if usable {
             match lease.persist(&app, &run, taint).await {
-                Ok(outcome) => outcome,
+                Ok(outcome) => {
+                    not_saved = outcome.not_saved.clone();
+                    outcome
+                }
                 Err(reason) => {
-                    lease
-                        .discard_worker(&format!("state persistence failed: {reason}"))
-                        .await;
+                    let fallback = if matches!(workspace.pin_state(false).await, Ok(Some(_))) {
+                        "variables come from the last successful save"
+                    } else {
+                        "the session was reset and has no variables"
+                    };
+                    not_saved = Some(format!("not saved ({reason}); {fallback}"));
+                    lease.discard_worker_for_rollback(&reason).await;
                     Default::default()
                 }
             }
@@ -1004,6 +1136,18 @@ impl Tool for ToolPython {
         let mut extra = extra;
         if result_truncated {
             extra["result_truncated"] = json!(true);
+        }
+        if let Some(not_saved) = not_saved {
+            extra["state"]["not_saved"] = json!(not_saved);
+        }
+        if let Some(note) = &persisted.note {
+            extra["state"]["note"] = json!(note);
+        }
+        if !start.notes.is_empty() {
+            extra["state"]["notes"] = json!(start.notes);
+        }
+        if !writable {
+            extra["read_only"] = json!(true);
         }
         if let (Some(extra), Some(labels)) = (extra.as_object_mut(), labels.as_object()) {
             extra.extend(labels.clone());
@@ -1116,30 +1260,23 @@ impl Tool for ToolPython {
         let _ = workspace
             .enforce_quota(settings.python_disk_quota_bytes)
             .await;
+        let mut notices = String::new();
+        if shutdown_dropped {
+            notices.push_str(&format!(
+                "The approved engine shutdown was not performed because the run ended {status}.\n"
+            ));
+        }
+        if requested_background && foreground_only {
+            notices.push_str("Background runs are not available in this chat.\n");
+        }
         let text = crate::python_tool::render::render(
             &result_text,
             &stdout,
             &extra,
+            &notices,
+            &displays.model_text(),
             settings.python_max_result_chars,
         );
-        let notes = displays.model_text();
-        let text = if notes.is_empty() {
-            text
-        } else if text.is_empty() {
-            notes
-        } else {
-            format!("{text}\n\n{notes}")
-        };
-        let text = if requested_background && foreground_only {
-            format!("Background runs are not available in this chat.\n{text}")
-        } else {
-            text
-        };
-        let text = if shutdown_dropped {
-            format!("The approved engine shutdown was not performed because the run ended {status}.\n{text}")
-        } else {
-            text
-        };
         let mut message = ChatMessage {
             role: "tool".into(),
             tool_call_id: id.clone(),
@@ -1280,17 +1417,26 @@ fn is_write(op: &str) -> bool {
     .iter()
     .any(|s| op.contains(s))
 }
+/// The measured size of arguments a limit cut, for the refusal text.
+fn too_large(
+    truncated: bool,
+    exceeded: Option<refact_python_kernel::protocol::Exceeded>,
+) -> Option<String> {
+    truncated.then(|| exceeded.map_or_else(|| "over the size limit".into(), |e| e.describe()))
+}
 fn sync_helper(
     catalog: &refact_python_catalog::PythonCatalog,
     function: &str,
     args: &Value,
-    truncated: bool,
+    too_large: Option<&str>,
     max_result_chars: usize,
 ) -> HostResult {
-    if truncated {
+    if let Some(size) = too_large {
         return HostResult::Err {
             exc_type: "TypeError".into(),
-            message: "arguments too large".into(),
+            message: format!(
+                "{function}() arguments are too large to send: {size}; pass a file path or a smaller value"
+            ),
         };
     }
     let a = args.as_array();
@@ -1343,6 +1489,105 @@ fn sync_helper(
             message: format!("Invalid arguments or unknown function: {function}"),
         })
 }
+/// Answers `grep.files`: the files under a directory with `search_pattern`'s ignore rules, or a
+/// named file, without the files the privacy policy blocks for model context. Only the requested
+/// directory is walked, and the call's glob is applied before the privacy partition, so the
+/// counts cover only files the search would read; names that are not UTF-8 are left out.
+async fn grep_files(
+    gcx: crate::global_context::SharedGlobalContext,
+    args: &Value,
+    abort: &std::sync::atomic::AtomicBool,
+) -> Result<(Value, Arc<Snapshot>), String> {
+    let request: FileListRequest = match args
+        .get(0)
+        .cloned()
+        .map(serde_json::from_value::<FileListRequest>)
+    {
+        Some(Ok(request)) => request,
+        _ => return Err("malformed file list request".into()),
+    };
+    let glob = request
+        .glob
+        .as_deref()
+        .map(glob::Pattern::new)
+        .transpose()
+        .map_err(|e| format!("invalid glob: {e}"))?;
+    let nested = request
+        .glob
+        .as_deref()
+        .is_some_and(|glob| glob.contains('/'));
+    let aborted = || format!("the listing of '{}' was aborted", request.path.display());
+    crate::python_tool::workspace::blocking_pause_point(&request.path, "grep_listing");
+    let (candidates, truncated) = if request.path.is_dir() {
+        let indexing =
+            crate::files_blocklist::reload_indexing_everywhere_if_needed(gcx.clone()).await;
+        match crate::files_in_workspace::ls_dir_files_limited(
+            &indexing,
+            &request.path,
+            request.max_entries.min(GREP_MAX_FILES) as usize,
+            Some(abort),
+        ) {
+            Ok(listing) if listing.aborted => return Err(aborted()),
+            Ok(listing) => (listing.files, listing.truncated),
+            Err(message) => return Err(message),
+        }
+    } else {
+        (vec![request.path.clone()], false)
+    };
+    let (named, unnamed): (Vec<_>, Vec<_>) = candidates
+        .into_iter()
+        .filter(|path| {
+            path.starts_with(&request.path)
+                && glob.as_ref().is_none_or(|pattern| {
+                    refact_python_kernel::hostfs::glob_matches(pattern, nested, &request.path, path)
+                })
+        })
+        .partition(|path| path.to_str().is_some());
+    let read_context = crate::files_in_workspace::prepare_file_read_context(gcx.clone()).await;
+    let snapshot = crate::privacy::classification_cache::snapshot(&gcx)?;
+    let mut files = Vec::new();
+    let mut blocked = 0;
+    for path in named {
+        if abort.load(Ordering::Acquire) {
+            return Err(aborted());
+        }
+        if crate::files_in_workspace::check_file_privacy_for_read_preparation_with_context(
+            &read_context,
+            &path,
+        )
+        .is_err()
+        {
+            blocked += 1;
+            continue;
+        }
+        let zone = snapshot.classify_for_read_admission(&gcx, &path);
+        if zone.name == "blocked" || zone.send_to.is_empty() {
+            blocked += 1;
+        } else {
+            files.push(path);
+        }
+    }
+    snapshot.finish(&gcx)?;
+    let list = serde_json::to_value(FileList {
+        files,
+        blocked,
+        truncated,
+        unlisted: unnamed.len(),
+    })
+    .map_err(|e| e.to_string())?;
+    Ok((list, snapshot))
+}
+fn grep_listing_error(message: String) -> HostResult {
+    HostResult::Err {
+        exc_type: "RuntimeError".into(),
+        message: format!("grep(): {message}"),
+    }
+}
+/// The most files one `grep()` listing returns, whatever the request asks for.
+const GREP_MAX_FILES: u64 = 20_000;
+#[cfg(test)]
+#[path = "tool_python_run_tests.rs"]
+mod run_tests;
 #[cfg(test)]
 #[path = "tool_python_tests.rs"]
 pub(crate) mod tests;
@@ -1423,6 +1668,85 @@ async fn protected_paths(
             files: secrets,
             ..Default::default()
         },
+    )
+}
+
+/// Scripts may write outside ARTIFACTS_DIR when a built-in editing tool, `rm`, `shell` or
+/// `process_start` passes the authorization nested calls use and no tool-wide deny rule of the
+/// mode removes it. MCP and integration tools never count.
+async fn script_writes(
+    app: &AppState,
+    ccx: &Arc<AMutex<AtCommandsContext>>,
+    tool_catalog: &refact_runtime_api::ToolCatalogSnapshot,
+    allowed_tools: &[String],
+    mode: &str,
+    model: &str,
+) -> bool {
+    let mut authorized = std::collections::HashSet::new();
+    for tool in tool_catalog.index.tools.iter().filter(|tool| {
+        matches!(
+            tool.source.source_type,
+            crate::tools::tools_description::ToolSourceType::Builtin
+        ) && crate::chat::tools::grants_script_writes(&tool.name)
+    }) {
+        if crate::python_tool::dispatcher::authorize_tool(
+            ccx,
+            Some(tool_catalog),
+            allowed_tools,
+            &tool.name,
+        )
+        .await
+        .is_ok()
+        {
+            authorized.insert(tool.name.clone());
+        }
+    }
+    !code_mode_prompt(app, &authorized, mode, Some(model))
+        .await
+        .1
+}
+
+pub(crate) async fn mode_confirm_rules(
+    app: &AppState,
+    mode: &str,
+    model: Option<&str>,
+) -> Vec<crate::yaml_configs::customization_types::ToolConfirmRule> {
+    use crate::yaml_configs::customization_registry::{get_mode_config, map_legacy_mode_to_id};
+    get_mode_config(app.gcx.clone(), map_legacy_mode_to_id(mode), model)
+        .await
+        .map(|config| config.tool_confirm.rules)
+        .unwrap_or_default()
+}
+
+/// What Code Mode offers a chat whose runs may call the tools `names`, after the tool-wide deny
+/// rules of its mode: the tools its prompt section describes (`run()` only with `shell`) and
+/// whether its scripts may write only under ARTIFACTS_DIR. Runs and prompts both decide here.
+pub(crate) async fn code_mode_prompt(
+    app: &AppState,
+    names: &std::collections::HashSet<String>,
+    mode: &str,
+    model: Option<&str>,
+) -> (std::collections::HashSet<String>, bool) {
+    let rules = mode_confirm_rules(app, mode, model).await;
+    let names: std::collections::HashSet<String> = names
+        .iter()
+        .filter(|name| {
+            crate::yaml_configs::customization_registry::match_tool_confirm_action(&rules, name)
+                .as_deref()
+                != Some("deny")
+        })
+        .cloned()
+        .collect();
+    let read_only = !names
+        .iter()
+        .any(|name| crate::chat::tools::grants_script_writes(name));
+    (names, read_only)
+}
+
+fn read_only_reason(artifacts: &std::path::Path) -> String {
+    format!(
+        "this chat is read-only: scripts may write files only under ARTIFACTS_DIR ({}) because the chat has no file-editing, mv, rm, shell or process_start tool; tools called from the script follow their own rules",
+        python_path(artifacts, native_platform())
     )
 }
 

@@ -731,6 +731,9 @@ pub async fn get_or_create_session_with_trajectory(
     sessions: &SessionsMap,
     chat_id: &str,
 ) -> Result<Arc<AMutex<ChatSession>>, SessionOpenError> {
+    if reserved_for_delete(sessions, chat_id) {
+        return Err(SessionOpenError::Busy);
+    }
     // Existing open sessions do not require a lifecycle transition. In
     // particular, looking up a session must not cancel its running jobs.
     let existing = sessions.read().await.get(chat_id).cloned();
@@ -745,13 +748,51 @@ pub async fn get_or_create_session_with_trajectory(
             return Ok(session);
         }
     }
-    Box::pin(open_session_owned(app, sessions, chat_id)).await
+    Box::pin(open_session_owned(
+        app,
+        sessions,
+        chat_id,
+        SessionOpen::Ordinary,
+    ))
+    .await
+}
+
+pub(crate) async fn create_fresh_session_with_params(
+    app: AppState,
+    sessions: &SessionsMap,
+    chat_id: &str,
+    params: &serde_json::Value,
+) -> Result<Arc<AMutex<ChatSession>>, SessionOpenError> {
+    if reserved_for_delete(sessions, chat_id) {
+        return Err(SessionOpenError::Busy);
+    }
+    if sessions.read().await.contains_key(chat_id) {
+        return Err(fresh_session_id_taken(chat_id));
+    }
+    Box::pin(open_session_owned(
+        app,
+        sessions,
+        chat_id,
+        SessionOpen::FreshWithParams(params),
+    ))
+    .await
+}
+
+enum SessionOpen<'a> {
+    Ordinary,
+    Pinned(&'a super::trajectories::TrajectoryDiskPin),
+    FreshWithParams(&'a serde_json::Value),
+}
+
+fn fresh_session_id_taken(chat_id: &str) -> SessionOpenError {
+    SessionOpenError::failed(chat_id, "the new chat ID already exists")
 }
 
 async fn open_session_owned(
     app: AppState,
     sessions: &SessionsMap,
     chat_id: &str,
+    request: SessionOpen<'_>,
 ) -> Result<Arc<AMutex<ChatSession>>, SessionOpenError> {
     // The key is stable across replacement of the session Arc. Never await the
     // drain while holding the sessions map or a session lock: a job may need
@@ -769,11 +810,10 @@ async fn open_session_owned(
     .unwrap_or(Err(crate::tool_jobs::ScopeChangeError::Busy));
     match barrier {
         Ok(transition) => {
-            let session = Box::pin(get_or_create_session_under_transition(
-                app, sessions, chat_id, transition,
+            Box::pin(get_or_create_session_under_transition(
+                app, sessions, chat_id, transition, request,
             ))
-            .await;
-            Ok(session)
+            .await
         }
         Err(error) => {
             warn!(%chat_id, ?error, "session open refused by job lifecycle barrier");
@@ -832,6 +872,51 @@ const RESTORE_ABORT_GRACE: std::time::Duration = std::time::Duration::from_secs(
 pub struct RestoreTasks {
     restoring: std::sync::Mutex<std::collections::HashSet<usize>>,
     detached: std::sync::Mutex<DetachedRestores>,
+    deleting: std::sync::Mutex<std::collections::HashSet<String>>,
+}
+
+/// A chat a delete holds from its last check to its unlink: while it is held, opening the chat
+/// (a viewer, a command, a restore or a branch from it) is refused.
+pub(crate) struct DeleteReservation {
+    sessions: SessionsMap,
+    chat_id: String,
+}
+
+impl Drop for DeleteReservation {
+    fn drop(&mut self) {
+        self.sessions
+            .2
+            .deleting
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.chat_id);
+    }
+}
+
+/// `None` when another delete holds the chat already.
+pub(crate) fn reserve_for_delete(
+    sessions: &SessionsMap,
+    chat_id: &str,
+) -> Option<DeleteReservation> {
+    sessions
+        .2
+        .deleting
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(chat_id.to_string())
+        .then(|| DeleteReservation {
+            sessions: sessions.clone(),
+            chat_id: chat_id.to_string(),
+        })
+}
+
+fn reserved_for_delete(sessions: &SessionsMap, chat_id: &str) -> bool {
+    sessions
+        .2
+        .deleting
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains(chat_id)
 }
 
 #[derive(Default)]
@@ -938,14 +1023,23 @@ async fn get_or_create_session_under_transition(
     sessions: &SessionsMap,
     chat_id: &str,
     transition: crate::tool_jobs::ScopeChangeGuard,
-) -> Arc<AMutex<ChatSession>> {
+    request: SessionOpen<'_>,
+) -> Result<Arc<AMutex<ChatSession>>, SessionOpenError> {
     let gcx = app.gcx.clone();
+    let (expected, fresh_params) = match request {
+        SessionOpen::Ordinary => (None, None),
+        SessionOpen::Pinned(pin) => (Some(pin), None),
+        SessionOpen::FreshWithParams(params) => (None, Some(params)),
+    };
     let maybe_existing = {
         let sessions_read = sessions.read().await;
         sessions_read.get(chat_id).cloned()
     };
 
     if let Some(session_arc) = maybe_existing {
+        if fresh_params.is_some() {
+            return Err(fresh_session_id_taken(chat_id));
+        }
         let is_closed = {
             let session = session_arc.lock().await;
             session.closed
@@ -957,7 +1051,7 @@ async fn get_or_create_session_under_transition(
                 false,
             )
             .await;
-            return session_arc;
+            return Ok(session_arc);
         }
         let mut sessions_write = sessions.write().await;
         if let Some(current) = sessions_write.get(chat_id) {
@@ -969,11 +1063,44 @@ async fn get_or_create_session_under_transition(
 
     let trajectory_events_tx = app.chat.trajectory_events_tx.clone();
 
-    let (mut session, is_new, transition_repair_patch) = if let Some(mut loaded) = Box::pin(
-        super::trajectories::load_trajectory_for_chat(gcx.clone(), chat_id),
-    )
-    .await
-    {
+    let changed = || {
+        SessionOpenError::failed(
+            chat_id,
+            "its file changed on disk since the change was planned",
+        )
+    };
+    if let Some(pin) = expected {
+        if pin.refreshed().await != *pin {
+            return Err(changed());
+        }
+    }
+    let loaded = if fresh_params.is_some() {
+        if Box::pin(super::trajectories::find_trajectory_or_buddy_path(
+            gcx.clone(),
+            chat_id,
+        ))
+        .await
+        .is_some()
+        {
+            return Err(fresh_session_id_taken(chat_id));
+        }
+        None
+    } else {
+        Box::pin(super::trajectories::load_trajectory_for_chat(
+            gcx.clone(),
+            chat_id,
+        ))
+        .await
+    };
+    if let Some(pin) = expected {
+        let from_pin = loaded
+            .as_ref()
+            .is_some_and(|loaded| pin.path() == Some(loaded.source_path.as_path()));
+        if !from_pin || pin.refreshed().await != *pin {
+            return Err(changed());
+        }
+    }
+    let (mut session, is_new, transition_repair_patch) = if let Some(mut loaded) = loaded {
         info!(
             "Loaded trajectory for chat {} with {} messages",
             chat_id,
@@ -1083,6 +1210,9 @@ async fn get_or_create_session_under_transition(
                 session.thread.auto_approve_dangerous_commands = v;
             }
         }
+        if let Some(params) = fresh_params {
+            super::queue::apply_setparams_patch(&mut session.thread, params);
+        }
     }
 
     if let Some(meta) = session
@@ -1123,6 +1253,9 @@ async fn get_or_create_session_under_transition(
                 e.insert(arc.clone());
                 (arc, true, Some(restoring))
             }
+            std::collections::hash_map::Entry::Occupied(_) if fresh_params.is_some() => {
+                return Err(fresh_session_id_taken(chat_id));
+            }
             std::collections::hash_map::Entry::Occupied(e) => (e.get().clone(), false, None),
         }
     };
@@ -1150,7 +1283,7 @@ async fn get_or_create_session_under_transition(
         FinishOnDrop(Some(init), sessions.clone()).await;
     }
 
-    session_arc
+    Ok(session_arc)
 }
 
 #[cfg(test)]
@@ -1329,11 +1462,49 @@ pub async fn try_restore_session_if_trajectory_exists(
     restore_session_if_trajectory_exists(app, sessions, chat_id).await == SessionRestore::Open
 }
 
+/// Restores a saved chat only from exactly the file `pin` saw when a change was planned: the file
+/// is compared before it is read and again after, before the session is inserted or migrated. A
+/// chat that is open already is left to the caller's own checks.
+pub(crate) async fn restore_session_if_unchanged(
+    app: AppState,
+    sessions: &SessionsMap,
+    chat_id: &str,
+    pin: &super::trajectories::TrajectoryDiskPin,
+) -> SessionRestore {
+    if reserved_for_delete(sessions, chat_id) {
+        return SessionRestore::Refused(SessionOpenError::Busy);
+    }
+    let existing = sessions.read().await.get(chat_id).cloned();
+    if let Some(session_arc) = existing {
+        let is_closed = session_arc.lock().await.closed;
+        if !is_closed && !session_restoring(sessions, &session_arc) {
+            return SessionRestore::Open;
+        }
+    }
+    if pin.path().is_none() {
+        return SessionRestore::NoTrajectory;
+    }
+    match Box::pin(open_session_owned(
+        app,
+        sessions,
+        chat_id,
+        SessionOpen::Pinned(pin),
+    ))
+    .await
+    {
+        Ok(_) => SessionRestore::Open,
+        Err(error) => SessionRestore::Refused(error),
+    }
+}
+
 pub async fn restore_session_if_trajectory_exists(
     app: AppState,
     sessions: &SessionsMap,
     chat_id: &str,
 ) -> SessionRestore {
+    if reserved_for_delete(sessions, chat_id) {
+        return SessionRestore::Refused(SessionOpenError::Busy);
+    }
     let maybe_existing = {
         let sessions_read = sessions.read().await;
         sessions_read.get(chat_id).cloned()
@@ -1452,6 +1623,36 @@ async fn cleanup_idle_session(
     chat_id: &str,
     session_arc: Arc<AMutex<ChatSession>>,
 ) -> bool {
+    close_session_when(
+        app,
+        sessions,
+        chat_id,
+        session_arc,
+        ChatSession::is_idle_for_cleanup,
+    )
+    .await
+}
+
+/// Closes an idle chat now, as a delete needs: the idle cleanup without its inactivity timeout and
+/// with the caller's idle predicate, checked before the chat is closed and again before it is
+/// removed.
+pub(crate) async fn close_idle_session_now(
+    app: AppState,
+    sessions: &SessionsMap,
+    chat_id: &str,
+    session_arc: Arc<AMutex<ChatSession>>,
+    idle: fn(&ChatSession) -> bool,
+) -> bool {
+    close_session_when(app, sessions, chat_id, session_arc, idle).await
+}
+
+async fn close_session_when(
+    app: AppState,
+    sessions: &SessionsMap,
+    chat_id: &str,
+    session_arc: Arc<AMutex<ChatSession>>,
+    idle: fn(&ChatSession) -> bool,
+) -> bool {
     if !save_idle_session_for_cleanup(app.clone(), session_arc.clone()).await {
         return false;
     }
@@ -1469,7 +1670,7 @@ async fn cleanup_idle_session(
             return false;
         }
     };
-    remove_idle_session_if_safe(sessions, chat_id, session_arc).await
+    remove_session_if_safe(sessions, chat_id, session_arc, idle).await
 }
 
 async fn save_idle_session_for_cleanup(
@@ -1491,10 +1692,26 @@ async fn save_idle_session_for_cleanup(
     }
 }
 
+#[cfg(test)]
 async fn remove_idle_session_if_safe(
     sessions: &SessionsMap,
     chat_id: &str,
     session_arc: Arc<AMutex<ChatSession>>,
+) -> bool {
+    remove_session_if_safe(
+        sessions,
+        chat_id,
+        session_arc,
+        ChatSession::is_idle_for_cleanup,
+    )
+    .await
+}
+
+async fn remove_session_if_safe(
+    sessions: &SessionsMap,
+    chat_id: &str,
+    session_arc: Arc<AMutex<ChatSession>>,
+    idle: fn(&ChatSession) -> bool,
 ) -> bool {
     const MAX_REMOVAL_STRONG_REFS: usize = 3;
 
@@ -1515,7 +1732,7 @@ async fn remove_idle_session_if_safe(
         if Arc::strong_count(&session_arc) > max_refs {
             return false;
         }
-        if !close_idle_session_for_cleanup(&mut session) {
+        if !close_session_if(&mut session, idle) {
             return false;
         }
         CleanupRemovalSnapshot::capture(&session)
@@ -1525,7 +1742,7 @@ async fn remove_idle_session_if_safe(
         let Ok(session) = session_arc.try_lock() else {
             return false;
         };
-        removal_snapshot.still_matches(&session)
+        removal_snapshot.still_matches_when(&session, idle)
     };
     if safe_to_remove {
         sessions_write.remove(chat_id);
@@ -1569,10 +1786,15 @@ impl CleanupRemovalSnapshot {
         }
     }
 
+    #[cfg(test)]
     fn still_matches(&self, session: &ChatSession) -> bool {
+        self.still_matches_when(session, ChatSession::is_idle_for_cleanup)
+    }
+
+    fn still_matches_when(&self, session: &ChatSession, idle: fn(&ChatSession) -> bool) -> bool {
         session.closed
             && session.closed_flag.load(Ordering::Relaxed)
-            && session.is_idle_for_cleanup()
+            && idle(session)
             && session.runtime.state == self.runtime_state
             && session.runtime.paused == self.runtime_paused
             && session.runtime.error == self.runtime_error
@@ -1589,8 +1811,13 @@ impl CleanupRemovalSnapshot {
     }
 }
 
+#[cfg(test)]
 fn close_idle_session_for_cleanup(session: &mut ChatSession) -> bool {
-    if !session.is_idle_for_cleanup() {
+    close_session_if(session, ChatSession::is_idle_for_cleanup)
+}
+
+fn close_session_if(session: &mut ChatSession, idle: fn(&ChatSession) -> bool) -> bool {
+    if !idle(session) {
         return false;
     }
     if !session.closed {

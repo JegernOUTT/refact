@@ -44,6 +44,8 @@ mod tools;
 
 pub use dispatch::EngineRunState;
 pub(crate) use dispatch::APPLY as ENGINE_CHANGE_LOCK;
+pub(crate) use chat::apply_queued_patch;
+pub(crate) use dispatch::{failed_envelope, fit_for_script};
 
 /// Key under which the kernel passes the positional function name of `engine("area.fn", ...)`;
 /// not a Python identifier, so it never collides with a keyword argument such as `name`.
@@ -203,6 +205,16 @@ pub struct EngineOutput {
     pub data: Value,
     pub text: String,
     pub privacy: Vec<Value>,
+    /// A change that stopped part of the way: the result is ok false with its data.
+    pub stopped: Option<Stopped>,
+}
+
+/// Why a change stopped, and the part of its card that was applied before it stopped; the change
+/// is recorded with those items only, and not at all when there are none.
+#[derive(Clone, Debug)]
+pub struct Stopped {
+    pub error: String,
+    pub applied: Vec<PythonEngineItem>,
 }
 
 impl EngineOutput {
@@ -211,6 +223,7 @@ impl EngineOutput {
             data,
             text: text.into(),
             privacy: Vec::new(),
+            stopped: None,
         }
     }
 }
@@ -244,6 +257,9 @@ pub struct EngineCtx {
     pub plan: std::sync::Mutex<Option<Plan>>,
     /// This run's engine state; `system.shutdown` asks for a shutdown after the run ends.
     pub run: Option<Arc<EngineRunState>>,
+    /// Set by a handler whose approved change a task now completes even if the call ends: a
+    /// timeout of the call then says so instead of leaving the outcome unexplained.
+    pub completing: std::sync::Mutex<Option<String>>,
 }
 
 impl EngineCtx {

@@ -430,6 +430,7 @@ async fn stale_abort_is_ignored() {
 async fn snapshot_hash_checked_before_loading() {
     let mut c = client().await;
     let path = std::env::temp_dir().join(format!("hash-regression-{}", std::process::id()));
+    let _ = std::fs::remove_file(&path);
     c.send(KernelCommand::Snapshot {
         path: path.to_string_lossy().into_owned(),
     })
@@ -569,6 +570,7 @@ async fn snapshot_load_enforces_passed_state_limit() {
     feed(&c, "x = 42", vec![]).await;
     event(&mut c).await;
     let path = std::env::temp_dir().join(format!("pycm-state-limit-{}", std::process::id()));
+    let _ = std::fs::remove_file(&path);
     c.send(KernelCommand::Snapshot {
         path: path.to_string_lossy().into(),
     })
@@ -619,6 +621,7 @@ async fn variable_previews_are_120_characters_not_bytes() {
         truncated,
         total,
         previews_truncated,
+        ..
     }) = event(&mut c).await
     else {
         panic!()

@@ -28,6 +28,7 @@ import {
   scriptArgs,
   scriptArtifacts,
   scriptChanges,
+  stateLines,
   scriptStatusView,
   scriptTitle,
   splitDisplayPath,
@@ -362,6 +363,67 @@ describe("limitSentence", () => {
     expect(limitSentence(extra({}, "MemoryError"))).toMatch(
       /^Run limit exceeded: the session was lost/,
     );
+  });
+});
+
+describe("stateLines", () => {
+  const extra = (
+    state: Partial<PythonRunExtra["state"]>,
+    status: PythonRunExtra["status"] = "completed",
+  ) => ({
+    status,
+    state: {
+      restored: false,
+      reset_reason: null,
+      persisted: false,
+      bytes: 0,
+      ...state,
+    },
+  });
+  it("turns the engine's not-saved clause into one warning sentence", () => {
+    expect(
+      stateLines(
+        extra({
+          not_saved:
+            "not saved (disk full); variables come from the last successful save",
+        }),
+      ),
+    ).toEqual({
+      notSaved:
+        "State not saved (disk full); variables come from the last successful save.",
+      notes: [],
+    });
+    expect(stateLines(extra({ not_saved: "disk full" })).notSaved).toBe(
+      "State not saved: disk full.",
+    );
+  });
+  const cases: [string, Partial<PythonRunExtra["state"]>, string[]][] = [
+    ["neither", {}, []],
+    [
+      "a note",
+      { note: "the session holds 18.0 MB of variables" },
+      ["The session holds 18.0 MB of variables."],
+    ],
+    [
+      "notes",
+      { notes: ["variables were not copied from chat a: busy", "second."] },
+      ["Variables were not copied from chat a: busy.", "Second."],
+    ],
+    ["both", { note: "large", notes: ["forked"] }, ["Large.", "Forked."]],
+    ["blank ones", { note: " ", notes: ["", "kept"] }, ["Kept."]],
+  ];
+  it.each(cases)("lists %s one per line", (_, state, notes) => {
+    expect(stateLines(extra(state))).toEqual({ notes });
+  });
+  it("leaves out the note a limit sentence already says", () => {
+    expect(
+      stateLines(
+        extra(
+          { note: "run limit exceeded: rolled back", notes: ["evicted"] },
+          "limit_exceeded",
+        ),
+      ),
+    ).toEqual({ notes: ["Evicted."] });
   });
 });
 

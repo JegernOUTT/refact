@@ -135,6 +135,32 @@ describe("Python workspace guard", () => {
       ),
     ).toBe(true);
   });
+  it("keeps read_only and variables_unknown only as booleans", () => {
+    const valid = {
+      ...workspaceExample,
+      session: { ...workspaceExample.session, variables_unknown: true },
+      runs: [{ ...workspaceExample.runs[0], read_only: true }],
+    };
+    expect(isPythonWorkspace(dropInvalidOptionals(valid))).toBe(true);
+    expect(dropInvalidOptionals(valid)).toEqual(valid);
+    const invalid = dropInvalidOptionals({
+      ...workspaceExample,
+      session: { ...workspaceExample.session, variables_unknown: "yes" },
+      runs: [{ ...workspaceExample.runs[0], read_only: 1 }],
+    }) as typeof workspaceExample & {
+      runs: Record<string, unknown>[];
+      session: Record<string, unknown>;
+    };
+    expect(isPythonWorkspace(invalid)).toBe(true);
+    expect("read_only" in invalid.runs[0]).toBe(false);
+    expect("variables_unknown" in invalid.session).toBe(false);
+    expect(
+      isPythonWorkspace({
+        ...workspaceExample,
+        runs: [{ ...workspaceExample.runs[0], read_only: "yes" }],
+      }),
+    ).toBe(false);
+  });
   it("keeps the newest eight displays", async () => {
     const displays = Array.from({ length: 10 }, (_, index) => ({
       index: 1,

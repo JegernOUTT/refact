@@ -766,9 +766,14 @@ async fn commit_transition_snapshot(
     persist_transition(gcx.clone(), &mut session, &snapshot, transferred_goal).await?;
     drop(session);
     let app = AppState::from_gcx(gcx).await;
-    crate::python_tool::workspace::PythonWorkspace::fork(&app, &source_id, &snapshot.chat_id)
-        .await
-        .map_err(TransitionCommitError::Failed)
+    let outcome =
+        crate::python_tool::workspace::PythonWorkspace::fork(&app, &source_id, &snapshot.chat_id)
+            .await
+            .map_err(TransitionCommitError::Failed)?;
+    if let Some(summary) = outcome.summary() {
+        tracing::warn!("Python workspace mode transition: {summary}");
+    }
+    Ok(())
 }
 
 fn transition_commit_failure(error: TransitionCommitError) -> ScratchError {

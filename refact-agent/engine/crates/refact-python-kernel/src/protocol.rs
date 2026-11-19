@@ -7,6 +7,10 @@ pub struct PathDenyRules {
     pub files: Vec<std::path::PathBuf>,
     #[serde(default)]
     pub allow_prefixes: Vec<std::path::PathBuf>,
+    /// Write rules only: every write outside the allow prefixes raises PermissionError with
+    /// this text, ahead of every other rule.
+    #[serde(default)]
+    pub read_only: Option<String>,
 }
 
 pub const MAX_STDOUT_BYTES: usize = 1024 * 1024;
@@ -36,6 +40,11 @@ pub enum KernelCommand {
         call_id: u32,
         result: HostResult,
     },
+    GrepRevalidated {
+        run_id: String,
+        call_id: u32,
+        allowed: bool,
+    },
     Abort {
         run_id: String,
     },
@@ -64,6 +73,37 @@ pub enum GlobalKind {
     /// Async function whose leading positional arguments map, in order, to these keyword names.
     AsyncFnPositional(Vec<String>),
     SyncFn,
+    /// Sync helper the worker runs on its own file backend (`read`, `grep`, `replace`).
+    HostHelper,
+}
+/// Sync call `grep` makes to the engine for the files under a path; its name is not a Python
+/// identifier, so a script cannot call it. Args: `[FileListRequest]`; answer: `FileList`.
+pub const GREP_FILES: &str = "grep.files";
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileListRequest {
+    /// A directory or a single file, as a host path.
+    pub path: std::path::PathBuf,
+    pub max_entries: u64,
+    /// The `glob` of the `grep()` call, if any: it matches the file name, or with a `/` the path
+    /// relative to `path`; `*` stops at `/`, `**` does not; case-sensitive. The worker applies it
+    /// again to the files it gets.
+    #[serde(default)]
+    pub glob: Option<String>,
+}
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileList {
+    /// Files the script may search, as host paths: ignore rules applied, privacy-blocked
+    /// files left out.
+    pub files: Vec<std::path::PathBuf>,
+    /// Privacy-blocked files left out; never named.
+    #[serde(default)]
+    pub blocked: u64,
+    /// The listing stopped at `max_entries`.
+    #[serde(default)]
+    pub truncated: bool,
+    /// Files left out because their names are not UTF-8; never named.
+    #[serde(default)]
+    pub unlisted: usize,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum HostResult {
@@ -137,11 +177,66 @@ pub enum LimitKind {
     Compute,
     Output,
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Dimension {
+    Bytes,
+    Values,
+    Depth,
+    /// The text form of a value JSON cannot hold was cut at `limit` characters.
+    Text,
+}
+/// A conversion limit a value went over.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Exceeded {
+    pub dimension: Dimension,
+    /// Measured when the conversion stopped; the whole value can be larger.
+    pub at_least: u64,
+    pub limit: u64,
+}
+impl Exceeded {
+    pub fn describe(&self) -> String {
+        let (at_least, limit) = (self.at_least, self.limit);
+        match self.dimension {
+            Dimension::Bytes => format!("at least {at_least} bytes, over the {limit}-byte limit"),
+            Dimension::Values => {
+                format!("at least {at_least} values, over the {limit}-value limit")
+            }
+            Dimension::Depth => {
+                format!("nested at least {at_least} levels deep, over the {limit}-level limit")
+            }
+            Dimension::Text => format!("its text form is over {} characters", thousands(limit)),
+        }
+    }
+}
+fn thousands(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VariableSummary {
     pub name: String,
     pub type_name: String,
     pub preview: String,
+}
+/// The estimated size of one variable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VariableSize {
+    pub name: String,
+    pub type_name: String,
+    /// Length of a str, bytes or container.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub len: Option<u64>,
+    /// Estimated from the first items; absent when the value cannot be measured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approx_bytes: Option<u64>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum KernelEvent {
@@ -161,6 +256,9 @@ pub enum KernelEvent {
         line: Option<u32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         col: Option<u32>,
+        /// The first limit the arguments hit when `truncated`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exceeded: Option<Exceeded>,
     },
     SyncCall {
         truncated: bool,
@@ -171,6 +269,14 @@ pub enum KernelEvent {
         /// Keyword arguments other than the `name`/`p` ones folded into `args`.
         #[serde(default, skip_serializing_if = "is_empty_object")]
         kwargs: Value,
+        /// The first limit the arguments hit when `truncated`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exceeded: Option<Exceeded>,
+    },
+    /// After the scan, but before sending its file events or resuming the script.
+    GrepRevalidate {
+        run_id: String,
+        call_id: u32,
     },
     NeedResults {
         run_id: String,
@@ -239,6 +345,17 @@ pub enum KernelEvent {
         /// At least one preview was shortened.
         #[serde(default)]
         previews_truncated: bool,
+        /// The variables could not be listed safely; an empty list then says nothing.
+        #[serde(default)]
+        unknown: bool,
+        /// The largest measured variables, then up to as many that cannot be measured, instances
+        /// of classes a script defined first.
+        #[serde(default)]
+        largest: Vec<VariableSize>,
+        /// How many listed variables cannot be measured; functions, classes and modules count
+        /// as size 0 and are not among them.
+        #[serde(default)]
+        unmeasured: usize,
     },
 }
 pub fn write_frame<W: Write, T: Serialize>(w: &mut W, value: &T) -> io::Result<()> {

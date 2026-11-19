@@ -36,6 +36,64 @@ export function engineRequest(
   };
 }
 
+/** One unbroken 400-character line inside an edited message. */
+export const PATCH_LONG_LINE = `Logs:${"x".repeat(395)}`;
+
+/**
+ * A `chats.patch` request (trajectory control): an edit whose old and new
+ * texts span several lines, one of them long, a removed message and an
+ * inserted one, with the engine's warning.
+ */
+export const chatsPatchRequest = engineRequest(
+  {
+    function: "chats.patch",
+    class: "destructive",
+    title: "change messages in another chat",
+    scope: "chat Parser refactor (6b1d0c2e-8f0a-4d55-9a57-1f2e3d4c5b6a)",
+    warning:
+      "The original messages will be overwritten and cannot be restored.",
+    items: [
+      {
+        label: "message 2 (user)",
+        old: [
+          "Refactor the parser so every token keeps its source span.",
+          "Keep the public API unchanged.",
+          "Run the whole test suite before you report.",
+          PATCH_LONG_LINE,
+          "Report every failing case.",
+        ].join("\n"),
+        new: [
+          "Refactor the parser so every token keeps its source span.",
+          "Keep the public API unchanged; deprecate nothing.",
+          "Run the whole test suite before you report.",
+          PATCH_LONG_LINE,
+          "Report every failing case with its input.",
+        ].join("\n"),
+      },
+      {
+        label: "message 4 (assistant)",
+        old: Array.from(
+          { length: 12 },
+          (_, index) => `Step ${index + 1}: updated the lexer tables.`,
+        ).join("\n"),
+      },
+      {
+        label: "new message after 4 (user)",
+        new: [
+          "Now add a regression test for spans.",
+          "Use the fixtures under tests/parser.",
+          "Do not touch the CLI.",
+        ].join("\n"),
+      },
+    ],
+  },
+  {
+    request_id: "patch",
+    tool_name: "engine.chats.patch",
+    args_preview: '{"chat_id":"6b1d0c2e","ops":"[3 operations]"}',
+  },
+);
+
 export const engineChange = (
   seq: number,
   change: Partial<PythonEngineChange> = {},

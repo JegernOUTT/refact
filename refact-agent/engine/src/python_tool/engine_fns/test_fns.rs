@@ -75,7 +75,7 @@ pub fn functions() -> Vec<EngineFn> {
             name: "testing.mark",
             summary: "A change that writes a marker file and can panic, sleep past its timeout or return a large result.",
             class: EngineClass::Change,
-            input: || json!({"type":"object","additionalProperties":false,"required":["path"],"properties":{"path":{"type":"string"},"name":{"type":"string"},"mode":{"enum":["ok","panic","hang","big"]},"secret_token":{"type":"string"}}}),
+            input: || json!({"type":"object","additionalProperties":false,"required":["path"],"properties":{"path":{"type":"string"},"name":{"type":"string"},"mode":{"enum":["ok","panic","hang","big","completing"]},"secret_token":{"type":"string"}}}),
             output: || None,
             handler: mark,
             preview: Some(mark_preview),
@@ -168,6 +168,11 @@ fn mark<'a>(
                 Ok(EngineOutput::default())
             }
             Some("big") => Ok(EngineOutput::new(json!("x".repeat(200_000)), "big")),
+            Some("completing") => {
+                *ctx.completing.lock().unwrap() = Some("the zone change is being completed".into());
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                Ok(EngineOutput::default())
+            }
             _ => Ok(EngineOutput::new(json!({"name":args["name"]}), "marked")),
         }
     })

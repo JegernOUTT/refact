@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import classNames from "classnames";
 import type { PythonEngineItem } from "../../../services/refact/types";
 import { DiffBlock } from "./DiffBlock";
@@ -9,9 +9,12 @@ import {
   isTextPair,
   textPairHunks,
 } from "./engineChanges";
+import { plural } from "./pythonDisplay";
 import { shortText } from "./safeText";
 import { ShortText } from "./ShortText";
 import styles from "./EngineItems.module.css";
+
+const TEXT_PAIR_CHANGES = 20;
 
 function Side({
   value,
@@ -60,11 +63,13 @@ function TextPair({
     () => textPairHunks(label, item.old, item.new),
     [item.new, item.old, label],
   );
+  const [all, setAll] = useState(false);
   if (hunks.length === 0)
     return <span className={styles.note}>No difference in the text</span>;
+  const shown = all ? hunks : hunks.slice(0, TEXT_PAIR_CHANGES);
   return (
     <div className={styles.diff} aria-label={`Changes to ${label}`}>
-      {hunks.map((hunk, index) => (
+      {shown.map((hunk, index) => (
         <DiffBlock
           key={index}
           diff={hunk}
@@ -72,6 +77,15 @@ function TextPair({
           displayFileName={label}
         />
       ))}
+      {shown.length < hunks.length && (
+        <button
+          type="button"
+          className={styles.more}
+          onClick={() => setAll(true)}
+        >
+          Show {plural(hunks.length - shown.length, "more change")}
+        </button>
+      )}
     </div>
   );
 }

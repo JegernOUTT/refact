@@ -5615,6 +5615,7 @@ dependencies = [
  "git2",
  "refact-core",
  "serde",
+ "serde_json",
  "tempfile",
  "tracing",
  "url",
@@ -5905,19 +5906,25 @@ name = "refact-python-kernel"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "glob",
  "hmac 0.13.0",
  "libc",
  "monty",
  "monty-type-checking",
  "monty-types",
  "rand 0.8.5",
- "same-file",
+ "regex",
+ "ruff_python_ast",
+ "ruff_python_parser",
+ "ruff_text_size",
  "serde",
  "serde_json",
  "sha2 0.11.1",
+ "similar 2.7.0",
  "sysinfo",
  "thiserror 2.0.18",
  "tokio",
+ "winapi-util",
 ]
 
 [[package]]

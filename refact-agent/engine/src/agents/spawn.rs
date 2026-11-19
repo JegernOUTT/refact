@@ -1876,16 +1876,10 @@ async fn prepare_launch_for_parent_run(
     }
     let mut messages = if let Some(inherited) = &req.parent_inherited_launch {
         let mut messages = inherited.preamble.clone();
-        if let Some(system) = messages.iter_mut().find(|message| message.role == "system") {
-            if let crate::call_validation::ChatContent::SimpleText(text) = &system.content {
-                let rewritten = crate::chat::prompts::rewrite_artifacts_for_fork(
-                    app,
-                    text,
-                    &req.parent_chat_id,
-                    child_chat_id,
-                )
-                .await;
-                system.content = crate::call_validation::ChatContent::SimpleText(rewritten);
+        if inherited.prompt_source == "parent" {
+            refresh_inherited_code_mode(app, &config, &mut messages).await;
+            if let Some(text) = inherited_system_text(&mut messages) {
+                defer_inherited_artifacts(text, &req.parent_chat_id);
             }
         }
         messages.push(event(
@@ -1905,9 +1899,9 @@ async fn prepare_launch_for_parent_run(
             req.goal.as_ref(),
         )
         .await?;
-        let options =
-            crate::python_tool::catalog_binding::BindOptions::for_project(app.gcx.clone()).await;
-        append_python_instructions(&mut messages, &config.tools, options.llm, options.engine);
+        if let Some(instructions) = effective_child_code_mode(app, &config).await {
+            append_python_instructions(&mut messages, &instructions);
+        }
         messages
     };
     let parent = app
@@ -2439,52 +2433,207 @@ mod accepted_launch_tests {
     }
 
     #[tokio::test]
-    async fn public_launch_rewrites_inherited_artifacts_section_for_the_child() {
-        let (_gcx, app, parent, workspace) =
-            super::super::tests::app_with_parent_session("artifacts-parent").await;
-        let thread = parent.lock().await.thread.clone();
-        let names = std::collections::HashSet::from(["create_textdoc".to_string()]);
+    #[serial_test::serial(test_runner)]
+    async fn public_launch_inherited_artifacts_match_the_nested_worker_workspace() {
+        use crate::chat::prompts::ARTIFACTS_INSTRUCTIONS_MARKER;
+        use crate::python_tool::workspace::{PythonWorkspace, parent_artifacts_dir};
+
+        let parent_id = "subchat-artifacts-parent";
+        let child_uuid = Uuid::new_v4();
+        let child_id = format!("subchat-{child_uuid}");
+        let root_chat_id = "artifacts-root";
+        let (gcx, app, parent, workspace) =
+            super::super::tests::app_with_parent_session(parent_id).await;
+        {
+            let mut caps = gcx.caps_state.write().await;
+            let models = &mut Arc::make_mut(caps.caps.as_mut().unwrap()).chat_models;
+            let model = Arc::make_mut(models.get_mut("model").unwrap());
+            model.base.n_ctx = 32_768;
+            model.base.tokenizer = "fake".into();
+        }
+        let root = dunce::canonicalize(workspace.path()).unwrap();
+        let thread = {
+            let mut parent = parent.lock().await;
+            parent.thread.mode = "agent".into();
+            parent.thread.parent_id = Some(root_chat_id.into());
+            parent.thread.root_chat_id = Some(root_chat_id.into());
+            parent.thread.link_type = Some("subagent".into());
+            parent.thread.clone()
+        };
+        let names =
+            std::collections::HashSet::from(["cat".into(), "python".into(), "shell".into()]);
+        let code_mode =
+            crate::chat::prompt_snippets::python_tool_instructions(&names, false, true, false);
+        let parent_workspace = PythonWorkspace::for_chat(&app, parent_id).await.unwrap();
+        let parent_dir = parent_workspace.artifacts_dir();
+        let tail = format!("\n## Other\nKeep `{}` verbatim.", parent_dir.display());
         let parent_prompt = crate::chat::prompts::expand_artifacts_instructions(
             &app,
-            &format!(
-                "BEFORE\n{}\n## Other\nAFTER",
-                crate::chat::prompts::ARTIFACTS_INSTRUCTIONS_MARKER
-            ),
-            "artifacts-parent",
+            &format!("BEFORE\n{code_mode}\n{ARTIFACTS_INSTRUCTIONS_MARKER}{tail}"),
+            parent_id,
             &names,
             "agent",
         )
         .await;
-        assert!(parent_prompt.contains("refact://artifact/artifacts-parent/"));
-        let mut req = super::super::tests::subagent_spawn_request("artifacts-parent", "src/a.rs");
+        assert!(parent_prompt.contains("refact://artifact/subchat-artifacts-parent/"));
+        assert!(parent_prompt.contains("await run("));
+        assert!(parent_prompt.contains("await engine("));
+        assert!(!parent_prompt.contains("scripts cannot change files"));
+        let mut req = super::super::tests::subagent_spawn_request(parent_id, "base.txt");
+        req.prompt = "Reply with a short acknowledgement. Do not call any tools.".into();
+        req.notify_parent = NotifyParent::Silent;
+        req.parent_root_chat_id = Some(root_chat_id.into());
+        req.subchat_depth = 1;
+        req.tools = Some(vec!["cat".into(), "python".into()]);
         req.parent_inherited_launch = Some(ParentInheritedLaunch {
             thread,
-            preamble: vec![ChatMessage::new("system".into(), parent_prompt.clone())],
+            preamble: vec![ChatMessage::new("system".into(), parent_prompt)],
             prompt_source: "parent".into(),
         });
-        let (prepared, _) = prepare_launch(
-            &app,
-            &req,
-            "subchat-artifacts-child",
-            workspace.path().canonicalize().unwrap(),
+        let (prepared, payload) = prepare_launch(&app, &req, &child_id, root.clone())
+            .await
+            .unwrap();
+        assert!(prepared.config.tools.allows_tool("python"));
+        assert!(!prepared.config.tools.allows_tool("shell"));
+        assert!(prepared.messages[0]
+            .content
+            .content_text_only()
+            .contains(ARTIFACTS_INSTRUCTIONS_MARKER));
+
+        let (start, accepted) = oneshot::channel();
+        let digest = launch_digest(&payload);
+        let handle = accept_prepared_launch(
+            app.clone(),
+            req,
+            prepared,
+            payload,
+            digest,
+            root.clone(),
+            (Vec::new(), true),
+            child_uuid,
+            child_id.clone(),
+            accepted,
         )
         .await
         .unwrap();
-        let child_prompt = prepared.messages[0].content.content_text_only();
-        assert_eq!(
-            child_prompt,
-            crate::chat::prompts::rewrite_artifacts_for_fork(
-                &app,
-                &parent_prompt,
-                "artifacts-parent",
-                "subchat-artifacts-child",
-            )
-            .await
+        let answer = "Acknowledged.";
+        crate::subchat::install_model_fixture(
+            &child_id,
+            vec![crate::chat::stream_core::ChoiceFinal {
+                content: answer.into(),
+                finish_reason: Some("stop".into()),
+                ..Default::default()
+            }],
+            None,
         );
-        assert!(child_prompt.contains("refact://artifact/subchat-artifacts-child/"));
-        assert!(!child_prompt.contains("refact://artifact/artifacts-parent/"));
+        start.send(()).unwrap();
+        let completed = super::super::spawn_lifecycle_tests::await_completion(handle).await;
+        let requests = crate::subchat::model_fixture_requests(&child_id);
+        crate::subchat::remove_model_fixture(&child_id);
+        assert_eq!(
+            completed.status,
+            crate::agents::types::BgAgentStatus::Completed,
+            "first launch failed before/after {} provider request(s): {:?}",
+            requests.len(),
+            completed.error
+        );
+        assert_eq!(completed.result_summary.as_deref(), Some(answer));
+        assert_eq!(requests.len(), 1);
+        let tool_names: Vec<_> = requests[0]
+            .tools
+            .iter()
+            .flatten()
+            .filter_map(|tool| tool.pointer("/function/name").and_then(Value::as_str))
+            .collect();
+        assert!(tool_names.contains(&"python"), "{tool_names:?}");
+        assert!(!tool_names.contains(&"shell"), "{tool_names:?}");
+        let child_prompt = requests[0]
+            .messages
+            .iter()
+            .find(|message| message.role == "system")
+            .expect("provider-visible inherited system message")
+            .content
+            .content_text_only();
+        assert!(!child_prompt.contains("await run("), "{child_prompt}");
+        assert!(!child_prompt.contains("await engine("), "{child_prompt}");
+        assert!(child_prompt.contains("scripts cannot change files outside ARTIFACTS_DIR"));
+        assert!(child_prompt.contains("`r = await cat(paths=\"README.md\")`"));
+        assert_eq!(
+            child_prompt.matches("## Python tool (Code Mode)").count(),
+            1
+        );
+        assert!(
+            child_prompt.contains("immediate parent chat's artifacts from PARENT_ARTIFACTS_DIR")
+        );
         assert!(child_prompt.starts_with("BEFORE\n"));
-        assert!(child_prompt.ends_with("\n## Other\nAFTER"));
+
+        let worker_dir = PythonWorkspace::for_chat(&app, &child_id)
+            .await
+            .unwrap()
+            .artifacts_dir();
+        assert_eq!(
+            worker_dir,
+            root.join(".refact/trajectories/artifacts-root/python")
+                .join(&child_id)
+                .join("artifacts")
+        );
+        assert_eq!(
+            parent_dir,
+            root.join(
+                ".refact/trajectories/artifacts-root/python/subchat-artifacts-parent/artifacts"
+            )
+        );
+        assert_eq!(
+            parent_artifacts_dir(&app, &child_id).await,
+            Some(parent_dir)
+        );
+        let advertised_dir = child_prompt
+            .split_once("## Artifacts for the user\n")
+            .and_then(|(_, section)| section.split('`').nth(1))
+            .expect("provider-visible artifacts path");
+        assert_eq!(Path::new(advertised_dir), worker_dir);
+        assert!(child_prompt.contains(&format!("refact://artifact/{child_id}/")));
+        assert!(!child_prompt.contains("refact://artifact/subchat-artifacts-parent/"));
+        assert!(!child_prompt.contains(ARTIFACTS_INSTRUCTIONS_MARKER));
+        assert!(child_prompt.ends_with(&tail));
+    }
+
+    #[tokio::test]
+    async fn public_launch_inherited_code_mode_without_python_preserves_custom_text() {
+        let parent_id = "code-mode-text-parent";
+        let (_gcx, app, parent, workspace) =
+            super::super::tests::app_with_parent_session(parent_id).await;
+        let thread = parent.lock().await.thread.clone();
+        let mode = crate::chat::prompt_snippets::python_tool_instructions(
+            &std::collections::HashSet::from(["shell".into()]),
+            true,
+            true,
+            false,
+        );
+        let prefix = "## Python tool (Code Mode)\nUser-written Python notes.\n\n";
+        let suffix = "\n## Artifacts for the user\nUser-written artifact notes. \n";
+        let prompt = format!("{prefix}{}{suffix}", mode.trim_end());
+        let mut req = super::super::tests::subagent_spawn_request(parent_id, "src/a.rs");
+        req.tools = Some(vec!["cat".into()]);
+        req.parent_inherited_launch = Some(ParentInheritedLaunch {
+            thread,
+            preamble: vec![ChatMessage::new("system".into(), prompt.clone())],
+            prompt_source: "parent".into(),
+        });
+        let root = workspace.path().canonicalize().unwrap();
+        let (prepared, _) = prepare_launch(&app, &req, "subchat-no-python", root.clone())
+            .await
+            .unwrap();
+        assert!(!prepared.config.tools.allows_tool("python"));
+        assert_eq!(
+            prepared.messages[0].content.content_text_only(),
+            format!("{prefix}{suffix}")
+        );
+        req.parent_inherited_launch.as_mut().unwrap().prompt_source = "override".into();
+        let (prepared, _) = prepare_launch(&app, &req, "subchat-code-mode-override", root)
+            .await
+            .unwrap();
+        assert_eq!(prepared.messages[0].content.content_text_only(), prompt);
     }
 
     #[tokio::test]
@@ -2828,6 +2977,13 @@ async fn revalidate_prepared_launch(
         .await?
     };
     prepared.config.tools = super::tool_authority::intersect(&prepared.config.tools, &ceiling);
+    if req
+        .parent_inherited_launch
+        .as_ref()
+        .is_some_and(|inherited| inherited.prompt_source == "parent")
+    {
+        refresh_inherited_code_mode(app, &prepared.config, &mut prepared.messages).await;
+    }
     let caps = crate::global_context::try_load_caps_quickly_if_not_present(app.gcx.clone(), 0)
         .await
         .map_err(|_| "accepted launch model unavailable")?;
@@ -4522,28 +4678,80 @@ async fn run_background_subchat_inner(
     crate::subchat::run_subchat_with_lease(gcx, messages, config, runner_guard).await
 }
 
-/// Children with `python` get the same Code Mode section as top-level chats.
-pub(crate) fn append_python_instructions(
-    messages: &mut [ChatMessage],
+/// Tool names a child's Code Mode section describes: its mode's tools, narrowed to its own list
+/// when it has one, as its runs call only tools of the mode's catalog.
+pub(crate) fn python_prompt_names(
     tools: &crate::subchat::ToolsPolicy,
-    llm: bool,
-    engine: bool,
-) {
-    if !tools.allows_tool("python") {
-        return;
-    }
-    let engine = engine && matches!(tools, crate::subchat::ToolsPolicy::All);
-    let names: std::collections::HashSet<String> = match tools {
-        crate::subchat::ToolsPolicy::All => crate::chat::prompt_snippets::PYTHON_EXAMPLE_CALLS
-            .iter()
-            .map(|(name, _)| name.to_string())
-            .collect(),
+    mode_tools: std::collections::HashSet<String>,
+) -> Option<std::collections::HashSet<String>> {
+    match tools {
+        crate::subchat::ToolsPolicy::All => Some(mode_tools),
         crate::subchat::ToolsPolicy::Only(names)
         | crate::subchat::ToolsPolicy::Supervised {
             tools: names, ..
-        } => names.iter().cloned().collect(),
-        crate::subchat::ToolsPolicy::None => return,
-    };
+        } => Some(
+            mode_tools
+                .into_iter()
+                .filter(|tool| {
+                    names.iter().any(|name| {
+                        crate::agents::tool_authority::canonical(name)
+                            == crate::agents::tool_authority::canonical(tool)
+                    })
+                })
+                .collect(),
+        ),
+        crate::subchat::ToolsPolicy::None => None,
+    }
+}
+
+fn child_code_mode_instructions(
+    tools: &crate::subchat::ToolsPolicy,
+    names: &std::collections::HashSet<String>,
+    llm: bool,
+    engine: bool,
+    read_only: bool,
+) -> Option<String> {
+    if !tools.allows_tool("python") {
+        return None;
+    }
+    let engine = engine && matches!(tools, crate::subchat::ToolsPolicy::All);
+    Some(crate::chat::prompt_snippets::python_tool_instructions(
+        names, llm, engine, read_only,
+    ))
+}
+
+async fn effective_child_code_mode(app: &AppState, config: &SubchatConfig) -> Option<String> {
+    if !config.tools.allows_tool("python") {
+        return None;
+    }
+    let mode_tools = app
+        .tool_registry
+        .acquire_tool_catalog(&config.mode, Some(&config.model), None)
+        .await
+        .index
+        .tools
+        .iter()
+        .map(|tool| tool.name.clone())
+        .collect();
+    let names = python_prompt_names(&config.tools, mode_tools)?;
+    let (names, read_only) =
+        crate::tools::tool_python::code_mode_prompt(app, &names, &config.mode, Some(&config.model))
+            .await;
+    if !names.contains("python") {
+        return None;
+    }
+    let options =
+        crate::python_tool::catalog_binding::BindOptions::for_project(app.gcx.clone()).await;
+    child_code_mode_instructions(
+        &config.tools,
+        &names,
+        options.llm,
+        options.engine,
+        read_only,
+    )
+}
+
+fn append_python_instructions(messages: &mut [ChatMessage], instructions: &str) {
     let Some(system) = messages.iter_mut().find(|m| m.role == "system") else {
         return;
     };
@@ -4551,7 +4759,6 @@ pub(crate) fn append_python_instructions(
     if text.contains("## Python tool (Code Mode)") {
         return;
     }
-    let instructions = crate::chat::prompt_snippets::python_tool_instructions(&names, llm, engine);
     match &mut system.content {
         ChatContent::SimpleText(text) => *text = format!("{}\n\n{}", text.trim_end(), instructions),
         ChatContent::Multimodal(parts) => parts.push(crate::call_validation::MultimodalElement {
@@ -4559,6 +4766,110 @@ pub(crate) fn append_python_instructions(
             m_content: format!("\n\n{instructions}"),
         }),
         ChatContent::ContextFiles(_) => {}
+    }
+}
+
+const PARENT_CODE_MODE_ARTIFACTS: &str = "- Read the immediate parent chat's artifacts from PARENT_ARTIFACTS_DIR when available; save your outputs under your own ARTIFACTS_DIR.";
+
+fn inherited_system_text(messages: &mut [ChatMessage]) -> Option<&mut String> {
+    let system = messages
+        .iter_mut()
+        .find(|message| message.role == "system")?;
+    match &mut system.content {
+        ChatContent::SimpleText(text) => Some(text),
+        _ => None,
+    }
+}
+
+fn inherited_code_mode_range(text: &str) -> Option<std::ops::Range<usize>> {
+    use crate::chat::prompt_snippets as snippets;
+
+    let heading = snippets::PYTHON_TOOL_INSTRUCTIONS.lines().next()?;
+    let last_line = snippets::PYTHON_TOOL_INSTRUCTIONS.lines().last()?;
+    text.match_indices(heading)
+        .filter(|(start, _)| *start == 0 || text.as_bytes()[start - 1] == b'\n')
+        .find_map(|(start, _)| {
+            let tail = &text[start..];
+            let end = tail.find(last_line)? + last_line.len();
+            let section = &tail[..end];
+            let mut names: std::collections::HashSet<String> = snippets::PYTHON_EXAMPLE_CALLS
+                .iter()
+                .filter(|(_, call)| section.contains(call))
+                .map(|(name, _)| (*name).into())
+                .collect();
+            if section.contains(snippets::PYTHON_RUN_BULLET) {
+                names.insert(refact_python_catalog::RUN_TOOL.into());
+            }
+            let expected = snippets::python_tool_instructions(
+                &names,
+                section.contains(snippets::PYTHON_LLM_BULLET),
+                section.contains(snippets::PYTHON_ENGINE_BULLET),
+                section.contains(snippets::PYTHON_READ_ONLY_BULLET),
+            );
+            if section != expected.trim_end() {
+                return None;
+            }
+            let parent = format!("\n{PARENT_CODE_MODE_ARTIFACTS}");
+            let rest = &tail[end..];
+            if let Some(suffix) = rest.strip_prefix(&parent) {
+                if suffix.is_empty() || suffix.starts_with('\n') {
+                    return Some(start..start + end + parent.len());
+                }
+            }
+            (rest.is_empty() || rest.starts_with('\n')).then_some(start..start + end)
+        })
+}
+
+async fn refresh_inherited_code_mode(
+    app: &AppState,
+    config: &SubchatConfig,
+    messages: &mut [ChatMessage],
+) {
+    let Some(text) = inherited_system_text(messages) else {
+        return;
+    };
+    let Some(range) = inherited_code_mode_range(text) else {
+        return;
+    };
+    let instructions = effective_child_code_mode(app, config).await;
+    let replacement =
+        instructions.map(|instructions| format!("{}{PARENT_CODE_MODE_ARTIFACTS}", instructions));
+    text.replace_range(range, replacement.as_deref().unwrap_or_default());
+}
+
+fn defer_inherited_artifacts(text: &mut String, parent_id: &str) {
+    use crate::chat::prompt_snippets as snippets;
+    use crate::chat::prompts::ARTIFACTS_INSTRUCTIONS_MARKER;
+
+    let range = text
+        .match_indices("## Artifacts for the user\n")
+        .filter(|(start, _)| *start == 0 || text.as_bytes()[start - 1] == b'\n')
+        .find_map(|(start, _)| {
+            let tail = &text[start..];
+            let is_complete_line = |len| tail[len..].is_empty() || tail[len..].starts_with('\n');
+            for template in [
+                snippets::ARTIFACTS_INSTRUCTIONS_FULL,
+                snippets::ARTIFACTS_INSTRUCTIONS_READ_ONLY,
+            ] {
+                let template = template.trim_end().replace("{CHAT_ID}", parent_id);
+                let (before, after) = template.split_once("{ARTIFACTS_DIR}")?;
+                if let Some((path, _)) = tail.strip_prefix(before).and_then(|s| s.split_once(after))
+                {
+                    let len = before.len() + path.len() + after.len();
+                    if Path::new(path).is_absolute()
+                        && !path.contains('\n')
+                        && is_complete_line(len)
+                    {
+                        return Some(start..start + len);
+                    }
+                }
+            }
+            let unavailable = snippets::ARTIFACTS_INSTRUCTIONS_UNAVAILABLE.trim_end();
+            (tail.starts_with(unavailable) && is_complete_line(unavailable.len()))
+                .then_some(start..start + unavailable.len())
+        });
+    if let Some(range) = range {
+        text.replace_range(range, ARTIFACTS_INSTRUCTIONS_MARKER);
     }
 }
 
@@ -6118,6 +6429,18 @@ mod supervised_rollback_tests {
 #[cfg(test)]
 mod python_prompt_tests {
     use super::*;
+    use std::collections::HashSet;
+
+    fn append(messages: &mut [ChatMessage], tools: &crate::subchat::ToolsPolicy, engine: bool) {
+        let names = python_prompt_names(tools, HashSet::from(["cat".into(), "shell".into()]))
+            .unwrap_or_default();
+        if let Some(instructions) =
+            child_code_mode_instructions(tools, &names, false, engine, false)
+        {
+            append_python_instructions(messages, &instructions);
+        }
+    }
+
     #[test]
     fn subagent_prompt_gets_python_section_only_with_python_tool() {
         let base = || {
@@ -6128,13 +6451,13 @@ mod python_prompt_tests {
         };
         let with = crate::subchat::ToolsPolicy::Only(vec!["python".into(), "cat".into()]);
         let mut messages = base();
-        append_python_instructions(&mut messages, &with, false, false);
+        append(&mut messages, &with, false);
         let text = messages[0].content.content_text_only();
         assert!(text.starts_with("You are a focused subagent."));
         assert!(text.contains("## Python tool (Code Mode)"));
         assert!(text.contains("`r = await cat(paths=\"README.md\")`"));
         assert!(!text.contains("%PYTHON_"));
-        append_python_instructions(&mut messages, &with, false, false);
+        append(&mut messages, &with, false);
         assert_eq!(
             messages[0]
                 .content
@@ -6144,10 +6467,9 @@ mod python_prompt_tests {
             1
         );
         let mut messages = base();
-        append_python_instructions(
+        append(
             &mut messages,
             &crate::subchat::ToolsPolicy::Only(vec!["cat".into()]),
-            false,
             false,
         );
         assert!(!messages[0]
@@ -6169,10 +6491,9 @@ mod python_prompt_tests {
             },
         ]);
         let mut messages = vec![message];
-        append_python_instructions(
+        append(
             &mut messages,
             &crate::subchat::ToolsPolicy::Only(vec!["python".into()]),
-            false,
             false,
         );
         let ChatContent::Multimodal(parts) = &messages[0].content else {
@@ -6189,10 +6510,9 @@ mod python_prompt_tests {
     fn a_restricted_subagent_is_not_told_about_engine() {
         let system = || vec![ChatMessage::new("system".into(), "Subagent.".into())];
         let mut restricted = system();
-        append_python_instructions(
+        append(
             &mut restricted,
             &crate::subchat::ToolsPolicy::Only(vec!["python".into()]),
-            false,
             true,
         );
         let text = restricted[0].content.content_text_only();
@@ -6201,10 +6521,110 @@ mod python_prompt_tests {
             "{text}"
         );
         let mut open = system();
-        append_python_instructions(&mut open, &crate::subchat::ToolsPolicy::All, false, true);
+        append(&mut open, &crate::subchat::ToolsPolicy::All, true);
         assert!(open[0]
             .content
             .content_text_only()
             .contains("await engine("));
+    }
+
+    #[test]
+    fn a_child_hears_of_run_only_with_shell_and_of_read_only_only_when_it_is() {
+        let system = || vec![ChatMessage::new("system".into(), "Subagent.".into())];
+        let read_only_tools =
+            crate::subchat::ToolsPolicy::Only(vec!["cat".into(), "python".into()]);
+        let names = python_prompt_names(&read_only_tools, HashSet::new()).unwrap();
+        let mut messages = system();
+        let instructions =
+            child_code_mode_instructions(&read_only_tools, &names, false, false, true).unwrap();
+        append_python_instructions(&mut messages, &instructions);
+        let text = messages[0].content.content_text_only();
+        assert!(
+            text.contains("scripts cannot change files outside ARTIFACTS_DIR"),
+            "{text}"
+        );
+        assert!(!text.contains("await run("), "{text}");
+        assert!(text.contains("await git(\"status\")"), "{text}");
+
+        let all = crate::subchat::ToolsPolicy::All;
+        let names =
+            python_prompt_names(&all, HashSet::from(["shell".into(), "python".into()])).unwrap();
+        let mut messages = system();
+        let instructions = child_code_mode_instructions(&all, &names, false, false, false).unwrap();
+        append_python_instructions(&mut messages, &instructions);
+        let text = messages[0].content.content_text_only();
+        assert!(
+            text.contains("r = await run(\"cargo test -p x\")"),
+            "{text}"
+        );
+        assert!(!text.contains("cannot change files"), "{text}");
+        assert!(python_prompt_names(&crate::subchat::ToolsPolicy::None, HashSet::new()).is_none());
+    }
+
+    #[test]
+    fn a_child_hears_only_of_tools_its_mode_gives_its_runs() {
+        let mode_tools = HashSet::from(["cat".to_string(), "python".into(), "tree".into()]);
+        let only = crate::subchat::ToolsPolicy::Only(vec!["python".into(), "shell".into()]);
+        assert_eq!(
+            python_prompt_names(&only, mode_tools.clone()),
+            Some(HashSet::from(["python".to_string()]))
+        );
+        let supervised = crate::subchat::ToolsPolicy::Supervised {
+            tools: vec!["cat".into(), "python".into(), "rm".into()],
+            budget: Default::default(),
+        };
+        assert_eq!(
+            python_prompt_names(&supervised, mode_tools),
+            Some(HashSet::from(["cat".to_string(), "python".into()]))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_writable_child_is_not_told_that_it_is_read_only() {
+        let app = AppState::from_gcx(crate::global_context::tests::make_test_gcx().await).await;
+        let mode_tools: HashSet<String> = app
+            .tool_registry
+            .acquire_tool_catalog("agent", Some("model"), None)
+            .await
+            .index
+            .tools
+            .iter()
+            .map(|tool| tool.name.clone())
+            .collect();
+        let all = crate::subchat::ToolsPolicy::All;
+        let names = python_prompt_names(&all, mode_tools).unwrap();
+        let (names, read_only) =
+            crate::tools::tool_python::code_mode_prompt(&app, &names, "agent", None).await;
+        assert!(!read_only);
+        let mut messages = vec![ChatMessage::new("system".into(), "Subagent.".into())];
+        let instructions =
+            child_code_mode_instructions(&all, &names, false, false, read_only).unwrap();
+        append_python_instructions(&mut messages, &instructions);
+        let text = messages[0].content.content_text_only();
+        assert!(!text.contains("cannot change files"), "{text}");
+        assert!(text.contains("await run("), "{text}");
+    }
+
+    #[tokio::test]
+    async fn the_prompt_read_only_predicate_follows_tool_names() {
+        let app = AppState::from_gcx(crate::global_context::tests::make_test_gcx().await).await;
+        let names = |list: &[&str]| list.iter().map(|n| n.to_string()).collect::<HashSet<_>>();
+        for (tools, writable) in [
+            (names(&["python", "cat", "search_pattern"]), false),
+            (names(&["python", "cat", "mcp_fs_write_file"]), false),
+            (names(&["python", "shell"]), true),
+            (names(&["python", "rm"]), true),
+            (names(&["python", "process_start"]), true),
+            (names(&["python", "apply_patch"]), true),
+            (names(&["python", "update_textdoc"]), true),
+        ] {
+            assert_eq!(
+                !crate::tools::tool_python::code_mode_prompt(&app, &tools, "agent", None)
+                    .await
+                    .1,
+                writable,
+                "{tools:?}"
+            );
+        }
     }
 }

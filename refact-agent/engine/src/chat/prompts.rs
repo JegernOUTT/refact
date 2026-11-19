@@ -551,7 +551,14 @@ pub async fn system_prompt_add_extra_instructions(
             crate::python_tool::catalog_binding::BindOptions::for_project(app.gcx.clone()).await;
         let engine = options.engine
             && !crate::tools::tools_list::python_engine_hidden(&app, &chat_meta.chat_id).await;
-        crate::chat::prompt_snippets::python_tool_instructions(&tool_names, options.llm, engine)
+        let (names, read_only) =
+            crate::tools::tool_python::code_mode_prompt(&app, &tool_names, mode_id, None).await;
+        crate::chat::prompt_snippets::python_tool_instructions(
+            &names,
+            options.llm,
+            engine,
+            read_only,
+        )
     } else {
         String::new()
     };
@@ -1496,12 +1503,63 @@ mod tests {
             assert_eq!(
                 rendered,
                 if present {
-                    crate::chat::prompt_snippets::python_tool_instructions(&tools, true, true)
+                    crate::chat::prompt_snippets::python_tool_instructions(&tools, true, true, true)
                 } else {
                     String::new()
                 }
             );
         }
+    }
+
+    #[tokio::test]
+    async fn code_mode_describes_run_and_writes_from_the_authority_runs_have() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = AppState::from_gcx(gcx).await;
+        let tools = HashSet::from(["python".to_string(), "shell".to_string()]);
+        let meta = ChatMeta::default();
+        let task = None;
+        let render = |mode: &'static str| {
+            system_prompt_add_extra_instructions(
+                app.clone(),
+                "%CODE_MODE%".to_string(),
+                tools.clone(),
+                &meta,
+                &task,
+                mode,
+            )
+        };
+        assert_eq!(
+            render("agent").await,
+            crate::chat::prompt_snippets::python_tool_instructions(&tools, true, true, false)
+        );
+        let mut registry =
+            crate::yaml_configs::customization_registry::get_project_registry(app.gcx.clone())
+                .await
+                .unwrap();
+        let mut mode = registry.modes["agent"].clone();
+        mode.id = "no_shell_fixture".into();
+        mode.tool_confirm.rules = vec![crate::yaml_configs::customization_types::ToolConfirmRule {
+            match_pattern: "shell".into(),
+            action: "deny".into(),
+        }];
+        registry.modes.insert(mode.id.clone(), mode);
+        let root = crate::files_correction::get_project_dirs(app.gcx.clone())
+            .await
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| app.gcx.config_dir.clone());
+        app.gcx
+            .project_registry_cache
+            .write()
+            .unwrap()
+            .insert(root, registry);
+        app.gcx.tool_catalog_generations.advance_customization();
+        let denied = render("no_shell_fixture").await;
+        assert!(!denied.contains("await run("), "{denied}");
+        assert!(
+            denied.contains("scripts cannot change files outside ARTIFACTS_DIR"),
+            "{denied}"
+        );
     }
 
     #[tokio::test]

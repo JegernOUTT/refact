@@ -192,6 +192,24 @@ impl Snapshot {
         Ok(())
     }
 
+    pub(crate) fn classify_for_read_admission(
+        &self,
+        gcx: &Arc<GlobalContext>,
+        path: &Path,
+    ) -> refact_privacy::Zone {
+        let workspaces = &self.key.workspaces;
+        let candidates = super::records::record_path_candidates_with_workspaces(
+            gcx,
+            path,
+            &self.mappings,
+            workspaces,
+        );
+        self.compiled.strictest_zone_for_paths_with_roots(
+            candidates,
+            super::records::privacy_roots_with_workspaces(workspaces, &self.mappings),
+        )
+    }
+
     pub(crate) fn classify(&self, gcx: &Arc<GlobalContext>, path: &Path) -> StaticClassification {
         {
             let mut entries = self.entries.lock().unwrap_or_else(|p| p.into_inner());

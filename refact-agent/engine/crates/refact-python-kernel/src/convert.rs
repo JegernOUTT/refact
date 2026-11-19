@@ -1,3 +1,4 @@
+use crate::protocol::{Dimension, Exceeded};
 use monty_types::{
     MontyObject, ObjectRef,
     unstable::{self, MontyNode},
@@ -117,86 +118,236 @@ fn from_json_inner(v: &Value) -> MontyObject {
         ),
     }
 }
+/// How a value JSON cannot hold is converted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    /// Results and `show()`: such a value becomes its bounded repr.
+    Display,
+    /// Sync helper arguments: a path becomes its string, any other such value is refused.
+    Helper,
+    /// Async call arguments: such a value is refused.
+    Strict,
+}
 pub struct Budget {
     nodes: usize,
     bytes: usize,
     max_nodes: usize,
     max_bytes: usize,
+    mode: Mode,
+    /// A limit cut the value; `exceeded` names the first one.
     pub truncated: bool,
+    pub exceeded: Option<Exceeded>,
+}
+/// A call argument JSON cannot carry.
+#[derive(Debug)]
+pub struct Unsupported {
+    /// Innermost segment first; the argument name is last.
+    path: Vec<String>,
+    detail: String,
+}
+impl Unsupported {
+    pub fn message(&self, function: &str) -> String {
+        let path: String = self.path.iter().rev().map(String::as_str).collect();
+        format!("{function}() argument {path} {}", self.detail)
+    }
+}
+enum Stop {
+    Limit,
+    Unsupported(Unsupported),
+}
+impl Stop {
+    fn at(self, segment: impl FnOnce() -> String) -> Self {
+        match self {
+            Stop::Unsupported(mut unsupported) => {
+                unsupported.path.push(segment());
+                Stop::Unsupported(unsupported)
+            }
+            limit => limit,
+        }
+    }
 }
 impl Budget {
     pub fn new(max_nodes: u32, max_bytes: u64) -> Self {
+        Self::with_mode(max_nodes, max_bytes, Mode::Display)
+    }
+    pub fn with_mode(max_nodes: u32, max_bytes: u64, mode: Mode) -> Self {
         Self {
             nodes: 0,
             bytes: 0,
             max_nodes: max_nodes as usize,
             max_bytes: max_bytes.min(MAX_VALUE_BYTES) as usize,
+            mode,
             truncated: false,
+            exceeded: None,
         }
     }
-    fn charge(&mut self, depth: usize, bytes: usize) -> bool {
-        self.nodes += 1;
-        self.bytes = self.bytes.saturating_add(bytes);
-        let ok = depth <= MAX_DEPTH && self.nodes <= self.max_nodes && self.bytes <= self.max_bytes;
-        self.truncated |= !ok;
-        ok
+    fn exceed(&mut self, dimension: Dimension, at_least: usize, limit: usize) {
+        self.truncated = true;
+        self.exceeded.get_or_insert(Exceeded {
+            dimension,
+            at_least: at_least as u64,
+            limit: limit as u64,
+        });
     }
+    /// Adds `nodes` values and `bytes` of the JSON text sent; `false` once a limit is passed.
+    fn charge(&mut self, nodes: usize, bytes: usize) -> bool {
+        self.nodes += nodes;
+        self.bytes = self.bytes.saturating_add(bytes);
+        if self.nodes > self.max_nodes {
+            self.exceed(Dimension::Values, self.nodes, self.max_nodes);
+        } else if self.bytes > self.max_bytes {
+            self.exceed(Dimension::Bytes, self.bytes, self.max_bytes);
+        } else {
+            return true;
+        }
+        false
+    }
+    /// Charges the JSON text around top-level arguments: the brackets, the commas between
+    /// `items`, and each keyword name with its quotes and colon.
+    pub fn frame<'a>(&mut self, items: usize, keys: impl Iterator<Item = &'a str>) {
+        let keys = keys.fold(0usize, |n, key| {
+            n.saturating_add(json_string_bytes(key) + 1)
+        });
+        self.charge(0, keys.saturating_add(2 + items.saturating_sub(1)));
+    }
+    /// Converts a result or `show()` value; a limit marks `truncated` and keeps a repr.
     pub fn convert(&mut self, v: ObjectRef<'_>) -> Value {
-        if self.nodes >= self.max_nodes || self.bytes >= self.max_bytes {
-            self.truncated = true;
-            return json!({"__repr__":"<truncated>"});
+        self.argument("value", v)
+            .unwrap_or_else(|_| json!({"__repr__":bounded_repr(v, MAX_REPR_BYTES).0}))
+    }
+    /// Converts the argument `name`; a value JSON cannot carry is refused unless in display mode.
+    pub fn argument(&mut self, name: &str, v: ObjectRef<'_>) -> Result<Value, Unsupported> {
+        if self.exceeded.is_some() {
+            return Ok(json!({"__repr__":"<truncated>"}));
         }
         match self.inner(v, 0) {
-            Some(v) => v,
-            None => {
-                self.truncated = true;
-                json!({"__repr__":bounded_repr(v, MAX_REPR_BYTES).0})
+            Ok(value) => Ok(value),
+            Err(Stop::Limit) if self.mode == Mode::Display => {
+                Ok(json!({"__repr__":bounded_repr(v, MAX_REPR_BYTES).0}))
+            }
+            Err(Stop::Limit) => Ok(json!({"__repr__":"<truncated>"})),
+            Err(Stop::Unsupported(mut unsupported)) => {
+                unsupported.path.push(label(name));
+                Err(unsupported)
             }
         }
     }
     fn fallback(&mut self, v: ObjectRef<'_>) -> Value {
-        let (repr, cut) = bounded_repr(
-            v,
-            MAX_REPR_BYTES.min(self.max_bytes.saturating_sub(self.bytes) / 6),
-        );
-        self.truncated |= cut;
-        self.bytes = self.bytes.saturating_add(json_string_bytes(&repr));
+        let room = MAX_REPR_BYTES.min(self.max_bytes.saturating_sub(self.bytes) / 6);
+        let (repr, cut) = bounded_repr(v, room);
+        if cut {
+            let shown = repr.chars().count();
+            self.exceed(Dimension::Text, shown + 1, shown);
+        }
+        self.nodes += 1;
+        self.bytes = self
+            .bytes
+            .saturating_add(REPR_WRAPPER_BYTES + json_string_bytes(&repr));
         json!({"__repr__":repr})
     }
-    fn inner(&mut self, v: ObjectRef<'_>, depth: usize) -> Option<Value> {
-        if !self.charge(depth, 24) {
-            return None;
+    fn other(&mut self, v: ObjectRef<'_>) -> Result<Value, Stop> {
+        if self.mode == Mode::Display {
+            return Ok(self.fallback(v));
         }
-        Some(match v.type_name() {
-            "NoneType" => Value::Null,
-            "bool" => json!(v.as_bool().unwrap()),
+        let allowed = if self.mode == Mode::Helper {
+            "str, int, float, bool, None, list, dict or Path"
+        } else {
+            "str, int, float, bool, None, list or dict"
+        };
+        let node = unstable::node(v);
+        let detail = match (v.type_name(), node) {
+            ("int", _) => "is an int too large for JSON; pass it as a string.".into(),
+            ("float", _) => "is a float JSON cannot represent (infinity or NaN).".into(),
+            (_, MontyNode::Repr(text)) => format!("must be {allowed}, not {}.", repr_type(text)),
+            (type_name, node) => {
+                let builtin = match node {
+                    MontyNode::BuiltinFunction(f) => Some(f.to_string()),
+                    MontyNode::Type(t) => Some(t.to_string()),
+                    _ => None,
+                };
+                let hint = match (builtin, node) {
+                    (Some(name), _) => format!(" At module level a comprehension variable named like a builtin (here '{name}') reads the builtin in this interpreter; rename the variable."),
+                    (_, MontyNode::Path(_)) => " Pass str(path).".into(),
+                    (_, MontyNode::Bytes(_)) => " Decode it first, e.g. data.decode().".into(),
+                    (_, MontyNode::Set(_) | MontyNode::FrozenSet(_)) => {
+                        " Pass a list, e.g. sorted(values).".into()
+                    }
+                    _ => String::new(),
+                };
+                format!("must be {allowed}, not {type_name}.{hint}")
+            }
+        };
+        Err(Stop::Unsupported(Unsupported {
+            path: vec![],
+            detail,
+        }))
+    }
+    fn leaf(&mut self, value: Value) -> Result<Value, Stop> {
+        let mut size = Counter(0);
+        let _ = write!(size, "{value}");
+        if self.charge(1, size.0) {
+            Ok(value)
+        } else {
+            Err(Stop::Limit)
+        }
+    }
+    fn inner(&mut self, v: ObjectRef<'_>, depth: usize) -> Result<Value, Stop> {
+        if depth > MAX_DEPTH {
+            self.nodes += 1;
+            self.exceed(Dimension::Depth, depth, MAX_DEPTH);
+            return Err(Stop::Limit);
+        }
+        Ok(match v.type_name() {
+            "NoneType" => self.leaf(Value::Null)?,
+            "bool" => self.leaf(json!(v.as_bool().unwrap()))?,
             "int" => match v.as_int() {
-                Some(i) => json!(i),
-                None => self.fallback(v),
+                Some(i) => self.leaf(json!(i))?,
+                None => self.other(v)?,
             },
             "float" => match v.as_float().filter(|f| f.is_finite()) {
-                Some(f) => json!(f),
-                None => self.fallback(v),
+                Some(f) => self.leaf(json!(f))?,
+                None => self.other(v)?,
             },
             "str" => {
                 let s = v.as_str().unwrap();
-                if s.len() > self.max_bytes.saturating_sub(self.bytes)
-                    || !self.charge(depth, json_string_bytes(s))
-                {
-                    return None;
+                let at_least = self.bytes.saturating_add(s.len() + 2);
+                if at_least > self.max_bytes {
+                    self.nodes += 1;
+                    self.exceed(Dimension::Bytes, at_least, self.max_bytes);
+                    return Err(Stop::Limit);
+                }
+                if !self.charge(1, json_string_bytes(s)) {
+                    return Err(Stop::Limit);
                 }
                 json!(s)
             }
-            "list" | "tuple" => {
-                let (MontyNode::List(ids) | MontyNode::Tuple(ids)) = unstable::node(v) else {
+            "list" | "tuple" | "set" | "frozenset"
+                if self.mode == Mode::Display || matches!(v.type_name(), "list" | "tuple") =>
+            {
+                let (MontyNode::List(ids)
+                | MontyNode::Tuple(ids)
+                | MontyNode::Set(ids)
+                | MontyNode::FrozenSet(ids)) = unstable::node(v)
+                else {
                     unreachable!()
                 };
-                if ids.len() > self.max_nodes {
-                    return None;
+                if !self.charge(1, 1 + ids.len().max(1)) {
+                    return Err(Stop::Limit);
+                }
+                if self.nodes.saturating_add(ids.len()) > self.max_nodes {
+                    self.exceed(
+                        Dimension::Values,
+                        self.nodes.saturating_add(ids.len()),
+                        self.max_nodes,
+                    );
+                    return Err(Stop::Limit);
                 }
                 let mut out = Vec::new();
-                for id in ids {
-                    out.push(self.inner(unstable::child(v, *id), depth + 1)?);
+                for (i, id) in ids.iter().enumerate() {
+                    out.push(
+                        self.inner(unstable::child(v, *id), depth + 1)
+                            .map_err(|stop| stop.at(|| format!("[{i}]")))?,
+                    );
                 }
                 Value::Array(out)
             }
@@ -204,24 +355,84 @@ impl Budget {
                 let MontyNode::Dict(pairs) = unstable::node(v) else {
                     unreachable!()
                 };
-                if pairs.len() > self.max_nodes {
-                    return None;
+                if !self.charge(1, 1 + pairs.len().max(1)) {
+                    return Err(Stop::Limit);
+                }
+                if self.nodes.saturating_add(pairs.len()) > self.max_nodes {
+                    self.exceed(
+                        Dimension::Values,
+                        self.nodes.saturating_add(pairs.len()),
+                        self.max_nodes,
+                    );
+                    return Err(Stop::Limit);
                 }
                 let mut out = serde_json::Map::new();
                 for (k, id) in pairs {
-                    let k = unstable::child(v, *k);
-                    let k = k.as_str()?;
-                    if !self.charge(depth, json_string_bytes(k)) {
-                        return None;
+                    let key = unstable::child(v, *k);
+                    let Some(k) = key.as_str() else {
+                        if self.mode == Mode::Display {
+                            return Ok(self.fallback(v));
+                        }
+                        return Err(Stop::Unsupported(Unsupported {
+                            path: vec![],
+                            detail: format!(
+                                "has a dict key of type {}; dict keys must be str.",
+                                key.type_name()
+                            ),
+                        }));
+                    };
+                    if !self.charge(0, json_string_bytes(k) + 1) {
+                        return Err(Stop::Limit);
                     }
-                    out.insert(k.into(), self.inner(unstable::child(v, *id), depth + 1)?);
+                    let value = self
+                        .inner(unstable::child(v, *id), depth + 1)
+                        .map_err(|stop| stop.at(|| format!("['{}']", label(k))))?;
+                    out.insert(k.into(), value);
                 }
                 Value::Object(out)
             }
-            _ => self.fallback(v),
+            "PosixPath" if self.mode == Mode::Helper => {
+                let MontyNode::Path(path) = unstable::node(v) else {
+                    unreachable!()
+                };
+                if !self.charge(1, json_string_bytes(path)) {
+                    return Err(Stop::Limit);
+                }
+                json!(path)
+            }
+            _ => self.other(v)?,
         })
     }
 }
+/// A key or argument name as an argument path shows it: escaped, at most 40 characters.
+fn label(name: &str) -> String {
+    let mut out: String = name.chars().take(40).flat_map(char::escape_debug).collect();
+    if name.chars().nth(40).is_some() {
+        out.push('…');
+    }
+    out
+}
+/// The type an opaque repr stands for: its first word, as in `<function f at 0x…>`.
+fn repr_type(text: &str) -> &str {
+    if text.starts_with("<built-in ") {
+        return "builtin_function_or_method";
+    }
+    let word = text
+        .strip_prefix('<')
+        .map(|rest| {
+            rest.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '.'))
+                .next()
+                .unwrap_or_default()
+        })
+        .unwrap_or_default();
+    match word {
+        "" => "object",
+        "bound" => "method",
+        word => word,
+    }
+}
+/// `{"__repr__":` and `}` around the repr string of a value JSON cannot hold.
+const REPR_WRAPPER_BYTES: usize = 13;
 fn json_string_bytes(s: &str) -> usize {
     s.bytes()
         .map(|b| match b {
@@ -264,10 +475,7 @@ pub fn bounded_repr(v: ObjectRef<'_>, max: usize) -> (String, bool) {
             return Err(fmt::Error);
         }
         match unstable::node(v) {
-            MontyNode::List(ids)
-            | MontyNode::Tuple(ids)
-            | MontyNode::Set(ids)
-            | MontyNode::FrozenSet(ids) => {
+            MontyNode::List(ids) | MontyNode::Tuple(ids) => {
                 out.write_str("[")?;
                 for (i, id) in ids.iter().enumerate() {
                     if i > 0 {
@@ -276,6 +484,22 @@ pub fn bounded_repr(v: ObjectRef<'_>, max: usize) -> (String, bool) {
                     render(unstable::child(v, *id), out, depth + 1, nodes)?;
                 }
                 out.write_str("]")
+            }
+            MontyNode::Set(ids) | MontyNode::FrozenSet(ids) => {
+                let frozen = matches!(unstable::node(v), MontyNode::FrozenSet(_));
+                match (frozen, ids.is_empty()) {
+                    (false, true) => return out.write_str("set()"),
+                    (true, true) => return out.write_str("frozenset()"),
+                    (true, false) => out.write_str("frozenset({")?,
+                    (false, false) => out.write_str("{")?,
+                }
+                for (i, id) in ids.iter().enumerate() {
+                    if i > 0 {
+                        out.write_str(", ")?;
+                    }
+                    render(unstable::child(v, *id), out, depth + 1, nodes)?;
+                }
+                out.write_str(if frozen { "})" } else { "}" })
             }
             MontyNode::Dict(pairs) => {
                 out.write_str("{")?;
@@ -302,15 +526,8 @@ pub fn bounded_repr(v: ObjectRef<'_>, max: usize) -> (String, bool) {
                 out.truncated = true;
                 out.write_str("<large int>")
             }
-            MontyNode::None
-            | MontyNode::Bool(_)
-            | MontyNode::Int(_)
-            | MontyNode::Float(_)
-            | MontyNode::BigInt(_) => write!(out, "{v}"),
-            _ => {
-                out.truncated = true;
-                write!(out, "<{}>", v.type_name())
-            }
+            MontyNode::Repr(text) => out.write_str(text),
+            _ => write!(out, "{v}"),
         }
     }
     let mut out = Limited {

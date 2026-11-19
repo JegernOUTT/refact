@@ -6,6 +6,7 @@ import { server } from "../../../utils/mockServer";
 import { workspaceExample } from "../../../services/refact/pythonWorkspace.fixture";
 import { PythonWorkspacePanel } from "./PythonWorkspacePanel";
 import * as openFileHook from "../../../hooks/useOpenFileInApp";
+import { READ_ONLY_NOTE } from "../../../components/ChatContent/ToolCard/ReadOnlyChip";
 
 const SECTIONS_KEY = "refact.pythonWorkspace.sections";
 
@@ -429,6 +430,61 @@ describe("PythonWorkspacePanel", () => {
       await screen.findByRole("menuitem", { name: "Copy run ID" }),
     ).toBeInTheDocument();
     expect(screen.queryByRole("menuitem", { name: "Open code" })).toBeNull();
+  });
+  it("marks read-only runs with the card's chip and its tooltip", async () => {
+    serve({
+      runs: [
+        {
+          ...workspaceExample.runs[0],
+          run_id: "a",
+          started_at_ms: 2,
+          read_only: true,
+        },
+        { ...workspaceExample.runs[0], run_id: "b", started_at_ms: 1 },
+      ],
+    });
+    const view = render(<PythonWorkspacePanel chatId="chat-a" />);
+    const section = await runsSection();
+    const [readOnly, writable] = within(section).getAllByRole("listitem");
+    const chip = within(readOnly).getByText("Read-only").closest("[tabindex]");
+    if (!(chip instanceof HTMLElement)) throw new Error("no focusable chip");
+    expect(chip).toHaveAttribute("tabindex", "0");
+    expect(within(writable).queryByText("Read-only")).toBeNull();
+    expect(
+      within(readOnly).getByRole("button", { name: /^Run a/ }),
+    ).not.toContainElement(chip);
+    await view.user.hover(chip);
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(
+      READ_ONLY_NOTE,
+    );
+  });
+  it("says the variables could not be listed instead of an empty list", async () => {
+    serve({
+      session: {
+        ...workspaceExample.session,
+        variables: [],
+        variables_unknown: true,
+      },
+    });
+    render(<PythonWorkspacePanel chatId="chat-a" />);
+    const toggle = await screen.findByRole("button", { name: "Variables" });
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    const section = screen.getByRole("region", { name: "Variables" });
+    expect(section).toHaveTextContent("Variables could not be listed");
+    expect(section).not.toHaveTextContent("No variables");
+    expect(section).not.toHaveTextContent("0");
+  });
+  it("keeps the loaded variables under the note when the list is not known to be whole", async () => {
+    serve({
+      session: { ...workspaceExample.session, variables_unknown: true },
+    });
+    render(<PythonWorkspacePanel chatId="chat-a" />);
+    await screen.findByRole("button", { name: "Variables" });
+    const section = screen.getByRole("region", { name: "Variables" });
+    expect(section).toHaveTextContent("Some variables could not be listed");
+    expect(
+      within(section).getByRole("button", { name: /answer/ }),
+    ).toBeInTheDocument();
   });
   describe("displays", () => {
     const displays = [

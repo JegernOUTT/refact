@@ -4,6 +4,7 @@ use serde_json::{json, Map, Value};
 use super::common::to_value;
 use super::{EngineClass, EngineCtx, EngineError, EngineFn, EngineOutput, Plan, Preview};
 use crate::call_validation::ChatMessage;
+use refact_chat_history::history_patch::{plan_history_patch, PatchEnv, PatchOp, PatchOutcome};
 use crate::integrations::mcp::redaction::scrub_text;
 
 pub(super) const ROLES: &[&str] = &[
@@ -193,6 +194,26 @@ pub fn functions() -> Vec<EngineFn> {
             preview: Some(set_auto_approve_preview),
             timeout: None,
         },
+        EngineFn {
+            name: "chat.send",
+            summary: "Queue a follow-up user message for this chat: it lands after this turn and starts a new turn, which cannot raise engine change cards. The text stays literal (no @ commands) and carries this run's privacy records.",
+            class: EngineClass::Change,
+            input: || json!({"type":"object","additionalProperties":false,"required":["text"],"properties":{"text":{"type":"string","minLength":1,"maxLength":20000}}}),
+            output: || Some(json!({"type":"object","required":["request_id","outcome"],"properties":{"request_id":{"type":"string"},"outcome":{"enum":["delivered","queued","duplicate","expired","superseded","sealed"]}}})),
+            handler: send_follow_up,
+            preview: Some(send_follow_up_preview),
+            timeout: None,
+        },
+        EngineFn {
+            name: "chat.patch",
+            summary: "Rewrite this chat's own history after this turn, with the ops of chats.patch (edit, remove, insert) anchored on ids of messages from before this turn (chat.messages lists them). Queued and applied once this turn has ended, after checking again that this turn, the history before it and the compression boundary are unchanged: when a compaction, a mode handoff or an earlier queued operation came in between, nothing is applied and this chat shows why; the script does not see that outcome. Refused in agent and child chats and for messages of the running turn. Destructive when it edits or removes, risky when it only inserts.",
+            class: EngineClass::Risky,
+            input: || json!({"type":"object","additionalProperties":false,"required":["ops"],"properties":{"ops":super::chats::patch_ops_schema("Id of a message of this chat from before this turn.")}}),
+            output: || Some(json!({"type":"object","required":["request_id","applies"],"properties":{"request_id":{"type":"string"},"applies":{"const":"after_this_turn"}}})),
+            handler: patch_this,
+            preview: Some(patch_this_preview),
+            timeout: None,
+        },
     ]
 }
 
@@ -205,10 +226,11 @@ pub(super) fn change_output() -> Option<Value> {
 pub(super) fn messages_schema(other_chat: bool) -> Value {
     let mut schema = json!({"type":"object","required":["total","start","messages"],"properties":{"total":{"type":"integer"},"start":{"type":"integer"},"messages":{"type":"array","items":{"type":"object","properties":{"index":{"type":"integer"},"message_id":{"type":"string"},"role":{"type":"string"},"chars":{"type":"integer"},"approx_tokens":{"type":"integer"},"tool_calls":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"name":{"type":"string"}}}},"tool_call_id":{"type":"string"},"content":{"type":"string"},"truncated":{"type":"boolean"}}}}}});
     if other_chat {
-        schema["required"] = json!(["chat_id", "total", "start", "loaded", "messages"]);
+        schema["required"] = json!(["chat_id", "total", "start", "loaded", "digest", "messages"]);
         schema["properties"]["chat_id"] = json!({"type":"string"});
         schema["properties"]["title"] = json!({"type":"string"});
         schema["properties"]["loaded"] = json!({"type":"boolean"});
+        schema["properties"]["digest"] = json!({"type":"string","description":"Opaque pin of the chat's whole history and file; pass it to chats.patch(expected_digest=)."});
     }
     schema
 }
@@ -1021,29 +1043,24 @@ async fn plan_mode(
         None => true,
     };
     if let Some(from) = &from {
-        let diff = crate::chat::queue::mode_switch_diff(from, &to);
-        for (label, key) in [("tools added", "added"), ("tools removed", "removed")] {
-            let delta = &diff["tools"][key];
-            if delta["count"].as_u64().unwrap_or(0) > 0 {
+        let from_tools: std::collections::BTreeSet<&str> =
+            from.tools.iter().map(String::as_str).collect();
+        let to_tools: std::collections::BTreeSet<&str> =
+            to.tools.iter().map(String::as_str).collect();
+        for (label, names) in [
+            ("tools added", to_tools.difference(&from_tools)),
+            ("tools removed", from_tools.difference(&to_tools)),
+        ] {
+            let names: Vec<&str> = names.copied().collect();
+            if !names.is_empty() {
                 plan.items.push(super::mask::item(
                     label,
                     None,
-                    Some(json!(format!(
-                        "{} ({})",
-                        delta["count"],
-                        delta["names"]
-                            .as_array()
-                            .map(|n| n
-                                .iter()
-                                .filter_map(Value::as_str)
-                                .collect::<Vec<_>>()
-                                .join(", "))
-                            .unwrap_or_default()
-                    ))),
+                    Some(json!(format!("{} ({})", names.len(), names.join(", ")))),
                 ));
             }
         }
-        if diff["tools"]["added"]["count"].as_u64().unwrap_or(0) > 0 {
+        if to_tools.difference(&from_tools).next().is_some() {
             plan.warn(MODE_WARNING);
         }
         plan.items.push(super::mask::item(
@@ -1051,11 +1068,25 @@ async fn plan_mode(
             None,
             Some(json!(SYSTEM_PROMPT_KEPT)),
         ));
-        plan.items.push(super::mask::item(
-            "tool confirmation rules",
-            Some(diff["tool_confirm"]["from_rules_count"].clone()),
-            Some(diff["tool_confirm"]["to_rules_count"].clone()),
-        ));
+        plan.items.extend(confirmation_changes(from, &to));
+        for (name, old, new) in [
+            (
+                "allow_integrations",
+                from.allow_integrations,
+                to.allow_integrations,
+            ),
+            ("allow_mcp", from.allow_mcp, to.allow_mcp),
+            ("allow_subagents", from.allow_subagents, to.allow_subagents),
+        ] {
+            if old != new {
+                plan.items.push(super::mask::item(
+                    &format!("permission {name}"),
+                    Some(json!(old)),
+                    Some(json!(new)),
+                ));
+            }
+        }
+        card_size_refusal(&plan.items)?;
     }
     if to.tool_confirm.rules.iter().any(|r| r.action == "auto") {
         plan.warn(MODE_WARNING);
@@ -1080,6 +1111,72 @@ async fn plan_mode(
             }
             plan.set(thread, key, json!(value));
         }
+    }
+    Ok(())
+}
+
+/// Each confirmation that a mode switch changes: the effective action of every tool of either mode
+/// (the first matching rule, wildcards included) and every rule pattern whose action changes,
+/// old and new.
+fn confirmation_changes(
+    from: &crate::yaml_configs::customization_types::ModeConfig,
+    to: &crate::yaml_configs::customization_types::ModeConfig,
+) -> Vec<refact_chat_api::PythonEngineItem> {
+    use crate::yaml_configs::customization_registry::match_tool_confirm_action;
+    let mut items = Vec::new();
+    let tools: std::collections::BTreeSet<&str> = from
+        .tools
+        .iter()
+        .chain(&to.tools)
+        .map(String::as_str)
+        .collect();
+    let shown = |action: Option<String>| json!(action.unwrap_or_else(|| "default".into()));
+    for tool in tools {
+        let old = match_tool_confirm_action(&from.tool_confirm.rules, tool);
+        let new = match_tool_confirm_action(&to.tool_confirm.rules, tool);
+        if old != new {
+            items.push(super::mask::named_item(
+                &format!("confirmation of {tool}"),
+                Some(shown(old)),
+                Some(shown(new)),
+            ));
+        }
+    }
+    let first = |rules: &[crate::yaml_configs::customization_types::ToolConfirmRule],
+                 pattern: &str| {
+        rules
+            .iter()
+            .find(|rule| rule.match_pattern == pattern)
+            .map(|rule| rule.action.clone())
+    };
+    let mut patterns: Vec<&str> = Vec::new();
+    for rule in from.tool_confirm.rules.iter().chain(&to.tool_confirm.rules) {
+        if !patterns.contains(&rule.match_pattern.as_str()) {
+            patterns.push(&rule.match_pattern);
+        }
+    }
+    for pattern in patterns {
+        let old = first(&from.tool_confirm.rules, pattern);
+        let new = first(&to.tool_confirm.rules, pattern);
+        if old != new {
+            items.push(super::mask::named_item(
+                &format!("confirmation rule {pattern}"),
+                Some(shown(old)),
+                Some(shown(new)),
+            ));
+        }
+    }
+    items
+}
+
+/// A card whose items are too large to review as a whole is refused rather than cut.
+fn card_size_refusal(items: &[refact_chat_api::PythonEngineItem]) -> Result<(), EngineError> {
+    let size = serde_json::to_vec(items).map_or(0, |bytes| bytes.len());
+    let limit = refact_chat_history::history_patch::MAX_CARD_BYTES;
+    if size > limit {
+        return Err(EngineError::Permission(format!(
+            "the change is too large to review on one approval card ({size} bytes, the limit is {limit}); change the mode with a smaller difference or in a settings screen"
+        )));
     }
     Ok(())
 }
@@ -1897,6 +1994,39 @@ pub(super) fn plan_auto_approve(
     Ok(plan)
 }
 
+/// Puts the approval flags into a parameter plan of another chat: a flag given in `args` wins
+/// over the default a mode switch of the same plan sets, and every flag that ends up different
+/// from the chat's gets one item under its argument name and, when it is turned on, its warning.
+pub(super) fn plan_flags(
+    thread: &crate::chat::types::ThreadParams,
+    args: &Value,
+    plan: &mut ParamsPlan,
+) {
+    for (arg, key, warning) in APPROVAL_ARGS {
+        if let Some(new) = args.get(*arg).and_then(Value::as_bool) {
+            plan.patch.insert((*key).into(), json!(new));
+        }
+        let Some(new) = plan.patch.get(*key).cloned() else {
+            continue;
+        };
+        plan.items
+            .retain(|item| item.label != *key && item.label != *arg);
+        plan.changed.remove(*key);
+        let old = thread_value(thread, key);
+        if old == new {
+            plan.patch.remove(*key);
+            continue;
+        }
+        plan.items
+            .push(super::mask::item(arg, shown(&old), shown(&new)));
+        plan.changed
+            .insert((*key).into(), json!({"old":old,"new":new}));
+        if new == json!(true) {
+            plan.warn(warning);
+        }
+    }
+}
+
 fn set_auto_approve_preview<'a>(
     ctx: &'a EngineCtx,
     args: &'a Value,
@@ -1924,4 +2054,422 @@ fn set_auto_approve<'a>(
         output.text = format!("{}; {ENGINE_UNAFFECTED}", output.text);
         Ok(output)
     })
+}
+
+async fn follow_up_clearance(ctx: &EngineCtx, model: &str) -> Result<(), EngineError> {
+    ctx.clear_for(&crate::privacy::records::provider_destination(model))
+        .await
+        .map_err(|refusal| {
+            EngineError::Permission(format!(
+                "the message cannot go to this chat's model: {refusal}"
+            ))
+        })
+}
+
+fn send_follow_up_preview<'a>(
+    ctx: &'a EngineCtx,
+    args: &'a Value,
+) -> BoxFuture<'a, Result<Preview, EngineError>> {
+    Box::pin(async move {
+        require_own_chat(ctx).await?;
+        let text = args["text"].as_str().unwrap_or_default();
+        crate::chat::content::validate_content_with_attachments(&json!(text), &[])
+            .map_err(EngineError::Type)?;
+        let model = this_session(ctx).await?.lock().await.thread.model.clone();
+        let resolved = super::chats::effective_model(ctx, &model).await;
+        follow_up_clearance(ctx, &resolved).await?;
+        Ok(Preview {
+            title: "send a follow-up message to this chat".into(),
+            items: vec![super::mask::item("message", None, Some(json!(text)))],
+            scope: Some(THIS_CHAT_SCOPE.into()),
+            class: EngineClass::Change,
+            warning: None,
+            plan: Plan::new(json!({"model":model,"resolved_model":resolved}), ()),
+        })
+    })
+}
+
+fn send_follow_up<'a>(
+    ctx: &'a EngineCtx,
+    args: &'a Value,
+) -> BoxFuture<'a, Result<EngineOutput, EngineError>> {
+    Box::pin(async move {
+        let model = this_session(ctx).await?.lock().await.thread.model.clone();
+        let resolved = super::chats::effective_model(ctx, &model).await;
+        ctx.take_plan::<()>(
+            "chat.send",
+            &json!({"model":model,"resolved_model":resolved}),
+        )?;
+        follow_up_clearance(ctx, &resolved).await?;
+        let mut message = ChatMessage::new(
+            "user".into(),
+            args["text"].as_str().unwrap_or_default().to_string(),
+        );
+        crate::privacy::records::merge_records(&mut message, super::chats::run_records(ctx).await?);
+        let delivery = refact_chat_api::PendingDelivery::new(
+            vec![message],
+            refact_chat_api::PushMode::WhenIdle,
+            "engine.chat.send",
+            true,
+        );
+        let request_id = delivery.id.clone();
+        let receipt = crate::chat::delivery::deliver_to_chat_with_receipt(
+            ctx.app.clone(),
+            &ctx.chat_id,
+            delivery,
+        )
+        .await
+        .map_err(EngineError::Failed)?;
+        let outcome = receipt.outcome;
+        let text = match outcome {
+            refact_chat_api::DeliveryOutcome::Delivered => {
+                "follow-up message delivered; this chat's turn had ended, so it starts a new one"
+                    .to_string()
+            }
+            refact_chat_api::DeliveryOutcome::Queued => {
+                "follow-up message queued; it lands after this turn and starts a new one".into()
+            }
+            other => format!(
+                "follow-up message not delivered: {}",
+                serde_json::to_value(other)
+                    .ok()
+                    .and_then(|v| v.as_str().map(str::to_string))
+                    .unwrap_or_default()
+            ),
+        };
+        Ok(EngineOutput::new(
+            json!({"request_id":request_id,"outcome":outcome}),
+            text,
+        ))
+    })
+}
+
+const PATCH_SOURCE: &str = "engine.chat.patch";
+const PATCH_TITLE: &str = "rewrite this chat's history";
+const PATCH_SCOPE: &str = "this chat, after this turn";
+
+/// The turn a `chat.patch` is queued from (K5): the history before the assistant message that
+/// holds this run's call (`tail` messages with digest `prefix`), when that turn started and the
+/// latest compression boundary.
+struct TurnPin {
+    tail: usize,
+    prefix: String,
+    turn_at_ms: u64,
+    boundary: Option<String>,
+}
+
+impl TurnPin {
+    fn of(s: &crate::chat::types::ChatSession, call_id: &str) -> Result<Self, EngineError> {
+        let tail = s
+            .messages
+            .iter()
+            .rposition(|m| {
+                m.tool_calls
+                    .as_ref()
+                    .is_some_and(|calls| calls.iter().any(|call| call.id == call_id))
+            })
+            .ok_or_else(|| {
+                EngineError::Failed(
+                    "this run's call is not in this chat's history; chat.patch works only from a python call of this chat's running turn"
+                        .into(),
+                )
+            })?;
+        let Some(turn_at_ms) = s.turn_origin.as_ref().map(|origin| origin.at_ms) else {
+            return Err(EngineError::Failed(
+                "no turn of this chat is latched, so the turn this patch would belong to is unknown"
+                    .into(),
+            ));
+        };
+        if let Some(reason) = pending_history_change(s) {
+            return Err(EngineError::Failed(format!(
+                "{reason}, so the history this patch is planned on would not last; nothing was queued"
+            )));
+        }
+        Ok(Self {
+            prefix: refact_chat_history::history_gates::history_pin(
+                &s.chat_id,
+                None,
+                &s.messages[..tail],
+            ),
+            tail,
+            turn_at_ms,
+            boundary: compression_boundary(&s.messages),
+        })
+    }
+
+    fn state(&self) -> Value {
+        json!({"tail":self.tail,"prefix":self.prefix,"turn_at_ms":self.turn_at_ms,"boundary":self.boundary})
+    }
+}
+
+/// Id of the latest compression report of a history.
+fn compression_boundary(messages: &[ChatMessage]) -> Option<String> {
+    use refact_core::active_context::COMPRESSION_REPORT_KEY;
+    messages
+        .iter()
+        .rev()
+        .find(|m| m.role == COMPRESSION_REPORT_KEY || m.extra.contains_key(COMPRESSION_REPORT_KEY))
+        .map(|m| m.message_id.clone())
+}
+
+fn pending_history_change(s: &crate::chat::types::ChatSession) -> Option<&'static str> {
+    if s.pending_mode_handoff.is_some() {
+        Some("a mode handoff of this chat is pending")
+    } else if s.pending_context_rebuild.is_some() {
+        Some("a context rebuild of this chat is pending")
+    } else {
+        None
+    }
+}
+
+/// Targets and anchors of `chat.patch` are ids of messages from before this turn: `start` and
+/// `end` move while the turn runs, and the running turn's messages are not changed.
+fn turn_refusal(messages: &[ChatMessage], tail: usize, ops: &[PatchOp]) -> Result<(), EngineError> {
+    for (index, op) in ops.iter().enumerate() {
+        let ids: Vec<&str> = match op {
+            PatchOp::Edit {
+                message_id, ..
+            } => vec![message_id],
+            PatchOp::Remove {
+                message_id,
+                through,
+                ..
+            } => std::iter::once(message_id.as_str())
+                .chain(through.as_deref())
+                .collect(),
+            PatchOp::Insert {
+                after, ..
+            } => {
+                if after == "start" || after == "end" {
+                    return Err(EngineError::Type(format!(
+                        "ops[{index}]: chat.patch anchors on message ids; \"start\" and \"end\" move while this turn runs"
+                    )));
+                }
+                vec![after]
+            }
+        };
+        if let Some(id) = ids
+            .into_iter()
+            .find(|id| messages[tail..].iter().any(|m| m.message_id == *id))
+        {
+            return Err(EngineError::Permission(format!(
+                "ops[{index}]: message {id} belongs to this chat's running turn; chat.patch changes only messages from before this turn"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn patch_env<'a>(
+    thread: &'a crate::chat::types::ThreadParams,
+    carry: &'a dyn Fn(&mut ChatMessage) -> Result<(), String>,
+) -> PatchEnv<'a> {
+    PatchEnv {
+        frozen: super::chats::frozen_system(thread),
+        stamp_source: PATCH_SOURCE,
+        now_ms: crate::agents::approval::now_ms(),
+        carry,
+        secret_spans: &super::mask::secret_spans,
+    }
+}
+
+#[derive(Clone)]
+struct PatchThisPlan {
+    items: String,
+}
+
+fn patch_this_state(pin: &TurnPin, model: &str, resolved: &str) -> Value {
+    json!({"pin":pin.state(),"model":model,"resolved_model":resolved})
+}
+
+fn patch_this_preview<'a>(
+    ctx: &'a EngineCtx,
+    args: &'a Value,
+) -> BoxFuture<'a, Result<Preview, EngineError>> {
+    Box::pin(async move {
+        require_own_chat(ctx).await?;
+        let ops = super::chats::patch_ops(args)?;
+        super::chats::history_size_refusal(ctx, &ctx.chat_id).await?;
+        let session = this_session(ctx).await?;
+        let model = session.lock().await.thread.model.clone();
+        let resolved = super::chats::effective_model(ctx, &model).await;
+        follow_up_clearance(ctx, &resolved).await?;
+        let records = super::chats::run_records(ctx).await?;
+        let carry = super::chats::carry_records(&records);
+        let s = session.lock().await;
+        let pin = TurnPin::of(&s, &ctx.outer_tool_call_id)?;
+        turn_refusal(&s.messages, pin.tail, &ops)?;
+        let outcome =
+            plan_history_patch(&s.messages[..pin.tail], &ops, &patch_env(&s.thread, &carry))
+                .map_err(super::chats::patch_refusal)?;
+        let plan = match outcome {
+            PatchOutcome::NothingToChange => {
+                return Ok(Preview {
+                    title: PATCH_TITLE.into(),
+                    items: Vec::new(),
+                    scope: Some(PATCH_SCOPE.into()),
+                    class: EngineClass::Risky,
+                    warning: None,
+                    plan: Plan::nothing(),
+                })
+            }
+            PatchOutcome::Planned(plan) => plan,
+        };
+        super::chats::delivery_filter_refusal(&plan)?;
+        let mut warning = plan.warning.clone();
+        if plan.summary.inserted_tool_results > 0 && super::chats::goal_pursued(s.goal.as_ref()) {
+            warning.push_str(" This chat has an active goal: its model and its goal checks will take the inserted tool results as real evidence.");
+        }
+        Ok(Preview {
+            title: PATCH_TITLE.into(),
+            items: plan
+                .items
+                .iter()
+                .map(|item| {
+                    super::mask::named_item(&item.label, item.old.clone(), item.new.clone())
+                })
+                .collect(),
+            scope: Some(PATCH_SCOPE.into()),
+            class: if plan.class == refact_chat_api::PythonEngineClass::Destructive {
+                EngineClass::Destructive
+            } else {
+                EngineClass::Risky
+            },
+            warning: Some(warning),
+            plan: Plan::new(
+                patch_this_state(&pin, &model, &resolved),
+                PatchThisPlan {
+                    items: super::chats::items_digest(&plan.items),
+                },
+            ),
+        })
+    })
+}
+
+fn patch_this<'a>(
+    ctx: &'a EngineCtx,
+    args: &'a Value,
+) -> BoxFuture<'a, Result<EngineOutput, EngineError>> {
+    Box::pin(async move {
+        require_own_chat(ctx).await?;
+        let ops = super::chats::patch_ops(args)?;
+        let session = this_session(ctx).await?;
+        let model = session.lock().await.thread.model.clone();
+        let resolved = super::chats::effective_model(ctx, &model).await;
+        let state = {
+            let s = session.lock().await;
+            patch_this_state(
+                &TurnPin::of(&s, &ctx.outer_tool_call_id)?,
+                &model,
+                &resolved,
+            )
+        };
+        let plan: PatchThisPlan = ctx.take_plan("chat.patch", &state)?;
+        follow_up_clearance(ctx, &resolved).await?;
+        let records = super::chats::run_records(ctx)
+            .await?
+            .iter()
+            .map(serde_json::to_value)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| EngineError::Failed(e.to_string()))?;
+        let raw_ops: Vec<Value> = serde_json::from_value(args["ops"].clone())
+            .map_err(|e| EngineError::Type(format!("ops: {e}")))?;
+        let request_id = queue_built(ctx, &session, |s| {
+            let pin = TurnPin::of(s, &ctx.outer_tool_call_id)?;
+            if patch_this_state(&pin, &s.thread.model, &resolved) != state {
+                return Err(EngineError::Failed(
+                    "chat.patch: this chat changed since the preview; nothing was queued, call it again to see a fresh preview".into(),
+                ));
+            }
+            turn_refusal(&s.messages, pin.tail, &ops)?;
+            Ok(refact_chat_api::ChatCommand::PatchMessages {
+                patch: refact_chat_api::QueuedPatch {
+                    ops: raw_ops,
+                    records,
+                    prefix: pin.prefix,
+                    tail: pin.tail,
+                    turn_at_ms: pin.turn_at_ms,
+                    boundary: pin.boundary,
+                    items: plan.items,
+                },
+            })
+        })
+        .await?;
+        Ok(EngineOutput::new(
+            json!({"request_id":request_id,"applies":APPLIES_LATER}),
+            "queued: the patch is applied after this turn if the history before this turn is unchanged then; otherwise this chat shows why it was not applied",
+        ))
+    })
+}
+
+/// Applies a patch that `chat.patch` queued, under the chat's lock, once the turn that queued it
+/// has ended (K5). Refused when another turn started since, when the history before that turn or
+/// the compression boundary moved, when a mode handoff or context rebuild is pending, and when the
+/// patch planned now on the whole history is not the one the person approved.
+pub(crate) fn apply_queued_patch(
+    s: &mut crate::chat::types::ChatSession,
+    patch: &refact_chat_api::QueuedPatch,
+) -> Result<(), String> {
+    if s.turn_origin.as_ref().map(|origin| origin.at_ms) != Some(patch.turn_at_ms) {
+        return Err("another turn of this chat started after the turn that queued it".into());
+    }
+    if let Some(reason) = pending_history_change(s) {
+        return Err(reason.into());
+    }
+    if compression_boundary(&s.messages) != patch.boundary {
+        return Err("this chat was compacted after it was queued".into());
+    }
+    if s.messages.len() < patch.tail
+        || refact_chat_history::history_gates::history_pin(
+            &s.chat_id,
+            None,
+            &s.messages[..patch.tail],
+        ) != patch.prefix
+    {
+        return Err("the messages before the turn that queued it changed".into());
+    }
+    let ops: Vec<PatchOp> = serde_json::from_value(Value::Array(patch.ops.clone()))
+        .map_err(|e| format!("its ops do not parse: {e}"))?;
+    let records: Vec<refact_privacy::FileRecord> =
+        serde_json::from_value(Value::Array(patch.records.clone()))
+            .map_err(|e| format!("its privacy records do not parse: {e}"))?;
+    let carry = super::chats::carry_records(&records);
+    let planned = match plan_history_patch(&s.messages, &ops, &patch_env(&s.thread, &carry))
+        .map_err(|refusal| refusal.reason().to_string())?
+    {
+        PatchOutcome::Planned(plan) => plan,
+        PatchOutcome::NothingToChange => {
+            return Err("it no longer changes anything".into());
+        }
+    };
+    super::chats::delivery_filter_refusal(&planned).map_err(|error| match error {
+        EngineError::Type(reason)
+        | EngineError::Permission(reason)
+        | EngineError::Failed(reason) => reason,
+    })?;
+    if super::chats::items_digest(&planned.items) != patch.items {
+        return Err(
+            "planned on this chat as it is now, it differs from the approved change".into(),
+        );
+    }
+    let (commit, _, _) = super::chats::PatchCommit::of(s, planned);
+    commit.apply(s);
+    let event = s.snapshot();
+    s.emit(event);
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    /// T10: a card too large to review as a whole is refused rather than cut.
+    #[test]
+    fn a_card_over_its_budget_is_refused() {
+        let item = super::super::mask::item(
+            "tools added",
+            None,
+            Some(serde_json::json!("x".repeat(100 * 1024))),
+        );
+        assert!(super::card_size_refusal(&[item.clone(), item.clone()]).is_ok());
+        assert!(super::card_size_refusal(&[item.clone(), item.clone(), item]).is_err());
+    }
 }

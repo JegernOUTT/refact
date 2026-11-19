@@ -163,6 +163,7 @@ async fn snapshot_file_survives_worker_restart() {
         .join(format!("worker-test-{}.snapshot", std::process::id()))
         .to_string_lossy()
         .into_owned();
+    let _ = std::fs::remove_file(&path);
     let mut c = client().await;
     feed(&c, "answer=42").await;
     event(&mut c).await;

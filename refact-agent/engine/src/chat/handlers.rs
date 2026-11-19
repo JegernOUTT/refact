@@ -882,6 +882,12 @@ pub async fn handle_v1_chat_command(
 
     let request: CommandRequest = serde_json::from_slice(&body_bytes)
         .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, format!("Invalid JSON: {}", e)))?;
+    if matches!(request.command, ChatCommand::PatchMessages { .. }) {
+        return Err(ScratchError::new(
+            StatusCode::BAD_REQUEST,
+            "patch_messages is queued only by chat.patch of a python script in that chat".into(),
+        ));
+    }
 
     let goal_policy = if matches!(
         &request.command,

@@ -3,6 +3,8 @@ pub mod dispatcher;
 pub mod display;
 pub mod engine_fns;
 pub mod envelope;
+pub mod git;
+pub mod hints;
 pub mod llm;
 #[cfg(test)]
 mod llm_tests;

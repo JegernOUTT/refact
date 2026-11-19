@@ -52,6 +52,7 @@ import {
   displayTitle,
 } from "../../../components/ChatContent/ToolCard/scriptDisplayHelpers";
 import { visibleText } from "../../../components/ChatContent/ToolCard/safeText";
+import { ReadOnlyChip } from "../../../components/ChatContent/ToolCard/ReadOnlyChip";
 import styles from "./PythonWorkspacePanel.module.css";
 
 const RUNS_SHOWN = 5;
@@ -254,6 +255,7 @@ function RunRow({
           </span>
         )}
       </button>
+      {run.read_only && <ReadOnlyChip />}
       <Menu onOpenChange={(open) => open && recheck()}>
         <Menu.Trigger asChild>
           <IconButton
@@ -482,9 +484,18 @@ function Variables({ session }: { session: PythonWorkspace["session"] }) {
   );
   const shown = all ? matching : matching.slice(0, VARIABLES_SHOWN);
   const capped = session.variables_truncated || total > loaded.length;
-  if (loaded.length === 0) return <p className={styles.meta}>No variables</p>;
+  const unknown = session.variables_unknown === true;
+  if (loaded.length === 0)
+    return (
+      <p className={styles.meta}>
+        {unknown ? "Variables could not be listed" : "No variables"}
+      </p>
+    );
   return (
     <>
+      {unknown && (
+        <p className={styles.meta}>Some variables could not be listed</p>
+      )}
       {filterable && (
         <FieldText
           aria-label="Filter variables"
@@ -733,7 +744,10 @@ export function PythonWorkspacePanel({ chatId }: { chatId: string | null }) {
               id="variables"
               title="Variables"
               count={
-                data.session.variables_total ?? data.session.variables.length
+                data.session.variables_unknown
+                  ? undefined
+                  : data.session.variables_total ??
+                    data.session.variables.length
               }
               open={isOpen(
                 "variables",

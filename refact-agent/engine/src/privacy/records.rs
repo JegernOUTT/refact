@@ -388,7 +388,7 @@ pub(crate) fn record_path_candidates(
     candidates
 }
 
-fn record_path_candidates_with_workspaces(
+pub(super) fn record_path_candidates_with_workspaces(
     gcx: &Arc<GlobalContext>,
     path: &Path,
     mappings: &[crate::files_correction::RegisteredWorktreePathMapping],
@@ -410,7 +410,7 @@ fn record_path_candidates_with_workspaces(
     candidates
 }
 
-fn privacy_roots_with_workspaces(
+pub(super) fn privacy_roots_with_workspaces(
     workspaces: &[PathBuf],
     mappings: &[crate::files_correction::RegisteredWorktreePathMapping],
 ) -> Vec<PathBuf> {

@@ -11,12 +11,29 @@ use crate::tools::tools_description::Tool;
 
 const BUDGET: Duration = Duration::from_secs(60);
 
+/// The test chat as a person left it: its current turn started with a typed message (A2).
 pub(super) async fn fixture() -> (
     tempfile::TempDir,
     AppState,
     Arc<tokio::sync::Mutex<crate::at_commands::at_commands::AtCommandsContext>>,
 ) {
-    crate::tools::tool_python::tests::fixture().await
+    let fixture = crate::tools::tool_python::tests::fixture().await;
+    latch(
+        &fixture.1,
+        "typed",
+        json!({"type":"user_message","content":"hi"}),
+    )
+    .await;
+    fixture
+}
+
+/// Latches the origin `command` (with request id `request_id`) gives the test chat's turn, the
+/// way the queue does when it takes the command.
+pub(super) async fn latch(app: &AppState, request_id: &str, command: Value) {
+    let mut request = command;
+    request["client_request_id"] = json!(request_id);
+    let request: refact_chat_api::CommandRequest = serde_json::from_value(request).unwrap();
+    crate::chat::queue::latch_turn_origin(&mut *session(app).await.lock().await, &request);
 }
 
 pub(super) fn coordination(dir: &tempfile::TempDir, yaml: &str) {
@@ -125,9 +142,15 @@ pub(super) async fn finish(task: tokio::task::JoinHandle<ChatMessage>) -> ChatMe
 mod agents_fns;
 mod chat;
 mod chat_changes;
+mod chat_patch;
 mod chats;
 mod chats_changes;
+mod chats_create;
+mod chats_delete;
+mod chats_params;
+mod chats_patch;
 mod chats_risky;
+mod chats_turns;
 mod config_changes;
 mod config_fns;
 mod config_risky;

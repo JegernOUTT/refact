@@ -2895,7 +2895,6 @@ pub(crate) async fn expand_subchat_artifacts(
         } => names.iter().cloned().collect(),
         ToolsPolicy::None => Default::default(),
     };
-    let mut changed = false;
     for message in messages
         .iter_mut()
         .filter(|message| message.role == "system")
@@ -2933,13 +2932,6 @@ pub(crate) async fn expand_subchat_artifacts(
             )
         };
         crate::chat::prompts::replace_artifacts_in_content(&mut message.content, &rendered);
-        changed = true;
-    }
-    if changed && config.stateful {
-        let session = app.chat.sessions.read().await.get(chat_id).cloned();
-        if let Some(session) = session {
-            session.lock().await.replace_messages(messages.to_vec());
-        }
     }
 }
 
@@ -8478,10 +8470,26 @@ mod subchat_tests {
                 .join(child)
                 .exists());
             let session = app.chat.sessions.read().await.get(child).cloned().unwrap();
-            assert_eq!(
-                session.lock().await.messages[0].content.content_text_only(),
-                rendered
-            );
+            {
+                let session = session.lock().await;
+                assert!(session.runner_history_unchanged());
+                assert_eq!(
+                    session.messages[0].content.content_text_only(),
+                    crate::chat::prompts::ARTIFACTS_INSTRUCTIONS_MARKER
+                );
+            }
+            super::save_subchat_trajectory(
+                &app,
+                &config,
+                &stateful_thread_from_config(child, &config),
+                &messages,
+                TrajectoryCommitIntent::Ephemeral,
+            )
+            .await
+            .unwrap();
+            let session = session.lock().await;
+            assert!(session.runner_history_unchanged());
+            assert_eq!(session.messages[0].content.content_text_only(), rendered);
         }
     }
 

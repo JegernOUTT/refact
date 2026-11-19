@@ -145,6 +145,11 @@ async fn execute_in(
 /// Chat model `model`; slots: light `cheap/light`, default `big/default`, thinking
 /// `deep/thinking`, each a different model so that a wrong slot fails the test.
 async fn llm_fixture(chat: &str, settings: &str) -> Llm {
+    llm_fixture_in(chat, settings, true).await
+}
+
+/// `llm_fixture` with the fixture tools, or with the engine's own tools (`shell` included).
+async fn llm_fixture_in(chat: &str, settings: &str, fixture_tools: bool) -> Llm {
     let (dir, app, _) = fixture().await;
     std::fs::write(
         dir.path().join("project/.refact/coordination.yaml"),
@@ -176,7 +181,7 @@ async fn llm_fixture(chat: &str, settings: &str) -> Llm {
         .insert(chat.into(), Arc::new(tokio::sync::Mutex::new(session)));
     let llm = Llm {
         dir,
-        app: with_tools(app),
+        app: if fixture_tools { with_tools(app) } else { app },
         chat: chat.into(),
     };
     crate::subchat::remove_model_fixture(&llm.backend());
@@ -752,7 +757,9 @@ async fn script_model_calls_write_no_internal_trace() {
     tokio::time::timeout(Duration::from_secs(60), async {
         let llm = llm_fixture("pyllm-trace", "").await;
         llm.reply(vec![answer("one", 1, 1), answer("two", 1, 1)], None);
-        llm.run("llm-trace-warm", "1").await;
+        for id in ["llm-trace-warm", "llm-trace-warm-again"] {
+            llm.run(id, "1").await;
+        }
         let before = settled_files(llm.dir.path()).await;
         let python = llm
             .run(
@@ -946,6 +953,148 @@ async fn indented_display_files_are_read_by_the_workspace_view() {
             (shown.title.as_deref(), shown.rows.as_ref().map(Vec::len)),
             (Some("T"), Some(2))
         );
+    })
+    .await
+    .unwrap();
+}
+
+#[test]
+fn the_unobserved_output_mark_never_becomes_a_privacy_record_and_old_engines_load_it() {
+    let record =
+        json!({"files":[{"path":"/p/zone_a.txt","zone":"zone_a","attribution":"observed"}]});
+    let taint = vec![
+        record.clone(),
+        crate::python_tool::llm::unobserved_output_mark(),
+    ];
+    assert!(crate::python_tool::llm::has_unobserved_output_mark(&taint));
+    assert!(!crate::python_tool::llm::has_unobserved_output_mark(
+        &taint[..1]
+    ));
+    let mut message = crate::call_validation::ChatMessage::default();
+    crate::python_tool::run_output::merge_taint(&mut message, &taint).unwrap();
+    assert_eq!(message.extra["privacy"], record);
+    assert_eq!(message.extra.len(), 1, "{:?}", message.extra);
+
+    #[derive(serde::Deserialize)]
+    #[allow(dead_code)]
+    struct StateMetaOfMain {
+        schema: u32,
+        dump_version: String,
+        saved_at_ms: u64,
+        bytes: u64,
+        sha256: String,
+        last_run_id: String,
+        hmac: String,
+        taint: Vec<Value>,
+        variables: Vec<Value>,
+        #[serde(default)]
+        variables_truncated: bool,
+        #[serde(default)]
+        variables_total: Option<u64>,
+    }
+    let state = json!({"schema":1,"dump_version":"1","saved_at_ms":1,"bytes":3,"sha256":"00","last_run_id":"r","hmac":"00","taint":taint,"variables":[]});
+    let loaded: StateMetaOfMain = serde_json::from_value(state).unwrap();
+    let kept: Vec<Value> = loaded
+        .taint
+        .into_iter()
+        .filter(|value| value.get("files").is_some())
+        .collect();
+    assert_eq!(kept, vec![record]);
+}
+
+/// A chat whose provider every zone allows observes no shell command; scripts that read such
+/// output and then ask a light model of another provider.
+#[cfg(unix)]
+#[tokio::test]
+#[serial_test::serial(python_llm_backend)]
+async fn unchecked_command_output_counts_as_every_zone_for_llm_until_restart() {
+    tokio::time::timeout(Duration::from_secs(120), async {
+        let open = llm_fixture_in("pyllm-unobserved-open", "", false).await;
+        let mut policy = (*open.app.gcx.privacy_policy_load.read().unwrap().policy).clone();
+        policy.blocked.clear();
+        policy.zones.clear();
+        crate::privacy::save_privacy_policy(open.app.gcx.clone(), policy)
+            .await
+            .unwrap();
+        open.reply(vec![answer("ok", 1, 1)], None);
+        let python = open
+            .run(
+                "no-zones",
+                "r = await run(\"printf zone-a-line\")\n(await llm('summarise ' + r['tail'], model='light'))['model']",
+            )
+            .await;
+        assert_eq!(result(&python), "cheap/light", "{python}");
+
+        let llm = llm_fixture_in("pyllm-unobserved", "", false).await;
+        zone_a_policy(&llm.dir, &llm.app).await;
+        let mut policy = (*llm.app.gcx.privacy_policy_load.read().unwrap().policy).clone();
+        policy.blocked.clear();
+        crate::privacy::save_privacy_policy(llm.app.gcx.clone(), policy)
+            .await
+            .unwrap();
+        let refused = "msg = None\ntry:\n    await llm('summarise', model='light')\nexcept PermissionError as e:\n    msg = str(e)\nmsg";
+        llm.reply(vec![answer("ok", 1, 1)], None);
+        let messages = llm
+            .execute(
+                &[],
+                call(
+                    "unobserved-shell",
+                    &format!("s = await shell(command=\"printf zone-a-line\", description=\"print\")\nfallback = (await llm('summarise'))['model']\n{refused}\n[fallback, msg]"),
+                    false,
+                ),
+            )
+            .await;
+        let python = python_of(&messages);
+        let answer_value = result(&python);
+        assert_eq!(answer_value[0], "model", "{python}");
+        let message = answer_value[1].as_str().unwrap_or_else(|| panic!("{python}"));
+        assert!(
+            message.contains("\"cheap\"")
+                && message.contains("zone_a")
+                && message.contains("unchecked command output"),
+            "{message}"
+        );
+        assert_eq!(llm.requests().len(), 1);
+        assert_eq!(llm.requests()[0].model_id, "model");
+        let records = messages[0]
+            .extra
+            .get("privacy")
+            .map(Value::to_string)
+            .unwrap_or_default();
+        assert!(
+            !records.contains("without privacy observation") && !records.contains("unobserved"),
+            "{records}"
+        );
+
+        let python = llm.run("unobserved-later", refused).await;
+        let message = result(&python);
+        assert!(
+            message.as_str().is_some_and(|m| m.contains("unchecked command output")),
+            "{python}"
+        );
+
+        let llm2 = llm_fixture_in("pyllm-unobserved-run", "", false).await;
+        zone_a_policy(&llm2.dir, &llm2.app).await;
+        let mut policy = (*llm2.app.gcx.privacy_policy_load.read().unwrap().policy).clone();
+        policy.blocked.clear();
+        crate::privacy::save_privacy_policy(llm2.app.gcx.clone(), policy)
+            .await
+            .unwrap();
+        let python = llm2
+            .run(
+                "unobserved-run",
+                &format!("r = await run(\"printf zone-a-line\")\n{refused}"),
+            )
+            .await;
+        let message = result(&python);
+        assert!(
+            message.as_str().is_some_and(|m| m.contains("unchecked command output")),
+            "{python}"
+        );
+        llm2.reply(vec![answer("ok", 1, 1)], None);
+        let restart = serde_json::from_value::<crate::call_validation::ChatToolCall>(json!({"id":"unobserved-restart","type":"function","function":{"name":"python","arguments":json!({"code":"(await llm('q', model='light'))['model']","restart":true}).to_string()}})).unwrap();
+        let python = python_of(&llm2.execute(&[], restart).await);
+        assert_eq!(result(&python), "cheap/light", "{python}");
     })
     .await
     .unwrap();

@@ -208,7 +208,8 @@ async fn send_delivers_with_run_records_and_is_risky_for_autonomous_chats() {
     let engine = request.engine.unwrap();
     assert_eq!(engine.class, refact_chat_api::PythonEngineClass::Risky);
     assert!(engine.warning.unwrap().contains("without asking"));
-    assert_eq!(result(&m)["queued"], true, "{}", result(&m));
+    assert_eq!(result(&m)["outcome"], "delivered", "{}", result(&m));
+    assert_eq!(result(&m)["queued"], false, "{}", result(&m));
     until(&target, |s| {
         s.messages
             .iter()

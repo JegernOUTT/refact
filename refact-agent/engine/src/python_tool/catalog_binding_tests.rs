@@ -136,7 +136,14 @@ async fn real_mode_catalog_sizes_and_prompt_functions() {
         let c = catalog(&tools, false, usize::MAX);
         let names: std::collections::HashSet<_> =
             tools.iter().map(|tool| tool.name.clone()).collect();
-        let snippet = crate::chat::prompt_snippets::python_tool_instructions(&names, false, false);
+        let snippet =
+            crate::chat::prompt_snippets::python_tool_instructions(&names, false, false, false);
+        assert_eq!(
+            snippet.contains("await run("),
+            c.resolve("run").is_some(),
+            "{mode}"
+        );
+        assert!(c.resolve("git").is_some(), "{mode}");
         for (name, call) in crate::chat::prompt_snippets::PYTHON_EXAMPLE_CALLS {
             if snippet.contains(call) {
                 assert!(c.resolve(name).is_some(), "{mode} missing {name}");

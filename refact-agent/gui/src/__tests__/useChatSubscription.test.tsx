@@ -10,6 +10,11 @@ import { useChatSubscription } from "../hooks/useChatSubscription";
 import { chatReducer } from "../features/Chat/Thread/reducer";
 import { createChatWithId } from "../features/Chat/Thread/actions";
 import {
+  notificationsSlice,
+  selectProcessCompletions,
+  selectUnreadNotificationCountByThread,
+} from "../features/Notifications";
+import {
   agentsPanelSlice,
   agentDisclosureDenied,
   agentRecoveryRequested,
@@ -33,6 +38,7 @@ const createTestStore = () => {
       config: configReducer,
       current_project: (state = { name: "" }) => state,
       agentsPanel: agentsPanelSlice.reducer,
+      notifications: notificationsSlice.reducer,
       [backgroundAgentsApi.reducerPath]: backgroundAgentsApi.reducer,
     },
   });
@@ -51,6 +57,48 @@ describe("useChatSubscription", () => {
     vi.unstubAllGlobals();
     vi.useRealTimers();
   });
+
+  it.each(["foreground", "background", "service"])(
+    "applies %s completion and only notifies for non-foreground modes",
+    (mode) => {
+      let handlers: Parameters<
+        typeof chatSubscription.subscribeToChatEvents
+      >[2];
+      vi.spyOn(chatSubscription, "subscribeToChatEvents").mockImplementation(
+        (_id, _config, callbacks) => {
+          handlers = callbacks;
+          return () => undefined;
+        },
+      );
+      const store = createTestStore();
+      store.dispatch(updateConfig({ host: "vscode", lspPort: 8123 }));
+      store.dispatch(createChatWithId({ id: "test-chat" }));
+      renderHook(() => useChatSubscription("test-chat"), {
+        wrapper: ({ children }) => (
+          <Provider store={store}>{children}</Provider>
+        ),
+      });
+      syncAct(() =>
+        handlers.onEvent({
+          type: "process_completed",
+          chat_id: "test-chat",
+          seq: "1",
+          process_id: "exec-test",
+          status: "exited",
+          exit_code: 0,
+          short_description: "Local fixture",
+          mode,
+        }),
+      );
+      const state = store.getState();
+      const count = mode === "foreground" ? 0 : 1;
+      expect(state.chat.threads["test-chat"]?.last_applied_seq).toBe("1");
+      expect(selectUnreadNotificationCountByThread(state, "test-chat")).toBe(
+        count,
+      );
+      expect(selectProcessCompletions(state)).toHaveLength(count);
+    },
+  );
 
   it.each([
     "error",

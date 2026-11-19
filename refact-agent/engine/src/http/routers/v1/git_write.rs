@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::git_read::{api_error, api_error_code, internal_error, repo_relative_paths, selected_roots};
+use refact_git::read::{file_payload, MAX_FILE_BYTES};
 use crate::app_state::AppState;
 use crate::git::cli::{
     git_args, pathspec_nul_input, repo_mutation_lock, run_git_cli, GitCliError, GitCliOptions,
@@ -19,8 +20,6 @@ use crate::git::cli::{
 type HttpError = (StatusCode, Json<Value>);
 type ApiResult<T> = Result<Json<T>, HttpError>;
 
-const MAX_FILE_BYTES: usize = 2 * 1024 * 1024;
-const BINARY_PROBE_BYTES: usize = 8000;
 const HOOK_OUTPUT_TAIL_BYTES: usize = 4096;
 const COMMIT_HOOKS: [&str; 4] = [
     "pre-commit",
@@ -890,23 +889,6 @@ pub async fn handle_v1_git_rollback(
         Ok(Json(response))
     })
     .await
-}
-
-fn file_payload(bytes: Vec<u8>, size: u64) -> (bool, bool, String) {
-    let truncated = bytes.len() > MAX_FILE_BYTES || size as usize > MAX_FILE_BYTES;
-    let bytes = &bytes[..bytes.len().min(MAX_FILE_BYTES)];
-    if bytes[..bytes.len().min(BINARY_PROBE_BYTES)].contains(&0) {
-        return (true, truncated, String::new());
-    }
-    match std::str::from_utf8(bytes) {
-        Ok(text) => (false, truncated, text.to_string()),
-        Err(error) if truncated && error.error_len().is_none() => (
-            false,
-            truncated,
-            String::from_utf8_lossy(&bytes[..error.valid_up_to()]).to_string(),
-        ),
-        Err(_) => (true, truncated, String::new()),
-    }
 }
 
 fn blob_payload(repository: &Repository, id: git2::Oid) -> Result<(u64, Vec<u8>), HttpError> {

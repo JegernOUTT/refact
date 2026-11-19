@@ -469,6 +469,13 @@ pub(crate) fn is_editing_tool(tool_name: &str) -> bool {
     EDITING_TOOLS.contains(&tool_name)
 }
 
+const SCRIPT_WRITE_TOOLS: &[&str] = &["rm", "shell", "process_start"];
+
+/// A built-in tool whose presence lets the chat's Python scripts write outside ARTIFACTS_DIR.
+pub(crate) fn grants_script_writes(tool_name: &str) -> bool {
+    is_editing_tool(tool_name) || SCRIPT_WRITE_TOOLS.contains(&tool_name)
+}
+
 // Tools whose results are expensive, non-reproducible subagent outcomes bypass the shared per-round
 // ToolBudget so running many of them at once does not chop each report to a
 // fair-share fragment; overall context pressure is handled later by chat
@@ -1249,6 +1256,79 @@ mod tests {
 
         let outcome = process_tool_calls_once(app, session.clone(), "agent", None).await;
         (outcome, sink, session)
+    }
+
+    #[tokio::test]
+    async fn preempt_at_inline_python_merge_keeps_the_closed_call_closed() {
+        use crate::tools::tool_python::tests::{call, fixture, with_tools};
+        use refact_chat_api::{DeliveryOutcome, PendingDelivery, PushMode};
+        use std::time::Duration;
+        use tokio_util::task::AbortOnDropHandle;
+
+        const CHAT: &str = "python-test";
+        const OLD: &str = "inline-python";
+        let (_dir, app, _) = fixture().await;
+        let app = with_tools(app);
+        let session = app.chat.sessions.read().await[CHAT].clone();
+        {
+            let mut locked = session.lock().await;
+            locked.thread.model = "model".into();
+            locked.add_message(ChatMessage {
+                role: "assistant".into(),
+                tool_calls: Some(vec![call(OLD, "42", false)]),
+                ..Default::default()
+            });
+        }
+        let (entered, release) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
+        let execution = AbortOnDropHandle::new(tokio::spawn(BEFORE_TOOL_RESULTS_MERGE.scope(
+            (entered.clone(), release.clone()),
+            {
+                let app = app.clone();
+                let session = session.clone();
+                async move { process_tool_calls_once(app, session, "agent", Some("model")).await }
+            },
+        )));
+        tokio::time::timeout(Duration::from_secs(10), entered.notified())
+            .await
+            .expect("the inline result did not reach the merge boundary");
+        let jobs = app.runtime.tool_jobs.list(Some(CHAT));
+        let [(job, true)] = jobs.as_slice() else {
+            panic!("the real Python invocation must be terminal and inspectable before preempt");
+        };
+        assert_eq!(job.status, crate::tool_jobs::JobStatus::Succeeded);
+        {
+            let mut locked = session.lock().await;
+            assert_eq!(
+                locked
+                    .enqueue_delivery(PendingDelivery::new(
+                        vec![ChatMessage::new("user".into(), "urgent".into())],
+                        PushMode::Preempt,
+                        "engine.chats.send",
+                        true,
+                    ))
+                    .unwrap(),
+                DeliveryOutcome::Delivered,
+            );
+        }
+        release.notify_one();
+        let outcome = tokio::time::timeout(Duration::from_secs(10), execution)
+            .await
+            .unwrap()
+            .unwrap();
+        let locked = session.lock().await;
+        assert!(locked.messages.iter().all(|message| {
+            message.tool_call_id != OLD
+                && !message
+                    .tool_calls
+                    .iter()
+                    .flatten()
+                    .any(|call| call.id == OLD)
+        }));
+        assert!(matches!(outcome, ToolStepOutcome::Stop));
+        drop(locked);
+        assert!(app.runtime.tool_jobs.background_terminal_refs().is_empty());
+        app.runtime.tool_jobs.shutdown().await;
+        app.python_tool.registry.shutdown_all().await;
     }
 
     fn recorded_components(sink: &MemoryPerfSink) -> Vec<&'static str> {
@@ -3895,14 +3975,13 @@ pub async fn process_tool_calls_once(
         tools_to_execute.retain(|call| !denied.contains(&call.id));
     }
 
-    {
+    let (tool_interrupt_flag, execution_abort) = {
         let mut session = session_arc.lock().await;
         session.set_runtime_state(SessionState::ExecutingTools, None);
-    }
-
-    let tool_interrupt_flag = {
-        let session = session_arc.lock().await;
-        session.user_interrupt_flag.clone()
+        (
+            session.user_interrupt_flag.clone(),
+            session.execution_abort.clone(),
+        )
     };
     let execution_wait_span = perf_diagnostics::span(PerfComponent::ToolExecutionWait, None, None);
     drop(operation);
@@ -3922,7 +4001,7 @@ pub async fn process_tool_calls_once(
             ..Default::default()
         },
     );
-    let (tool_results, _) = tokio::select! {
+    let (mut tool_results, _) = tokio::select! {
         result = tool_execution => result,
         _ = wait_for_tool_abort(session_arc.clone(), tool_interrupt_flag) => (Vec::new(), false),
     };
@@ -3940,6 +4019,9 @@ pub async fn process_tool_calls_once(
         let session_merge_span =
             perf_diagnostics::span(PerfComponent::ToolSessionMergeEvents, None, None);
         let mut session = session_arc.lock().await;
+        if thread.task_meta.is_none() && execution_abort.load(Ordering::SeqCst) {
+            remove_interrupted_inline_python(&mut tool_results, &tools_to_execute);
+        }
         for result_msg in tool_results {
             session.add_message(result_msg);
         }
@@ -4009,7 +4091,7 @@ pub async fn process_tool_calls_once(
     };
 
     // Check if we were aborted during tool execution (user stop or tool-initiated).
-    let was_aborted = {
+    let mut was_aborted = {
         let session = session_arc.lock().await;
         session.abort_flag.load(Ordering::Relaxed)
     };
@@ -4018,9 +4100,17 @@ pub async fn process_tool_calls_once(
         perf_diagnostics::span(PerfComponent::ToolSessionMergeEvents, None, None);
     let chat_id = session_arc.lock().await.chat_id.clone();
     let sealed = crate::agents::seal::is_sealed(&app, &chat_id).await;
+    #[cfg(test)]
+    if let Ok((entered, release)) = BEFORE_TOOL_RESULTS_MERGE.try_with(Clone::clone) {
+        entered.notify_one();
+        release.notified().await;
+    }
     let mut verify_completion = false;
     {
         let mut session = session_arc.lock().await;
+        if thread.task_meta.is_none() && execution_abort.load(Ordering::SeqCst) {
+            was_aborted |= remove_interrupted_inline_python(&mut tool_results, &tools_to_execute);
+        }
         if !was_interrupted || tool_initiated_stop {
             for result_msg in tool_results {
                 session.add_message(result_msg);
@@ -4101,6 +4191,35 @@ pub async fn process_tool_calls_once(
     } else {
         ToolStepOutcome::Continue
     }
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    static BEFORE_TOOL_RESULTS_MERGE: (Arc<Notify>, Arc<Notify>);
+}
+
+fn python_requests_background(call: &ChatToolCall) -> bool {
+    call.function.name == "python"
+        && serde_json::from_str::<serde_json::Value>(&call.function.arguments)
+            .ok()
+            .is_some_and(|args| args["run_in_background"] == true)
+}
+
+fn remove_interrupted_inline_python(
+    results: &mut Vec<ChatMessage>,
+    calls: &[ChatToolCall],
+) -> bool {
+    let old_len = results.len();
+    results.retain(|result| {
+        result.extra.get("tool_job_postprocessed") != Some(&serde_json::Value::Bool(true))
+            || result.extra.contains_key("tool_job")
+            || !calls.iter().any(|call| {
+                call.id == result.tool_call_id
+                    && call.function.name == "python"
+                    && !python_requests_background(call)
+            })
+    });
+    results.len() != old_len
 }
 
 fn format_openai_server_tool_result(tc: &ChatToolCall) -> String {
@@ -5245,11 +5364,26 @@ async fn execute_admitted_tool(
     let model_id = model_id.map(str::to_owned);
     let call_for_error = tool_call.clone();
     let runtime = app.runtime.tool_jobs.clone();
-    let admission_abort = ccx.lock().await.abort_flag.clone();
+    let is_python = tool_call.function.name == "python";
+    let force_background = python_requests_background(&tool_call);
+    let (admission_abort, execution_abort) = {
+        let context = ccx.lock().await;
+        let attached_python = is_python
+            && !force_background
+            && !wait_until_terminal
+            && context.task_meta.is_none()
+            && context.native_job_fence.is_none()
+            && context.subchat_depth == 0
+            && context.background_agent_id.is_none();
+        (
+            context.abort_flag.clone(),
+            attached_python.then(|| context.execution_abort.clone()),
+        )
+    };
     let admission_shutdown = app.runtime.shutdown_flag.clone();
     let python_app = app.clone();
     let python_chat = chat_id.clone();
-    let python_completion = (tool_call.function.name == "python")
+    let python_completion = is_python
         .then(|| PythonJobCompletion::new(app.clone(), chat_id.clone(), tool_call.id.clone()));
     let python_completed = python_completion
         .as_ref()
@@ -5391,10 +5525,6 @@ async fn execute_admitted_tool(
             },
         )
     };
-    let force_background = call_for_error.function.name == "python"
-        && serde_json::from_str::<serde_json::Value>(&call_for_error.function.arguments)
-            .ok()
-            .is_some_and(|a| a["run_in_background"] == true);
     let result = if wait_until_terminal && !force_background {
         runtime
             .submit_unbounded_with_abort(binding, admission_abort, admission_shutdown, make)
@@ -5410,6 +5540,7 @@ async fn execute_admitted_tool(
                 },
                 admission_abort,
                 admission_shutdown,
+                execution_abort,
                 make,
             )
             .await
@@ -5438,6 +5569,7 @@ async fn execute_admitted_tool(
                 Vec::new(),
             )
         }
+        Ok(crate::tool_jobs::Submission::Interrupted) => (idx, false, Vec::new(), Vec::new()),
         Err(error) => runner_capacity_error(idx, &call_for_error, &error),
     }
 }

@@ -116,6 +116,18 @@ fn sanitizes_and_deduplicates_names() {
     }
 }
 #[test]
+fn default_import_names_are_reserved() {
+    let ts: Vec<_> = ["asyncio", "os", "re", "json", "Path"]
+        .iter()
+        .map(|n| tool(n, json!({}), None))
+        .collect();
+    let c = catalog(&ts);
+    for name in ["asyncio", "os", "re", "json", "Path"] {
+        assert!(c.resolve(name).is_none(), "{name}");
+        assert_eq!(c.resolve(&format!("{name}_2")).unwrap().tool_name, name);
+    }
+}
+#[test]
 fn renders_required_params_in_schema_order_then_ellipsis() {
     let c = catalog(&fixture());
     assert!(c
@@ -310,6 +322,8 @@ fn block_order_and_helper_signatures() {
         pos("def tools() -> list[str]: ..."),
         pos("def host_path(p: str) -> str: ..."),
         pos("def virtual_path(p: str) -> str: ..."),
+        pos("async def git(subcommand: Literal["),
+        pos("async def run(cmd: str, *,"),
         pos("async def llm(prompt: str, *,"),
         pos("def show(value: Any, *,"),
         pos("async def mcp_search("),
@@ -699,4 +713,205 @@ fn engine_is_bound_described_and_helped_only_with_docs() {
     assert!(on.help_text("engine.settings.nope").is_none());
     assert!(on.help_index(100_000).contains("engine: "));
     plausible(&on.description);
+}
+
+#[test]
+fn file_helpers_are_bound_described_and_reserved() {
+    let c = catalog(&[]);
+    for name in ["read", "grep", "replace"] {
+        let helper = c.resolve(name).unwrap();
+        assert!(!helper.is_async, "{name}");
+        assert_eq!(helper.tool_name, name);
+    }
+    assert_eq!(
+        refact_python_catalog::FILE_HELPERS,
+        &["read", "grep", "replace"]
+    );
+    for stub in [
+        "def read(path: str, start: int = 1, end: int | None = None, *, numbered: bool = True) -> str: ...  # lines start..end of a text file (1-based, inclusive; start=-N: last N lines) as \"  12 | text\"; numbered=False: the exact text\n",
+        "def grep(pattern: str, path: str = \".\", *, context: int = 0, glob: str | None = None, ignore_case: bool = False, limit: int = 200, data: bool = False) -> str | dict: ...  # regex search in a file or directory (search_pattern syntax and ignore rules): \"path:line: text\" lines\n",
+        "def replace(path: str, old: str, new: str, *, count: int = 1) -> str: ...  # exact-text edit; ValueError unless exactly count matches (0: all, at least one); returns a unified diff\n",
+    ] {
+        assert!(c.description.contains(stub), "{stub}");
+    }
+    for (name, needles) in [
+        (
+            "read",
+            &[
+                "  12 | text",
+                "read(p, -40)",
+                "ValueError",
+                "UnicodeDecodeError",
+                "os.chdir()",
+                "files_read",
+            ][..],
+        ),
+        (
+            "grep",
+            &[
+                "Rust regex",
+                "privacy",
+                "files_skipped",
+                "truncated",
+                "20,000",
+                "256 MiB",
+                "without matches",
+            ][..],
+        ),
+        (
+            "replace",
+            &[
+                "exactly",
+                "\"aa\" occurs once in \"aaa\"",
+                "60 lines",
+                "hard link",
+                "read-only",
+                "in a read-only chat a symlinked path is refused",
+                "one without file-editing, rm, mv, shell or process_start tools",
+                "unsaved editor buffers",
+                "undo_textdoc",
+            ][..],
+        ),
+    ] {
+        let help = c.help_text(name).unwrap();
+        for needle in needles {
+            assert!(help.contains(needle), "{name}: {needle}\n{help}");
+        }
+        assert!(help.contains("Input schema:"), "{name}");
+    }
+    let index = c.help_index(usize::MAX);
+    for line in [
+        "read: Read lines of a text file with line numbers.\n",
+        "grep: Search files for a regex.\n",
+        "replace: Replace exact text in a file and return the diff.\n",
+    ] {
+        assert!(index.contains(line), "{line}");
+    }
+    let shadow = catalog(
+        &["read", "grep", "replace"]
+            .map(|n| tool(n, json!({"type":"object","properties":{}}), None)),
+    );
+    for name in ["read", "grep", "replace"] {
+        assert_eq!(
+            shadow.resolve(&format!("{name}_2")).unwrap().tool_name,
+            name
+        );
+        assert!(shadow.functions.iter().all(|f| f.py_name != name));
+    }
+    plausible(&c.description);
+}
+
+#[test]
+fn git_helper_is_always_bound_described_and_reserved() {
+    let c = catalog(&[]);
+    let helper = c.resolve("git").unwrap();
+    assert!(helper.is_async);
+    assert_eq!(helper.tool_name, "git");
+    assert_eq!(refact_python_catalog::GIT_HELPER, "git");
+    assert_eq!(
+        refact_python_catalog::GIT_POSITIONAL,
+        &["subcommand", "#1", "#2"]
+    );
+    assert!(c.description.contains("async def git(subcommand: Literal[\"status\", \"diff\", \"log\", \"show\", \"branches\"], *args, **kwargs) -> ToolResult[dict]: ...  # read-only git data, no shell needed: git(\"status\"), git(\"diff\", rev=None, path=None, staged=False), git(\"log\", n=20, rev=None, path=None), git(\"show\", rev, path=None), git(\"branches\")\n"));
+    assert!(!c.description.contains("blame"));
+    let help = c.help_text("git").unwrap();
+    for needle in [
+        "repository that holds PROJECT_ROOT",
+        "workspace folders",
+        "runs no git program",
+        "read-only chats",
+        "\"A...B\": the merge base of A and B to B",
+        "withheld_count",
+        "Untracked files and submodules are left out",
+        "Blob (X:path), index, reflog (@{...}) and peel (^{...}) forms",
+        "300 files per diff",
+        "512 KiB per call",
+        "PermissionError",
+        "privacy records",
+        "renames are detected only among at most 200 added and deleted files",
+        "log reads at most 50,000 commits (scan_truncated)",
+        "branches: [{name, is_head, upstream, tip_oid, ahead, behind, upstream_gone}], remote_branches: [{name, remote, short_name, tip_oid}], tags: [{name, target_oid}]",
+        "at most 1,000 branches, 1,000 remote branches and 1,000 tags, the first by name (truncated)",
+        "A call over a very large change set can take long; Stop is honoured between files.",
+        "on each side of a range too",
+        "listed with link=True and has no patch and no text; its target is never returned",
+        "naming it as path in diff, log or show raises PermissionError, whether or not it exists",
+        "with path, only commits that changed a file under it that git() may show",
+        "checked as written and as the file it resolves to now through links; both must pass",
+        "which says so when the repository is shallow",
+        "borrows objects from another one (objects/info/alternates) is not read",
+    ] {
+        assert!(help.contains(needle), "{needle}: {help}");
+    }
+    assert!(!help.contains("blame"));
+    assert!(c
+        .help_index(usize::MAX)
+        .contains("git: Read git status, diffs, history, files at a revision and branches.\n"));
+    let shadow = catalog(&[tool("git", json!({"type":"object","properties":{}}), None)]);
+    assert_eq!(shadow.resolve("git_2").unwrap().tool_name, "git");
+    assert_eq!(shadow.resolve("git").unwrap().tool_name, "git");
+    assert!(!shadow.resolve("git").unwrap().input_schema["properties"]
+        .as_object()
+        .unwrap()
+        .is_empty());
+    plausible(&c.description);
+}
+
+#[test]
+fn run_helper_is_bound_and_described_only_with_shell() {
+    let without = catalog(&[tool("cat", json!({"type":"object","properties":{}}), None)]);
+    assert!(without.resolve("run").is_none());
+    assert!(!without.description.contains("def run("));
+    assert!(without.help_text("run").is_none());
+    let with = catalog(&fixture());
+    let helper = with.resolve("run").unwrap();
+    assert!(helper.is_async);
+    assert_eq!(helper.tool_name, "run");
+    assert_eq!(refact_python_catalog::RUN_TOOL, "shell");
+    assert_eq!(refact_python_catalog::RUN_POSITIONAL, &["cmd"]);
+    assert!(with.description.contains("async def run(cmd: str, *, timeout: int | None = None, cwd: str | None = None, tail: int = 60) -> RunResult: ...  # runs a build or test command to its end through the shell tool (same approvals and rules). RunResult = {ok: bool, exit_code: int | None, status: str, duration_s: float, tail: str, problems: list[str], log: str | None, truncated: bool, error: str | None}\n"));
+    let help = with.help_text("run").unwrap();
+    for needle in [
+        "same approvals, hooks and rules as calling shell",
+        "instead of starting a process and polling it",
+        "RUN_DIR/logs",
+        "truncated is True",
+        "\"withheld\"",
+        "background one makes run() raise RuntimeError",
+        "warnings are left out",
+        "pass a timeout",
+    ] {
+        assert!(help.contains(needle), "{needle}: {help}");
+    }
+    let shadow = catalog(&[
+        tool("run", json!({"type":"object","properties":{}}), None),
+        tool("shell", json!({"type":"object","properties":{}}), None),
+    ]);
+    assert_eq!(shadow.resolve("run_2").unwrap().tool_name, "run");
+    assert_eq!(shadow.resolve("run").unwrap().tool_name, "run");
+    let unbound = catalog(&[tool("run", json!({"type":"object","properties":{}}), None)]);
+    assert!(unbound.resolve("run").is_none());
+    assert_eq!(unbound.resolve("run_2").unwrap().tool_name, "run");
+    plausible(&with.description);
+}
+
+#[test]
+fn the_pre_imported_modules_are_named() {
+    assert!(refact_python_catalog::runtime_note()
+        .contains("os, re, json, Path and asyncio are imported before every run."));
+    assert!(catalog(&[])
+        .description
+        .contains("os, re, json, Path and asyncio are imported before every run."));
+}
+
+#[test]
+fn the_io_module_is_listed_with_what_it_lacks() {
+    assert!(refact_python_catalog::AVAILABLE_MODULES.contains(&"io"));
+    let note = refact_python_catalog::runtime_note();
+    assert!(
+        note.contains(
+            "io has StringIO, BytesIO and open only (no TextIOWrapper; newline=None does not translate)."
+        ),
+        "{note}"
+    );
 }

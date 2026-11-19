@@ -129,6 +129,77 @@ fn symlink_escaping_workspace_is_not_followed() {
     assert!(!v.session.state_persisted);
 }
 
+#[cfg(unix)]
+#[test]
+fn links_above_the_storage_base_are_followed_and_links_below_it_are_refused() {
+    use std::os::unix::fs::symlink;
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(temp.path().join("real/trajectories")).unwrap();
+    symlink(temp.path().join("real"), temp.path().join("alias")).unwrap();
+    let base = temp.path().join("alias/trajectories");
+    let key = temp.path().join("key");
+    let workspace = |owner: &str, chat: &str| {
+        PythonWorkspace::from_trajectory(
+            &base.join(owner).join(format!("{chat}.json")),
+            chat,
+            key.clone(),
+        )
+    };
+    let ws = workspace("owner", "chat");
+    std::fs::create_dir_all(ws.run_dir("r1")).unwrap();
+    std::fs::write(ws.dir().join("state.json"), json!({"bytes":12}).to_string()).unwrap();
+    std::fs::write(
+        ws.run_dir("r1").join("run.json"),
+        json!({"status":"completed","started_at_ms":10}).to_string(),
+    )
+    .unwrap();
+    let v = view(&ws, &[], false);
+    assert!(v.exists);
+    assert_eq!(v.session.status, "idle");
+    assert_eq!(v.session.state_bytes, 12);
+    assert_eq!(v.runs[0].status, "completed");
+
+    symlink(base.join("owner"), base.join("swapped")).unwrap();
+    assert!(!view(&workspace("swapped", "chat"), &[], false).exists);
+
+    std::fs::create_dir(base.join("python-link")).unwrap();
+    symlink(base.join("owner/python"), base.join("python-link/python")).unwrap();
+    assert!(!view(&workspace("python-link", "chat"), &[], false).exists);
+
+    let linked_chat = workspace("owner", "other");
+    symlink(ws.dir(), linked_chat.dir()).unwrap();
+    assert!(!view(&linked_chat, &[], false).exists);
+
+    let linked_runs = workspace("owner", "runs-link");
+    std::fs::create_dir_all(linked_runs.dir()).unwrap();
+    symlink(ws.runs_dir(), linked_runs.runs_dir()).unwrap();
+    let v = view(&linked_runs, &[], false);
+    assert!(v.exists);
+    assert!(v.runs.is_empty(), "{:?}", v.runs);
+}
+
+#[cfg(windows)]
+#[test]
+fn junction_below_the_storage_base_is_refused() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = temp.path().join("trajectories");
+    let key = temp.path().join("key");
+    let ws = PythonWorkspace::from_trajectory(&base.join("owner/chat.json"), "chat", key.clone());
+    std::fs::create_dir_all(ws.dir()).unwrap();
+    assert!(view(&ws, &[], false).exists);
+    let junction = base.join("swapped");
+    let status = std::process::Command::new("cmd")
+        .args(["/D", "/C", "mklink", "/J"])
+        .arg(&junction)
+        .arg(base.join("owner"))
+        .status()
+        .unwrap();
+    assert!(status.success(), "junction setup must succeed");
+    let swapped = PythonWorkspace::from_trajectory(&junction.join("chat.json"), "chat", key);
+    assert!(!view(&swapped, &[], false).exists);
+    std::fs::remove_dir(junction).unwrap();
+}
+
 #[test]
 fn active_run_ids_are_chat_scoped_and_removed_with_guard() {
     let runtime = super::super::PythonToolRuntime::default();
@@ -260,4 +331,145 @@ fn newest_eight_displays_across_runs_skip_unreadable_files() {
     std::fs::create_dir_all(empty.1.dir()).unwrap();
     let wire = serde_json::to_value(view(&empty.1, &[], false)).unwrap();
     assert!(wire.get("displays").is_none());
+}
+
+#[cfg(unix)]
+#[test]
+fn reads_go_through_the_checked_storage_base_not_an_alias_changed_after_the_check() {
+    let temp = tempfile::tempdir().unwrap();
+    for (tree, bytes) in [("a", 1), ("b", 2)] {
+        let ws = PythonWorkspace::from_trajectory(
+            &temp.path().join(tree).join("trajectories/root/chat.json"),
+            "chat",
+            temp.path().join("key"),
+        );
+        std::fs::create_dir_all(ws.dir()).unwrap();
+        std::fs::write(
+            ws.dir().join("state.json"),
+            json!({ "bytes": bytes }).to_string(),
+        )
+        .unwrap();
+    }
+    let alias = temp.path().join("alias");
+    std::os::unix::fs::symlink(temp.path().join("b"), &alias).unwrap();
+    let ws = PythonWorkspace::from_trajectory(
+        &alias.join("trajectories/root/chat.json"),
+        "chat",
+        temp.path().join("key"),
+    );
+    let checked_while_the_alias_named_a = Storage {
+        root: alias.join("trajectories"),
+        real: std::fs::canonicalize(temp.path().join("a/trajectories")).unwrap(),
+    };
+    let meta = read_json(
+        &checked_while_the_alias_named_a,
+        &ws.dir().join("state.json"),
+    )
+    .unwrap();
+    assert_eq!(meta["bytes"], 1);
+}
+#[test]
+fn read_only_runs_are_flagged_in_the_summary_and_the_view() {
+    let (_temp, ws) = fixture();
+    for (run, read_only) in [("r1", true), ("r2", false)] {
+        std::fs::create_dir_all(ws.run_dir(run)).unwrap();
+        let mut meta = json!({"status":"completed","started_at_ms":10});
+        if read_only {
+            meta["read_only"] = json!(true);
+        }
+        let summary = crate::python_tool::workspace::run_summary(&meta);
+        assert_eq!(summary.get("read_only").is_some(), read_only);
+        std::fs::write(
+            ws.run_dir(run)
+                .join(crate::python_tool::workspace::RUN_SUMMARY_FILE),
+            summary.to_string(),
+        )
+        .unwrap();
+    }
+    let v = view(&ws, &[], false);
+    let flag = |run: &str| {
+        let view = v.runs.iter().find(|r| r.run_id == run).unwrap();
+        serde_json::to_value(view)
+            .unwrap()
+            .get("read_only")
+            .cloned()
+    };
+    assert_eq!(flag("r1"), Some(json!(true)));
+    assert_eq!(flag("r2"), None);
+}
+
+#[test]
+fn variables_that_could_not_be_listed_are_reported_and_left_out_otherwise() {
+    let (_temp, ws) = fixture();
+    std::fs::create_dir_all(ws.dir()).unwrap();
+    for unknown in [true, false] {
+        let mut meta = json!({"variables":[]});
+        if unknown {
+            meta["variables_unknown"] = json!(true);
+        }
+        std::fs::write(ws.dir().join("state.json"), meta.to_string()).unwrap();
+        let v = view(&ws, &[], false);
+        assert_eq!(v.session.variables_unknown, unknown);
+        let wire = serde_json::to_value(&v.session).unwrap();
+        assert_eq!(
+            wire.get("variables_unknown").cloned(),
+            unknown.then(|| json!(true))
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn the_artifact_walk_runs_and_displays_go_through_the_checked_storage_base() {
+    let temp = tempfile::tempdir().unwrap();
+    for tree in ["a", "b"] {
+        let ws = PythonWorkspace::from_trajectory(
+            &temp.path().join(tree).join("trajectories/root/chat.json"),
+            "chat",
+            temp.path().join("key"),
+        );
+        std::fs::create_dir_all(ws.artifacts_dir()).unwrap();
+        std::fs::write(ws.artifacts_dir().join(format!("{tree}.txt")), tree).unwrap();
+        let run = ws.run_dir(&format!("run-{tree}"));
+        std::fs::create_dir_all(run.join("displays")).unwrap();
+        std::fs::write(
+            run.join("run.json"),
+            json!({"status":"completed","started_at_ms":10,"displays_total":1}).to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            run.join("displays/1.json"),
+            json!({"schema":1,"index":1,"kind":"table","title":format!("display-{tree}"),"columns":["n"],"rows":[[1]],"rows_total":1,"truncated":false}).to_string(),
+        )
+        .unwrap();
+    }
+    let alias = temp.path().join("alias");
+    std::os::unix::fs::symlink(temp.path().join("b"), &alias).unwrap();
+    let ws = PythonWorkspace::from_trajectory(
+        &alias.join("trajectories/root/chat.json"),
+        "chat",
+        temp.path().join("key"),
+    );
+    let checked_while_the_alias_named_a = Storage {
+        root: alias.join("trajectories"),
+        real: std::fs::canonicalize(temp.path().join("a/trajectories")).unwrap(),
+    };
+    let v = collect_in(
+        Some(checked_while_the_alias_named_a),
+        &ws,
+        "chat",
+        1000,
+        SessionStatus::default(),
+        &[],
+    );
+    let artifacts: Vec<_> = v.artifacts.iter().map(|a| a.rel_path.as_str()).collect();
+    assert_eq!(artifacts, ["a.txt"]);
+    let runs: Vec<_> = v.runs.iter().map(|r| r.run_id.as_str()).collect();
+    assert_eq!(runs, ["run-a"]);
+    let displays: Vec<_> = v
+        .displays
+        .iter()
+        .map(|d| d.display.title.clone().unwrap())
+        .collect();
+    assert_eq!(displays, ["display-a"]);
 }

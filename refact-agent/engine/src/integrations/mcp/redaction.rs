@@ -96,7 +96,7 @@ fn redact_secret_flag_values(items: &mut [Value]) {
     }
 }
 
-static SCRUB_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+pub(crate) static SCRUB_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     [
         r#"(?i)(Bearer\s+)[^\s"',;]+"#.to_string(),
         r"(?i)(Authorization:\s*)[^\r\n]+".to_string(),

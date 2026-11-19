@@ -350,6 +350,27 @@ async fn every_exit_after_the_handler_started_records_the_change() {
     }
 }
 
+/// T1: a change whose handler hands its commit to a task that outlives the call says, when the
+/// call times out, that the change is being completed; its outcome stays unknown.
+#[tokio::test]
+async fn a_timed_out_change_that_is_being_completed_says_so() {
+    let (dir, app, _) = fixture().await;
+    let path = path_of(&dir, "completing");
+    let m = mark_with(&app, &path, "completing").await;
+    let out = result(&m);
+    assert_eq!(out[0], false, "{out}");
+    let error = out[1].as_str().unwrap();
+    assert!(
+        error.contains("timed out") && error.contains("the zone change is being completed"),
+        "{error}"
+    );
+    assert_eq!(
+        m.extra["python"]["engine_changes"][0]["outcome"], "unknown",
+        "{}",
+        m.extra["python"]
+    );
+}
+
 #[tokio::test]
 async fn stop_after_approval_does_not_interrupt_the_handler() {
     let (dir, app, _) = fixture().await;
@@ -618,6 +639,7 @@ async fn the_context_carries_the_run_facts_and_an_egress_check() {
 #[tokio::test]
 async fn a_change_in_a_turn_started_by_a_delivery_is_refused() {
     let (_dir, app, ccx) = fixture().await;
+    let touch = "try:\n    await engine('testing.touch', n=1)\n    r = 'applied'\nexcept PermissionError as e:\n    r = str(e)\nr";
     let delivery = refact_chat_api::PendingDelivery::new(
         vec![crate::call_validation::ChatMessage::new(
             "user".into(),
@@ -627,10 +649,15 @@ async fn a_change_in_a_turn_started_by_a_delivery_is_refused() {
         "scheduler.cron",
         true,
     );
-    ccx.lock().await.messages = delivery.stamp_messages();
+    latch(
+        &app,
+        "cron-1",
+        json!({"type":"deliver_messages","delivery":delivery}),
+    )
+    .await;
     let m = run_ccx(
         ccx.clone(),
-        "try:\n    await engine('testing.touch', n=1)\n    r = 'applied'\nexcept PermissionError as e:\n    r = str(e)\n[r, (await engine('session.limits'))['ok']]",
+        &format!("{touch}\n[r, (await engine('session.limits'))['ok']]"),
     )
     .await;
     let out = result(&m);
@@ -653,27 +680,32 @@ async fn a_change_in_a_turn_started_by_a_delivery_is_refused() {
             source,
             true,
         );
-        let mut messages = vec![crate::call_validation::ChatMessage::new(
-            "user".into(),
-            "typed earlier".into(),
-        )];
-        messages.extend(wake.stamp_messages());
-        ccx.lock().await.messages = messages;
-        let m = run_ccx(
-            ccx.clone(),
-            "try:\n    await engine('testing.touch', n=1)\n    r = 'applied'\nexcept PermissionError as e:\n    r = str(e)\nr",
+        latch(
+            &app,
+            "typed-earlier",
+            json!({"type":"user_message","content":"typed earlier"}),
         )
         .await;
+        session(&app)
+            .await
+            .lock()
+            .await
+            .messages
+            .extend(wake.stamp_messages());
+        latch(&app, "delivery-wake-1", json!({"type":"regenerate"})).await;
+        let m = run_ccx(ccx.clone(), touch).await;
         assert!(
             result(&m).as_str().unwrap().contains(source),
             "{source}: {}",
             result(&m)
         );
     }
-    ccx.lock().await.messages = vec![crate::call_validation::ChatMessage::new(
-        "user".into(),
-        "typed".into(),
-    )];
+    latch(
+        &app,
+        "typed",
+        json!({"type":"user_message","content":"typed"}),
+    )
+    .await;
     let task = {
         let ccx = ccx.clone();
         tokio::spawn(
@@ -685,6 +717,107 @@ async fn a_change_in_a_turn_started_by_a_delivery_is_refused() {
         .await
         .unwrap();
     assert_eq!(result(&finish(task).await), true);
+}
+
+/// A2: the origin is latched when a turn starts and kept by the commands that re-run or continue
+/// that turn; the transcript does not decide it.
+#[tokio::test]
+async fn engine_changes_follow_the_origin_latched_when_the_turn_started() {
+    let (_dir, app, _) = fixture().await;
+    let touch = "try:\n    await engine('testing.touch', n=1)\n    r = 'asked'\nexcept PermissionError as e:\n    r = str(e)\nr";
+    let asks = |app: AppState| async move {
+        let task = spawn(&app, touch);
+        let request = next_request(&app, &task).await;
+        decide(&app, &request.request_id, Decision::AllowOnce)
+            .await
+            .unwrap();
+        result(&finish(task).await)
+    };
+    let typed = json!({"type":"user_message","content":"typed"});
+    let regenerate = json!({"type":"regenerate"});
+    let retry = json!({"type":"recovery_retry","run_id":"r","expected_revision":1,"options":{"mode":"transient","max_retries":1,"delay_ms":0,"total_timeout_ms":1000}});
+
+    latch(&app, "typed-1", typed.clone()).await;
+    latch(&app, "retry-1", retry.clone()).await;
+    assert_eq!(
+        asks(app.clone()).await,
+        "asked",
+        "a recovery retry continues the typed turn"
+    );
+
+    latch(&app, "typed-2", typed.clone()).await;
+    latch(&app, "gui-regenerate", regenerate.clone()).await;
+    assert_eq!(
+        asks(app.clone()).await,
+        "asked",
+        "a regenerate from the GUI keeps the typed origin"
+    );
+
+    latch(&app, "engine-regenerate", regenerate.clone()).await;
+    let out = result(&run(&app, touch).await);
+    assert!(out.as_str().unwrap().contains("engine function"), "{out}");
+
+    latch(&app, "delivery-wake-2", regenerate.clone()).await;
+    latch(&app, "gui-regenerate-2", regenerate.clone()).await;
+    let out = result(&run(&app, touch).await);
+    assert!(
+        out.as_str().unwrap().contains("a delivery"),
+        "a regenerate keeps a delivery origin: {out}"
+    );
+
+    latch(&app, "engine-1", typed.clone()).await;
+    let out = result(&run(&app, touch).await);
+    assert!(
+        out.as_str().unwrap().contains("engine function"),
+        "a client using the engine prefix gains nothing: {out}"
+    );
+
+    session(&app).await.lock().await.turn_origin = None;
+    latch(&app, "gui-regenerate-3", regenerate.clone()).await;
+    let out = result(&run(&app, touch).await);
+    assert!(
+        out.as_str().unwrap().contains("unknown"),
+        "after a restart no turn is a person's: {out}"
+    );
+
+    session(&app).await.lock().await.turn_origin = None;
+    let out = result(&run(&app, touch).await);
+    assert!(out.as_str().unwrap().contains("engine restart"), "{out}");
+
+    latch(&app, "typed-3", typed.clone()).await;
+    let transcript = refact_chat_api::PendingDelivery::new(
+        vec![crate::call_validation::ChatMessage::new(
+            "user".into(),
+            "scheduled".into(),
+        )],
+        refact_chat_api::PushMode::Append,
+        "scheduler.cron",
+        true,
+    );
+    session(&app).await.lock().await.messages = transcript.stamp_messages();
+    assert_eq!(
+        asks(app.clone()).await,
+        "asked",
+        "a stamped transcript no longer decides the origin"
+    );
+}
+
+#[tokio::test]
+async fn a_run_from_an_earlier_turn_cannot_raise_engine_changes() {
+    let (_dir, app, _) = fixture().await;
+    session(&app).await.lock().await.turn_origin =
+        Some(refact_chat_history::history_gates::TurnOrigin {
+            automation: None,
+            at_ms: u64::MAX,
+        });
+    let out = result(
+        &run(
+            &app,
+            "try:\n    await engine('testing.touch', n=1)\n    r = 'asked'\nexcept PermissionError as e:\n    r = str(e)\nr",
+        )
+        .await,
+    );
+    assert!(out.as_str().unwrap().contains("earlier turn"), "{out}");
 }
 
 #[test]

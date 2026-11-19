@@ -122,6 +122,72 @@ describe("NestedToolCalls", () => {
     fireEvent.click(screen.getByRole("button", { name: /shell/ }));
     expect(screen.getByText("sleep 8 && echo done")).toBeInTheDocument();
   });
+  it("reads a git() call as git and its git-like command, with the output as its result", () => {
+    render(
+      <NestedToolCalls
+        calls={[
+          {
+            ...pythonCall,
+            tool: "git",
+            status: "ok",
+            duration_ms: 12,
+            args_preview:
+              '{"subcommand":"diff","staged":true,"command":"diff --staged"}',
+            summary: "src/parser.rs | 2 +-",
+          },
+        ]}
+      />,
+    );
+    const row = screen.getByRole("button", { name: /git/ });
+    expect(row.querySelector("[class*=callName]")).toHaveTextContent(/^git$/);
+    expect(row.querySelector("[class*=callSummary]")).toHaveTextContent(
+      /^diff --staged$/,
+    );
+    expect(row).toHaveTextContent("12 ms");
+    expect(row.textContent).not.toContain("{");
+    fireEvent.click(row);
+    expect(screen.getByText("src/parser.rs | 2 +-")).toBeInTheDocument();
+    expect(screen.getByText("subcommand")).toBeInTheDocument();
+  });
+  it("reads a run() call as its shell command, with the exit or withheld summary as its result", () => {
+    render(
+      <NestedToolCalls
+        calls={[
+          {
+            ...pythonCall,
+            tool: "shell",
+            status: "failed",
+            duration_ms: 4200,
+            args_preview:
+              '{"command":"pytest -q","description":"run(): pytest -q","timeout":600}',
+            summary: "exit 1 · 4.2 s · 3 problems",
+          },
+          {
+            ...pythonCall,
+            seq: 2,
+            call_id: "c2",
+            tool: "shell",
+            status: "failed",
+            duration_ms: 1200,
+            args_preview:
+              '{"command":"cat .env","description":"run(): cat .env"}',
+            summary: "withheld · 1.2 s",
+          },
+        ]}
+      />,
+    );
+    const [exit, withheld] = screen.getAllByRole("button", { name: /shell/ });
+    expect(exit.querySelector("[class*=callSummary]")).toHaveTextContent(
+      /^run\(\): pytest -q$/,
+    );
+    expect(exit).toHaveTextContent("Failed");
+    expect(exit).toHaveTextContent("4.2 s");
+    fireEvent.click(exit);
+    expect(screen.getByText("exit 1 · 4.2 s · 3 problems")).toBeInTheDocument();
+    expect(screen.getByText("pytest -q")).toBeInTheDocument();
+    fireEvent.click(withheld);
+    expect(screen.getByText("withheld · 1.2 s")).toBeInTheDocument();
+  });
   it("summarises an engine call by its result, not a generic argument", () => {
     render(
       <NestedToolCalls

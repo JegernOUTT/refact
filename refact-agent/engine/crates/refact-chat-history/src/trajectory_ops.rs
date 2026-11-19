@@ -183,7 +183,7 @@ fn is_valid_tool_id(id: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
-fn generate_valid_tool_id() -> String {
+pub(crate) fn generate_valid_tool_id() -> String {
     format!(
         "call_{}",
         Uuid::new_v4().to_string().replace("-", "")[..24].to_string()

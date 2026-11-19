@@ -76,6 +76,7 @@ pub async fn move_file(
             }
         }
     }
+    let moved = crate::python_tool::run_output::moved_source(&gcx, source, destination).await?;
     tokio::fs::rename(source, destination)
         .await
         .map_err(|error| error.to_string())?;
@@ -86,7 +87,7 @@ pub async fn move_file(
     Box::pin(
         crate::python_tool::run_output::reconcile_native_artifact_move(
             &gcx,
-            Some(source),
+            Some(&moved),
             destination,
         ),
     )

@@ -20,9 +20,44 @@ pub struct PythonWorkspace {
     project_quota: Option<(PathBuf, u64)>,
 }
 
+const MANIFEST: &str = "state.json";
+/// The one pending manifest name of the layout before per-attempt names; still recovered.
+const PENDING_MANIFEST: &str = "state.json.new";
+const LEGACY_GENERATION: &str = "state.monty";
+/// A file of unknown origin may be another engine's save in progress until it is this old.
+const UNKNOWN_FILE_GRACE: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+fn legacy_generation() -> String {
+    LEGACY_GENERATION.into()
+}
+fn is_hex_id(id: &str) -> bool {
+    id.len() == 32 && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+fn is_generation_name(name: &str) -> bool {
+    name == LEGACY_GENERATION
+        || name
+            .strip_prefix("state-")
+            .and_then(|rest| rest.strip_suffix(".monty"))
+            .is_some_and(is_hex_id)
+}
+fn is_pending_manifest_name(name: &str) -> bool {
+    name == PENDING_MANIFEST
+        || name
+            .strip_prefix("state.json.")
+            .and_then(|rest| rest.strip_suffix(".new"))
+            .is_some_and(is_hex_id)
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StateMeta {
     pub schema: u32,
+    /// The generation file this manifest publishes; manifests from before generations name
+    /// the one fixed file.
+    #[serde(default = "legacy_generation")]
+    pub generation: String,
+    /// The generation the replaced manifest named; it is kept until the next publish.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous: Option<String>,
     pub dump_version: String,
     pub saved_at_ms: u64,
     pub bytes: u64,
@@ -35,12 +70,46 @@ pub struct StateMeta {
     pub variables_truncated: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub variables_total: Option<u64>,
+    /// The variables could not be listed safely; an empty list then says nothing.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub variables_unknown: bool,
 }
 
+/// The published state as one read of its manifest found it.
 #[derive(Clone, Debug)]
-pub struct VerifiedState {
+pub struct PinnedState {
     pub path: PathBuf,
+    pub meta: StateMeta,
+    /// The manifest's bytes, to tell later whether it is still the current one.
+    pub manifest: Vec<u8>,
+}
+
+/// What one read of the saved state finds.
+pub enum Pin {
+    Nothing,
+    Pinned(PinnedState),
+    /// The current manifest is invalid; its bytes let a clear check that it is still current.
+    Invalid(ResetReason, Vec<u8>),
+    /// The state could not be read now; nothing shows it is damaged, so it is kept.
+    Unavailable(String),
+}
+
+enum Check {
+    Invalid(ResetReason),
+    Unavailable(String),
+}
+
+/// A snapshot file the worker wrote, with what the manifest will say about it.
+pub struct NewState {
+    pub generation: PathBuf,
     pub sha256: String,
+    pub bytes: u64,
+    pub last_run_id: String,
+    pub taint: Vec<Value>,
+    pub variables: Vec<VariableSummary>,
+    pub variables_truncated: bool,
+    pub variables_total: Option<u64>,
+    pub variables_unknown: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -56,6 +125,182 @@ impl std::error::Error for ResetReason {}
 pub struct PersistOutcome {
     pub persisted: bool,
     pub bytes: u64,
+    /// What to tell about a large state, when it is due.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    /// Why the state was not saved while the worker keeps it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub not_saved: Option<String>,
+}
+
+/// What a fork did not copy.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ForkOutcome {
+    /// Why the variables were not copied, when the source has saved state.
+    pub variables_not_copied: Option<String>,
+    /// Artifacts a running script of the source changed before their privacy labels were saved.
+    pub artifacts_skipped: usize,
+}
+impl ForkOutcome {
+    fn notes(&self, src_chat_id: &str) -> Vec<String> {
+        let mut notes = vec![];
+        if let Some(reason) = &self.variables_not_copied {
+            notes.push(format!(
+                "variables were not copied from chat {src_chat_id}: {reason}"
+            ));
+        }
+        if self.artifacts_skipped > 0 {
+            notes.push(format!(
+                "{} artifacts were not copied from chat {src_chat_id}: a script there was still writing them and had not saved their privacy labels",
+                self.artifacts_skipped
+            ));
+        }
+        notes
+    }
+    /// One sentence for the caller of a fork, when something was not copied.
+    pub fn summary(&self) -> Option<String> {
+        let mut parts = vec![];
+        if let Some(reason) = &self.variables_not_copied {
+            parts.push(format!("Python variables were not copied ({reason})"));
+        }
+        if self.artifacts_skipped > 0 {
+            parts.push(format!(
+                "{} Python artifacts were not copied because a script was still writing them",
+                self.artifacts_skipped
+            ));
+        }
+        (!parts.is_empty()).then(|| format!("{}.", parts.join("; ")))
+    }
+}
+
+/// Test-only crash points of the save routine: an armed step stops the routine there and
+/// leaves the files as a crash at that step would.
+pub(crate) fn interrupted(dir: &Path, step: &str) -> bool {
+    #[cfg(test)]
+    {
+        let mut armed = SAVE_FAULTS.lock().unwrap();
+        if let Some(i) = armed.iter().position(|(d, s)| d == dir && s == step) {
+            armed.remove(i);
+            return true;
+        }
+    }
+    let _ = (dir, step);
+    false
+}
+#[cfg(test)]
+static SAVE_FAULTS: Mutex<Vec<(PathBuf, String)>> = Mutex::new(Vec::new());
+#[cfg(test)]
+pub(crate) fn arm_save_fault(dir: &Path, step: &str) {
+    SAVE_FAULTS
+        .lock()
+        .unwrap()
+        .push((dir.to_path_buf(), step.to_owned()));
+}
+
+/// Test-only pause points: an armed step waits there until the test releases it.
+pub(crate) async fn pause_point(dir: &Path, step: &str) {
+    #[cfg(test)]
+    {
+        let armed = {
+            let mut armed = PAUSES.lock().unwrap();
+            armed
+                .iter()
+                .position(|(d, s, _)| d == dir && s == step)
+                .map(|i| armed.remove(i).2)
+        };
+        if let Some(pause) = armed {
+            pause.reached.notify_one();
+            pause.release.notified().await;
+        }
+    }
+    let _ = (dir, step);
+}
+#[cfg(test)]
+#[derive(Clone, Default)]
+pub(crate) struct Pause {
+    reached: std::sync::Arc<tokio::sync::Notify>,
+    release: std::sync::Arc<tokio::sync::Notify>,
+}
+#[cfg(test)]
+impl Pause {
+    pub(crate) async fn reached(&self) {
+        tokio::time::timeout(std::time::Duration::from_secs(30), self.reached.notified())
+            .await
+            .expect("pause point not reached");
+    }
+    pub(crate) fn release(&self) {
+        self.release.notify_one();
+    }
+}
+#[cfg(test)]
+static PAUSES: Mutex<Vec<(PathBuf, String, Pause)>> = Mutex::new(Vec::new());
+#[cfg(test)]
+pub(crate) fn arm_pause(dir: &Path, step: &str) -> Pause {
+    let pause = Pause::default();
+    PAUSES
+        .lock()
+        .unwrap()
+        .push((dir.to_path_buf(), step.to_owned(), pause.clone()));
+    pause
+}
+
+/// Test-only pause points in synchronous code: the calling thread itself waits.
+pub(crate) fn blocking_pause_point(dir: &Path, step: &str) {
+    #[cfg(test)]
+    {
+        let armed = {
+            let mut armed = BLOCKING_PAUSES.lock().unwrap();
+            armed
+                .iter()
+                .position(|(d, s, _, _)| d == dir && s == step)
+                .map(|i| armed.remove(i))
+        };
+        if let Some((_, _, reached, release)) = armed {
+            let _ = reached.send(());
+            let _ = release.recv();
+        }
+    }
+    let _ = (dir, step);
+}
+#[cfg(test)]
+type BlockingPauseEntry = (
+    PathBuf,
+    String,
+    std::sync::mpsc::Sender<()>,
+    std::sync::mpsc::Receiver<()>,
+);
+#[cfg(test)]
+static BLOCKING_PAUSES: Mutex<Vec<BlockingPauseEntry>> = Mutex::new(Vec::new());
+#[cfg(test)]
+pub(crate) struct BlockingPause {
+    reached: std::sync::mpsc::Receiver<()>,
+    release: std::sync::mpsc::Sender<()>,
+}
+#[cfg(test)]
+impl BlockingPause {
+    pub(crate) fn reached(&self) {
+        self.reached
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("pause point not reached");
+    }
+    pub(crate) fn release(&self) {
+        let _ = self.release.send(());
+    }
+}
+#[cfg(test)]
+pub(crate) fn arm_blocking_pause(dir: &Path, step: &str) -> BlockingPause {
+    let (reached_tx, reached) = std::sync::mpsc::channel();
+    let (release, release_rx) = std::sync::mpsc::channel();
+    BLOCKING_PAUSES.lock().unwrap().push((
+        dir.to_path_buf(),
+        step.to_owned(),
+        reached_tx,
+        release_rx,
+    ));
+    BlockingPause {
+        reached,
+        release,
+    }
 }
 
 impl PythonWorkspace {
@@ -90,18 +335,10 @@ impl PythonWorkspace {
             }
         }
         if workspace.project_quota.is_none() {
-            let parent = path.parent().unwrap_or(Path::new("."));
             let storage = if path.starts_with(&app.paths.config_dir) {
                 app.paths.config_dir.clone()
             } else {
-                parent
-                    .ancestors()
-                    .find(|p| {
-                        p.file_name()
-                            .is_some_and(|n| n == "trajectories" || n == "conversations")
-                    })
-                    .unwrap_or(parent)
-                    .to_path_buf()
+                workspace.storage_root()
             };
             let quota = refact_work_core::coordination_settings().python_disk_quota_bytes;
             workspace.project_quota = Some((storage, quota));
@@ -133,6 +370,24 @@ impl PythonWorkspace {
             enforce_project_quota(root, fallback_quota).await
         }
     }
+    pub fn storage_root(&self) -> PathBuf {
+        if let Some((root, _)) = &self.project_quota {
+            return root.clone();
+        }
+        let parent = self
+            .dir
+            .parent()
+            .and_then(Path::parent)
+            .unwrap_or(&self.dir);
+        parent
+            .ancestors()
+            .find(|p| {
+                p.file_name()
+                    .is_some_and(|n| n == "trajectories" || n == "conversations")
+            })
+            .unwrap_or(parent)
+            .to_path_buf()
+    }
     pub fn chat_id(&self) -> &str {
         &self.chat_id
     }
@@ -160,8 +415,9 @@ impl PythonWorkspace {
         self.runs_dir()
             .join(if safe.is_empty() { "%00" } else { &safe })
     }
-    pub fn state_path(&self) -> PathBuf {
-        self.dir.join("state.monty")
+    pub fn new_generation_path(&self) -> PathBuf {
+        self.dir
+            .join(format!("state-{}.monty", uuid::Uuid::new_v4().simple()))
     }
     pub async fn ensure_dirs(&self) -> Result<(), String> {
         for path in [self.dir.clone(), self.artifacts_dir(), self.runs_dir()] {
@@ -170,18 +426,75 @@ impl PythonWorkspace {
         Ok(())
     }
     pub async fn read_state_meta(&self) -> Option<StateMeta> {
-        serde_json::from_slice(&fs::read(self.dir.join("state.json")).await.ok()?).ok()
+        serde_json::from_slice(&fs::read(self.dir.join(MANIFEST)).await.ok()?).ok()
     }
-    pub async fn verify_state(&self) -> Result<VerifiedState, ResetReason> {
-        let fail = |s: &str| ResetReason(s.to_owned());
-        let meta = self
-            .read_state_meta()
-            .await
-            .ok_or_else(|| fail("missing or invalid Python state metadata"))?;
-        if meta.schema != 1 {
-            return Err(fail("unsupported Python state schema"));
+    /// One read of the saved state, checked: schema, signature, name, length and, with
+    /// `digest`, the generation's bytes. When the manifest is missing or invalid, a complete
+    /// pending manifest left by a replace that did not finish stands in, newest first; `adopt`
+    /// installs it, and only after its generation passed the digest.
+    pub async fn pin(&self, adopt: bool, digest: bool) -> Pin {
+        let manifest = self.dir.join(MANIFEST);
+        let read = if interrupted(&self.dir, "manifest_read") {
+            Err(std::io::Error::other("injected read failure"))
+        } else {
+            fs::read(&manifest).await
+        };
+        let mut invalid = None;
+        match read {
+            Ok(data) => match self.verified(data.clone(), digest).await {
+                Ok(pinned) => return Pin::Pinned(pinned),
+                Err(Check::Unavailable(reason)) => return Pin::Unavailable(reason),
+                Err(Check::Invalid(reason)) => invalid = Some((reason, data)),
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Pin::Unavailable(format!("its metadata is unreadable: {e}")),
         }
-        let key = self.key().await.map_err(ResetReason)?;
+        for (pending, data) in self.pending_manifests().await {
+            match self.verified(data, digest || adopt).await {
+                Ok(pinned) => {
+                    if adopt {
+                        if let Err(e) = install_manifest(&pending, &manifest).await {
+                            tracing::warn!("Python state metadata left pending: {e}");
+                        }
+                    }
+                    return Pin::Pinned(pinned);
+                }
+                Err(Check::Unavailable(reason)) => return Pin::Unavailable(reason),
+                Err(Check::Invalid(_)) => {}
+            }
+        }
+        match invalid {
+            Some((reason, data)) => Pin::Invalid(reason, data),
+            None => Pin::Nothing,
+        }
+    }
+    /// The published state without reading its bytes, unless `adopt` installs a pending one.
+    pub async fn pin_state(&self, adopt: bool) -> Result<Option<PinnedState>, ResetReason> {
+        match self.pin(adopt, adopt).await {
+            Pin::Nothing => Ok(None),
+            Pin::Pinned(pinned) => Ok(Some(pinned)),
+            Pin::Invalid(reason, _) => Err(reason),
+            Pin::Unavailable(reason) => Err(ResetReason(reason)),
+        }
+    }
+    async fn verified(&self, data: Vec<u8>, digest: bool) -> Result<PinnedState, Check> {
+        let pinned = self.check_manifest(data).await?;
+        if digest {
+            verify_digest(&pinned).await?;
+        }
+        Ok(pinned)
+    }
+    async fn check_manifest(&self, data: Vec<u8>) -> Result<PinnedState, Check> {
+        let invalid = |s: &str| Check::Invalid(ResetReason(s.to_owned()));
+        let meta: StateMeta = serde_json::from_slice(&data)
+            .map_err(|_| invalid("missing or invalid Python state metadata"))?;
+        if meta.schema != 1 {
+            return Err(invalid("unsupported Python state schema"));
+        }
+        let key = self
+            .key()
+            .await
+            .map_err(|e| Check::Unavailable(format!("its signing key is unavailable: {e}")))?;
         if !snapshot::verify_with_taint(
             &key,
             &meta.sha256,
@@ -189,97 +502,290 @@ impl PythonWorkspace {
             &taint_digest(&meta.taint),
             &meta.hmac,
         ) {
-            return Err(fail("Python state authentication failed"));
+            return Err(invalid("Python state authentication failed"));
         }
-        let data = fs::read(self.state_path())
-            .await
-            .map_err(|_| fail("Python snapshot is missing"))?;
-        if data.len() as u64 != meta.bytes || format!("{:x}", Sha256::digest(&data)) != meta.sha256
-        {
-            return Err(fail("Python snapshot digest mismatch"));
+        if !is_generation_name(&meta.generation) {
+            return Err(invalid("invalid Python snapshot name"));
         }
-        Ok(VerifiedState {
-            path: self.state_path(),
-            sha256: meta.sha256,
-        })
+        let path = self.dir.join(&meta.generation);
+        match fs::symlink_metadata(&path).await {
+            Ok(file) if file.is_file() && file.len() == meta.bytes => Ok(PinnedState {
+                path,
+                meta,
+                manifest: data,
+            }),
+            Ok(file) if file.is_file() => Err(invalid("Python snapshot digest mismatch")),
+            Ok(_) => Err(invalid("Python snapshot is not a regular file")),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                Err(invalid("Python snapshot is missing"))
+            }
+            Err(e) => Err(Check::Unavailable(format!(
+                "its snapshot is unreadable: {e}"
+            ))),
+        }
     }
+    /// The pending manifests, newest first, with their bytes; unreadable ones are left out.
+    async fn pending_manifests(&self) -> Vec<(PathBuf, Vec<u8>)> {
+        let mut found = vec![];
+        for path in self.pending_manifest_paths().await {
+            if let Ok(data) = fs::read(&path).await {
+                let saved = serde_json::from_slice::<StateMeta>(&data).map_or(0, |m| m.saved_at_ms);
+                found.push((saved, path, data));
+            }
+        }
+        found.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+        found
+            .into_iter()
+            .map(|(_, path, data)| (path, data))
+            .collect()
+    }
+    async fn pending_manifest_paths(&self) -> Vec<PathBuf> {
+        let mut paths = vec![];
+        let Ok(mut entries) = fs::read_dir(&self.dir).await else {
+            return paths;
+        };
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            if entry
+                .file_name()
+                .to_str()
+                .is_some_and(is_pending_manifest_name)
+                && entry.file_type().await.is_ok_and(|t| t.is_file())
+            {
+                paths.push(entry.path());
+            }
+        }
+        paths
+    }
+    /// The generations the current and the pending manifests name.
+    async fn named_generations(&self) -> Vec<String> {
+        let current = fs::read(self.dir.join(MANIFEST)).await.ok();
+        let pending = self.pending_manifests().await;
+        current
+            .iter()
+            .chain(pending.iter().map(|(_, data)| data))
+            .filter_map(|data| serde_json::from_slice::<StateMeta>(data).ok())
+            .map(|meta| meta.generation)
+            .collect()
+    }
+    /// Whether a manifest is there, current or pending, even one that does not parse.
+    async fn has_manifest(&self) -> bool {
+        !matches!(
+            fs::symlink_metadata(self.dir.join(MANIFEST)).await,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound
+        ) || !self.pending_manifest_paths().await.is_empty()
+    }
+    /// The pinned state, its bytes checked against the signed digest.
+    pub async fn verify_state(&self) -> Result<PinnedState, ResetReason> {
+        match self.pin(false, true).await {
+            Pin::Pinned(pinned) => Ok(pinned),
+            Pin::Nothing => Err(ResetReason(
+                "missing or invalid Python state metadata".into(),
+            )),
+            Pin::Invalid(reason, _) => Err(reason),
+            Pin::Unavailable(reason) => Err(ResetReason(reason)),
+        }
+    }
+    /// Clears the state when the manifest is still `expected`; false when it changed meanwhile.
+    pub async fn clear_if_current(&self, expected: &[u8]) -> Result<bool, String> {
+        match fs::read(self.dir.join(MANIFEST)).await {
+            Ok(current) if current == expected => {}
+            Ok(_) => return Ok(false),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(e) => return Err(e.to_string()),
+        }
+        self.clear_state().await.map(|()| true)
+    }
+    /// The one commit point of a save: the manifest is replaced by one that names this exact
+    /// generation. The generation the replaced manifest named stays until the next publish;
+    /// nothing after the commit undoes it. A state over the limit is refused and the published
+    /// state stays as it is.
     pub async fn record_snapshot(
         &self,
-        sha256: String,
-        bytes: u64,
-        last_run_id: String,
-        variables: Vec<VariableSummary>,
-        taint: Vec<Value>,
+        state: NewState,
         max_state_bytes: u64,
     ) -> Result<PersistOutcome, String> {
-        if bytes > max_state_bytes {
-            self.clear_state().await?;
+        let name = state
+            .generation
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| {
+                is_generation_name(name) && state.generation.parent() == Some(self.dir.as_path())
+            })
+            .ok_or("Invalid Python snapshot name")?
+            .to_owned();
+        if state.bytes > max_state_bytes {
+            remove_file(&state.generation).await?;
             return Ok(PersistOutcome {
                 persisted: false,
-                bytes,
+                bytes: state.bytes,
+                ..Default::default()
             });
         }
-        self.ensure_dirs().await?;
-        let data = fs::read(self.state_path())
-            .await
-            .map_err(|e| e.to_string())?;
-        if data.len() as u64 != bytes || format!("{:x}", Sha256::digest(&data)) != sha256 {
-            return Err("Snapshot bytes do not match worker digest".into());
+        match fs::symlink_metadata(&state.generation).await {
+            Ok(file) if file.is_file() && file.len() == state.bytes => {}
+            _ => return Err("Python snapshot file does not match the worker's report".into()),
         }
         let key = self.key().await?;
+        let replaced = self.read_state_meta().await;
+        let previous = replaced.as_ref().map(|meta| meta.generation.clone());
+        let superseded = replaced.and_then(|meta| meta.previous);
         let meta = StateMeta {
             schema: 1,
+            generation: name.clone(),
+            previous: previous.clone(),
             dump_version: "monty-1.6.0".into(),
             saved_at_ms: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_millis() as u64,
-            bytes,
-            hmac: snapshot::sign_with_taint(&key, &sha256, &self.chat_id, &taint_digest(&taint)),
-            sha256,
-            last_run_id,
-            variables,
-            variables_truncated: false,
-            variables_total: None,
-            taint,
+            bytes: state.bytes,
+            hmac: snapshot::sign_with_taint(
+                &key,
+                &state.sha256,
+                &self.chat_id,
+                &taint_digest(&state.taint),
+            ),
+            sha256: state.sha256,
+            last_run_id: state.last_run_id,
+            variables: state.variables,
+            variables_truncated: state.variables_truncated,
+            variables_total: state.variables_total,
+            variables_unknown: state.variables_unknown,
+            taint: state.taint,
         };
-        atomic_write(
-            &self.dir.join("state.json"),
-            &serde_json::to_vec_pretty(&meta).map_err(|e| e.to_string())?,
-        )
-        .await?;
+        self.publish_manifest(&meta).await?;
+        if interrupted(&self.dir, "published") {
+            return Err("interrupted".into());
+        }
+        let keep: Vec<&str> = [Some(name.as_str()), previous.as_deref()]
+            .into_iter()
+            .flatten()
+            .collect();
+        let known: Vec<&str> = superseded.as_deref().into_iter().collect();
+        if let Err(e) = self.collect_generations(&keep, &known).await {
+            tracing::warn!("Python state cleanup failed: {e}");
+        }
         if let Some((root, quota)) = &self.project_quota {
-            enforce_project_quota(root, *quota).await?;
+            if let Err(e) = enforce_project_quota(root, *quota).await {
+                tracing::warn!("Python workspace quota check failed: {e}");
+            }
         }
         Ok(PersistOutcome {
             persisted: true,
-            bytes,
+            bytes: meta.bytes,
+            ..Default::default()
         })
     }
-    pub async fn set_variables_truncated(&self, truncated: bool) -> Result<(), String> {
-        self.set_variables_info(truncated, None).await
+    /// The manifest is written under a name of its own, made durable, then renamed over the
+    /// current one; a pending manifest of another attempt is never written over.
+    async fn publish_manifest(&self, meta: &StateMeta) -> Result<(), String> {
+        let pending = self
+            .dir
+            .join(format!("{MANIFEST}.{}.new", uuid::Uuid::new_v4().simple()));
+        let data = serde_json::to_vec_pretty(meta).map_err(|e| e.to_string())?;
+        if interrupted(&self.dir, "manifest_write_cut") {
+            let _ = fs::write(&pending, &data[..data.len() / 2]).await;
+            return Err("interrupted".into());
+        }
+        let written = async {
+            use tokio::io::AsyncWriteExt;
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&pending)
+                .await?;
+            file.write_all(&data).await?;
+            file.sync_all().await?;
+            sync_dir(&self.dir).await
+        }
+        .await;
+        if let Err(e) = written {
+            let _ = fs::remove_file(&pending).await;
+            return Err(format!("Cannot write Python state metadata: {e}"));
+        }
+        if interrupted(&self.dir, "manifest_written") {
+            return Err("interrupted".into());
+        }
+        let installed = install_manifest(&pending, &self.dir.join(MANIFEST)).await;
+        if installed.is_err() {
+            let _ = fs::remove_file(&pending).await;
+        }
+        installed
     }
-    pub async fn set_variables_info(
-        &self,
-        truncated: bool,
-        total: Option<u64>,
-    ) -> Result<(), String> {
-        if let Some(mut meta) = self.read_state_meta().await {
-            meta.variables_truncated = truncated;
-            meta.variables_total = total;
-            atomic_write(
-                &self.dir.join("state.json"),
-                &serde_json::to_vec_pretty(&meta).map_err(|e| e.to_string())?,
-            )
-            .await?;
+    /// Removes generation files no manifest needs: `known` ones at once, files of unknown
+    /// origin only when no manifest names them and they are older than [`UNKNOWN_FILE_GRACE`],
+    /// since another engine may be about to publish them. Pending manifests that old are
+    /// leftovers of saves that never finished.
+    async fn collect_generations(&self, keep: &[&str], known: &[&str]) -> Result<(), String> {
+        let mut entries = match fs::read_dir(&self.dir).await {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e.to_string()),
+        };
+        let mut candidates = vec![];
+        while let Some(entry) = entries.next_entry().await.map_err(|e| e.to_string())? {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            let Ok(meta) = entry.metadata().await else {
+                continue;
+            };
+            if !meta.is_file() {
+                continue;
+            }
+            let old = meta
+                .modified()
+                .ok()
+                .and_then(|time| time.elapsed().ok())
+                .is_some_and(|age| age > UNKNOWN_FILE_GRACE);
+            if (name.starts_with("state.monty.") && name.ends_with(".tmp"))
+                || name.starts_with("state.tmp.")
+                || (old && is_pending_manifest_name(name))
+            {
+                remove_file(&entry.path()).await?;
+            } else if is_generation_name(name) && !keep.contains(&name) {
+                candidates.push((name.to_owned(), entry.path(), old));
+            }
+        }
+        let named = self.named_generations().await;
+        for (name, path, old) in candidates {
+            if known.contains(&name.as_str()) || (old && !named.contains(&name)) {
+                remove_file(&path).await?;
+            }
         }
         Ok(())
+    }
+    /// Removes a generation an attempt wrote and did not publish; one a manifest names stays.
+    pub async fn discard_generation(&self, generation: &Path) {
+        let named = self.named_generations().await;
+        if generation
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| named.iter().any(|n| n == name))
+        {
+            return;
+        }
+        if let Err(e) = remove_file(generation).await {
+            tracing::warn!("Python state cleanup failed: {e}");
+        }
     }
     pub async fn clear_state(&self) -> Result<(), String> {
-        for path in [self.state_path(), self.dir.join("state.json")] {
+        let pending = self.pending_manifests().await;
+        let current = fs::read(self.dir.join(MANIFEST)).await.ok();
+        let mut known = vec![];
+        for data in pending.iter().map(|(_, data)| data).chain(current.iter()) {
+            if let Ok(meta) = serde_json::from_slice::<StateMeta>(data) {
+                known.push(meta.generation);
+                known.extend(meta.previous);
+            }
+        }
+        for path in self.pending_manifest_paths().await {
             remove_file(&path).await?;
         }
-        Ok(())
+        remove_file(&self.dir.join(MANIFEST)).await?;
+        let known: Vec<&str> = known.iter().map(String::as_str).collect();
+        self.collect_generations(&[], &known).await
     }
     pub async fn list_artifacts(&self, cap: usize) -> Result<Vec<PathBuf>, String> {
         list(&self.artifacts_dir(), cap).await
@@ -354,45 +860,92 @@ impl PythonWorkspace {
         let workspace = Self::for_chat(app, chat_id).await?;
         remove_dir(workspace.dir()).await
     }
-    pub async fn fork(app: &AppState, src_chat_id: &str, dst_chat_id: &str) -> Result<(), String> {
+    /// Copies the source's last published state, artifacts and their ledger into a new chat.
+    /// The destination is held for the copy, so its first run waits for it and says what was
+    /// not copied.
+    pub async fn fork(
+        app: &AppState,
+        src_chat_id: &str,
+        dst_chat_id: &str,
+    ) -> Result<ForkOutcome, String> {
         let src = Self::for_chat(app, src_chat_id).await?;
         let dst = Self::for_chat(app, dst_chat_id).await?;
-        src.fork_to(&dst).await
+        let mut lease = app
+            .python_tool
+            .registry
+            .reserve_turn(dst_chat_id, "fork")
+            .acquire()
+            .await
+            .map_err(|busy| busy.to_string())?;
+        let outcome = if lease.has_worker() {
+            ForkOutcome {
+                variables_not_copied: Some("this chat already has a Python session".into()),
+                ..Default::default()
+            }
+        } else {
+            src.fork_to(&dst).await?
+        };
+        for note in outcome.notes(src_chat_id) {
+            lease.note(note);
+        }
+        Ok(outcome)
     }
-    pub(crate) async fn fork_to(&self, dst: &Self) -> Result<(), String> {
+    /// While a run of the source is active, its artifacts changed since it started and without
+    /// a ledger row yet are not copied, so no copy lacks the label its bytes need.
+    pub(crate) async fn fork_to(&self, dst: &Self) -> Result<ForkOutcome, String> {
+        let mut outcome = ForkOutcome::default();
         if !fs::try_exists(&self.dir).await.map_err(|e| e.to_string())? {
-            return Ok(());
+            return Ok(outcome);
         }
         dst.ensure_dirs().await?;
-        if let Ok(verified) = self.verify_state().await {
-            let mut meta = self
-                .read_state_meta()
-                .await
-                .ok_or("Missing state metadata")?;
-            atomic_write(
-                &dst.state_path(),
-                &fs::read(verified.path).await.map_err(|e| e.to_string())?,
-            )
-            .await?;
-            meta.hmac = snapshot::sign_with_taint(
-                &dst.key().await?,
-                &meta.sha256,
-                &dst.chat_id,
-                &taint_digest(&meta.taint),
-            );
-            atomic_write(
-                &dst.dir.join("state.json"),
-                &serde_json::to_vec_pretty(&meta).map_err(|e| e.to_string())?,
-            )
-            .await?;
+        if dst.has_manifest().await {
+            outcome.variables_not_copied = Some("this chat already has saved Python state".into());
+            return Ok(outcome);
         }
+        match self.pinned_bytes().await {
+            Ok(None) => {}
+            Ok(Some((meta, data))) => {
+                let generation = dst.new_generation_path();
+                write_new_file(&generation, &data).await?;
+                dst.record_snapshot(
+                    NewState {
+                        generation,
+                        sha256: meta.sha256,
+                        bytes: meta.bytes,
+                        last_run_id: meta.last_run_id,
+                        taint: meta.taint,
+                        variables: meta.variables,
+                        variables_truncated: meta.variables_truncated,
+                        variables_total: meta.variables_total,
+                        variables_unknown: meta.variables_unknown,
+                    },
+                    u64::MAX,
+                )
+                .await?;
+            }
+            Err(reason) => outcome.variables_not_copied = Some(reason),
+        }
+        let busy_since = active_run_start(&self.runs_dir());
+        let artifacts = self.artifacts_dir();
+        let canonical = fs::canonicalize(&artifacts).await.ok();
+        let mut labelled = std::collections::HashSet::new();
         let ledger = self.dir.join("privacy_ledger.json");
         if let Ok(data) = fs::read(ledger).await {
             let mut entries: Vec<(PathBuf, crate::privacy::records::DerivedZone)> =
                 serde_json::from_slice(&data).map_err(|e| e.to_string())?;
             for (path, _) in &mut entries {
-                if let Ok(relative) = path.strip_prefix(self.artifacts_dir()) {
-                    *path = dst.artifacts_dir().join(relative);
+                let relative = path
+                    .strip_prefix(&artifacts)
+                    .ok()
+                    .or_else(|| {
+                        canonical
+                            .as_ref()
+                            .and_then(|root| path.strip_prefix(root).ok())
+                    })
+                    .map(Path::to_path_buf);
+                if let Some(relative) = relative {
+                    *path = dst.artifacts_dir().join(&relative);
+                    labelled.insert(relative);
                 }
             }
             atomic_write(
@@ -401,7 +954,41 @@ impl PythonWorkspace {
             )
             .await?;
         }
-        copy_tree(&self.artifacts_dir(), &dst.artifacts_dir()).await
+        outcome.artifacts_skipped =
+            copy_tree(&artifacts, &dst.artifacts_dir(), |relative, meta| {
+                busy_since.is_some_and(|since| {
+                    !labelled.contains(relative)
+                        && meta.modified().map_or(true, |modified| {
+                            modified + std::time::Duration::from_secs(2) >= since
+                        })
+                })
+            })
+            .await?;
+        Ok(outcome)
+    }
+    /// The published generation's manifest and bytes, read once and checked against each
+    /// other; a generation collected meanwhile is pinned again.
+    async fn pinned_bytes(&self) -> Result<Option<(StateMeta, Vec<u8>)>, String> {
+        for _ in 0..3 {
+            let pinned = match self.pin(false, false).await {
+                Pin::Nothing => return Ok(None),
+                Pin::Pinned(pinned) => pinned,
+                Pin::Invalid(reason, _) => return Err(reason.to_string()),
+                Pin::Unavailable(reason) => {
+                    return Err(format!("its saved state could not be read ({reason})"))
+                }
+            };
+            pause_point(&self.dir, "fork_pinned").await;
+            match fs::read(&pinned.path).await {
+                Ok(data) if format!("{:x}", Sha256::digest(&data)) == pinned.meta.sha256 => {
+                    return Ok(Some((pinned.meta, data)))
+                }
+                Ok(_) => return Err("Python snapshot digest mismatch".into()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(e.to_string()),
+            }
+        }
+        Err("its saved state changed while it was copied".into())
     }
 }
 
@@ -419,6 +1006,95 @@ fn taint_digest(taint: &[Value]) -> Vec<u8> {
     }
     Sha256::digest(serde_json::to_vec(&canonical(&serde_json::json!(taint))).expect("JSON taint"))
         .to_vec()
+}
+
+/// The pinned generation's bytes, checked against the signed digest in one streaming pass.
+async fn verify_digest(pinned: &PinnedState) -> Result<(), Check> {
+    let digest = async {
+        use tokio::io::AsyncReadExt;
+        let mut file = fs::File::open(&pinned.path).await?;
+        let mut hasher = Sha256::new();
+        let mut buffer = vec![0; 1 << 20];
+        loop {
+            let n = file.read(&mut buffer).await?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buffer[..n]);
+        }
+        Ok::<_, std::io::Error>(format!("{:x}", hasher.finalize()))
+    }
+    .await;
+    match digest {
+        Ok(digest) if digest == pinned.meta.sha256 => Ok(()),
+        Ok(_) => Err(Check::Invalid(ResetReason(
+            "Python snapshot digest mismatch".into(),
+        ))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(Check::Unavailable(
+            "its snapshot vanished while it was read".into(),
+        )),
+        Err(e) => Err(Check::Unavailable(format!(
+            "its snapshot is unreadable: {e}"
+        ))),
+    }
+}
+
+/// Replaces the manifest in one rename. Where the platform cannot replace atomically, the
+/// complete pending manifest stays until the rename, so the next start can finish it.
+async fn install_manifest(pending: &Path, manifest: &Path) -> Result<(), String> {
+    if manifest
+        .parent()
+        .is_some_and(|dir| interrupted(dir, "install"))
+    {
+        return Err("Cannot publish Python state metadata: injected failure".into());
+    }
+    crate::chat::trajectory_archive::with_trajectory_mutation_lock(fs::rename(pending, manifest))
+        .await
+        .map_err(|e| format!("Cannot publish Python state metadata: {e}"))?;
+    if let Some(dir) = manifest.parent() {
+        if let Err(e) = sync_dir(dir).await {
+            tracing::warn!("Python state metadata may not be durable yet: {e}");
+        }
+    }
+    Ok(())
+}
+
+/// A folder whose filesystem cannot sync folders is only warned about.
+pub(crate) async fn sync_dir(dir: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        let synced = if interrupted(dir, "dir_sync_einval") {
+            Err(std::io::Error::from_raw_os_error(libc::EINVAL))
+        } else if interrupted(dir, "dir_sync_eio") {
+            Err(std::io::Error::from_raw_os_error(libc::EIO))
+        } else {
+            async { fs::File::open(dir).await?.sync_all().await }.await
+        };
+        if let Err(e) = synced {
+            let unsupported = [libc::EINVAL, libc::ENOTSUP, libc::EOPNOTSUPP, libc::EBADF];
+            if !e
+                .raw_os_error()
+                .is_some_and(|code| unsupported.contains(&code))
+            {
+                return Err(e);
+            }
+            tracing::warn!("Python state folder cannot be synced: {e}");
+        }
+    }
+    let _ = dir;
+    Ok(())
+}
+
+async fn write_new_file(path: &Path, data: &[u8]) -> Result<(), String> {
+    use tokio::io::AsyncWriteExt;
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .await
+        .map_err(|e| e.to_string())?;
+    file.write_all(data).await.map_err(|e| e.to_string())?;
+    file.sync_all().await.map_err(|e| e.to_string())
 }
 
 pub(crate) async fn artifact_path_checked(root: &Path, target: &Path) -> Result<(), String> {
@@ -727,7 +1403,7 @@ pub async fn enforce_project_quota(
             .get_or_init(Default::default)
             .lock()
             .unwrap()
-            .iter()
+            .keys()
             .cloned()
             .collect();
         if active
@@ -819,6 +1495,7 @@ pub fn run_summary(meta: &Value) -> Value {
         "code_preview",
         "displays_total",
         "engine_changes_total",
+        "read_only",
     ] {
         if let Some(value) = meta.get(key) {
             summary.insert(key.into(), value.clone());
@@ -957,29 +1634,41 @@ async fn tree_size(root: &Path) -> Result<u64, String> {
     }
     Ok(size)
 }
-async fn copy_tree(src: &Path, dst: &Path) -> Result<(), String> {
+/// Copies the regular files of `src`; returns how many `skip` left out, by relative path.
+async fn copy_tree(
+    src: &Path,
+    dst: &Path,
+    skip: impl Fn(&Path, &std::fs::Metadata) -> bool,
+) -> Result<usize, String> {
     if fs::symlink_metadata(src)
         .await
         .is_ok_and(|meta| meta.file_type().is_symlink())
     {
         return Err("Symlinked artifacts root refused".into());
     }
-    let mut pending = vec![(src.to_owned(), dst.to_owned())];
-    while let Some((src, dst)) = pending.pop() {
+    let mut skipped = 0;
+    let mut pending = vec![(src.to_owned(), dst.to_owned(), PathBuf::new())];
+    while let Some((src, dst, relative)) = pending.pop() {
         fs::create_dir_all(&dst).await.map_err(|e| e.to_string())?;
         for path in list(&src, usize::MAX).await? {
-            let target = dst.join(path.file_name().ok_or("Invalid artifact path")?);
+            let name = path.file_name().ok_or("Invalid artifact path")?;
+            let target = dst.join(name);
+            let relative = relative.join(name);
             let meta = fs::symlink_metadata(&path)
                 .await
                 .map_err(|e| e.to_string())?;
             if meta.is_dir() {
-                pending.push((path, target));
+                pending.push((path, target, relative));
             } else if meta.is_file() {
+                if skip(&relative, &meta) {
+                    skipped += 1;
+                    continue;
+                }
                 atomic_write(&target, &fs::read(path).await.map_err(|e| e.to_string())?).await?;
             }
         }
     }
-    Ok(())
+    Ok(skipped)
 }
 
 /// Records a failed terminal run when execution exits before normal persistence.
@@ -1067,7 +1756,20 @@ impl Drop for FailedRunGuard {
     }
 }
 
-static ACTIVE_RUN_PATHS: OnceLock<Mutex<std::collections::HashSet<PathBuf>>> = OnceLock::new();
+/// Run directories of this engine whose runs have not ended, with the time each began.
+static ACTIVE_RUN_PATHS: OnceLock<Mutex<HashMap<PathBuf, SystemTime>>> = OnceLock::new();
+
+/// When the earliest run below `runs` that has not ended began.
+fn active_run_start(runs: &Path) -> Option<SystemTime> {
+    ACTIVE_RUN_PATHS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(path, _)| path.starts_with(runs))
+        .map(|(_, began)| *began)
+        .min()
+}
 
 #[cfg(test)]
 mod artifacts_tests {
@@ -1134,6 +1836,7 @@ mod artifacts_tests {
     #[tokio::test]
     async fn artifacts_unsaved_buddy_session_lookup_matches_creating_resolver() {
         let temp = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(temp.path()).unwrap();
         let gcx = crate::global_context::tests::make_test_gcx().await;
         *gcx.documents_state.workspace_folders.lock().unwrap() = vec![temp.path().into()];
         let app = AppState::from_gcx(gcx).await;
@@ -1161,14 +1864,14 @@ mod artifacts_tests {
         assert_eq!(existing.dir(), creating.dir());
         assert_eq!(
             existing.dir(),
-            temp.path()
-                .join(".refact/buddy/chats/conversations/python/unsaved-buddy")
+            root.join(".refact/buddy/chats/conversations/python/unsaved-buddy")
         );
     }
 
     #[tokio::test]
     async fn artifacts_unsaved_task_session_lookup_matches_creating_resolver() {
         let temp = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(temp.path()).unwrap();
         let gcx = crate::global_context::tests::make_test_gcx().await;
         *gcx.documents_state.workspace_folders.lock().unwrap() = vec![temp.path().into()];
         let task = temp.path().join(".refact/tasks/task");
@@ -1197,13 +1900,14 @@ mod artifacts_tests {
         assert_eq!(existing.dir(), creating.dir());
         assert_eq!(
             existing.dir(),
-            task.join("trajectories/agents/worker/python/unsaved-task")
+            root.join(".refact/tasks/task/trajectories/agents/worker/python/unsaved-task")
         );
     }
 
     #[tokio::test]
     async fn artifacts_unsaved_session_lookup_matches_creating_resolver() {
         let temp = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(temp.path()).unwrap();
         let gcx = crate::global_context::tests::make_test_gcx().await;
         *gcx.documents_state.workspace_folders.lock().unwrap() = vec![temp.path().into()];
         let app = AppState::from_gcx(gcx).await;
@@ -1224,8 +1928,7 @@ mod artifacts_tests {
         assert_eq!(existing.dir(), creating.dir());
         assert_eq!(
             existing.dir(),
-            temp.path()
-                .join(".refact/trajectories/unsaved-root/python/unsaved-child")
+            root.join(".refact/trajectories/unsaved-root/python/unsaved-child")
         );
     }
 }
@@ -1237,7 +1940,7 @@ impl ActiveRunPath {
             .get_or_init(Default::default)
             .lock()
             .unwrap()
-            .insert(path.clone());
+            .insert(path.clone(), SystemTime::now());
         Self(path)
     }
 }

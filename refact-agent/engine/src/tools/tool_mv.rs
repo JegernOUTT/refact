@@ -331,6 +331,9 @@ impl Tool for ToolMv {
             if dst_true_path.exists() {
                 return Err("directory move destination exists; merge files explicitly without discarding either tree".into());
             }
+            let moved =
+                crate::python_tool::run_output::moved_source(&gcx, &src_true_path, &dst_true_path)
+                    .await?;
             fs::rename(&src_true_path, &dst_true_path)
                 .await
                 .map_err(|e| e.to_string())?;
@@ -347,7 +350,7 @@ impl Tool for ToolMv {
             Box::pin(
                 crate::python_tool::run_output::reconcile_native_artifact_move(
                     &gcx,
-                    Some(&src_true_path),
+                    Some(&moved),
                     &dst_true_path,
                 ),
             )

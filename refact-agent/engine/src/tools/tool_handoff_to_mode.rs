@@ -1026,9 +1026,10 @@ async fn finalize_handoff_inner(
     persist_transition(gcx.clone(), &mut source, &snapshot, &transferred_goal).await?;
     drop(source);
     let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
-    crate::python_tool::workspace::PythonWorkspace::fork(&app, &chat_id, &new_chat_id).await?;
+    let python =
+        crate::python_tool::workspace::PythonWorkspace::fork(&app, &chat_id, &new_chat_id).await?;
     let task_error: Option<String> = None;
-    let result = json!({
+    let mut result = json!({
         "type": "handoff_to_mode",
         "status": "completed",
         "new_chat_id": new_chat_id,
@@ -1041,6 +1042,9 @@ async fn finalize_handoff_inner(
         "link_type": "handoff",
         "task_setup_error": task_error,
     });
+    if let Some(sentence) = python.summary() {
+        result["python"] = json!(sentence);
+    }
 
     let mut source = session_arc.lock().await;
     let (updated, message) = handoff_completion_messages(&source.messages, tool_call_id, &result)?;

@@ -106,6 +106,44 @@ pub fn scrub_text(text: &str) -> String {
     crate::integrations::mcp::redaction::scrub_text(&text, &[])
 }
 
+/// Byte ranges of `text` that the text scrubber masks, one per match that changes the text, in
+/// the order of its passes; empty exactly when `scrub_text` leaves the text unchanged. Each pass
+/// runs on the text the earlier passes left, and its matches are mapped back to `text`.
+pub fn secret_spans(text: &str) -> Vec<std::ops::Range<usize>> {
+    let mut current = text.to_string();
+    let mut origin: Vec<usize> = (0..=text.len()).collect();
+    let mut spans = Vec::new();
+    let passes = std::iter::once((&*URL_CREDENTIALS, "@")).chain(
+        crate::integrations::mcp::redaction::SCRUB_PATTERNS
+            .iter()
+            .map(|pattern| (pattern, "")),
+    );
+    for (pattern, tail) in passes {
+        let mut next = String::with_capacity(current.len());
+        let mut next_origin = Vec::with_capacity(origin.len());
+        let mut last = 0;
+        for captures in pattern.captures_iter(&current) {
+            let whole = captures.get(0).expect("a match has its whole span");
+            let start = captures.get(1).map_or(whole.start(), |kept| kept.end());
+            let end = whole.end() - tail.len();
+            if current[start..end] == *MASK {
+                continue;
+            }
+            spans.push(origin[start]..origin[end]);
+            next.push_str(&current[last..start]);
+            next_origin.extend_from_slice(&origin[last..start]);
+            next.push_str(MASK);
+            next_origin.extend(std::iter::repeat_n(origin[start], MASK.len()));
+            last = end;
+        }
+        next.push_str(&current[last..]);
+        next_origin.extend_from_slice(&origin[last..]);
+        current = next;
+        origin = next_origin;
+    }
+    spans
+}
+
 /// Generic scrubber: string values under secret-looking field names become `***`, every other
 /// string goes through the shared text scrubber (bearer tokens, URL credentials, secret flags).
 /// Numbers and booleans stay, so counts such as `python_max_llm_tokens` remain readable.
@@ -284,6 +322,57 @@ mod tests {
         ] {
             assert!(!secret_looking(name), "{name} should not be secret-looking");
         }
+    }
+
+    #[test]
+    fn secret_spans_cover_what_the_scrubber_masks_and_nothing_else() {
+        for text in ["plain text about tokens and keys", "", "Bearer ***"] {
+            assert_eq!(scrub_text(text), text, "{text}");
+            assert!(secret_spans(text).is_empty(), "{text}");
+        }
+        for (text, secret) in [
+            ("run X_TOKEN=abc-env srv", "abc-env"),
+            ("use Bearer xyz123 now", "xyz123"),
+            ("db postgres://u:pw@h/db here", "u:pw"),
+            ("https://h/p?api_key=qk1&x=1", "qk1"),
+            ("srv --api-key sk-flag1 --verbose", "sk-flag1"),
+        ] {
+            let spans = secret_spans(text);
+            assert_eq!(spans.len(), 1, "{text}");
+            let span = spans[0].clone();
+            let at = text.find(secret).unwrap();
+            assert!(
+                span.start <= at && at + secret.len() <= span.end,
+                "{text}: {span:?}"
+            );
+            assert!(!text[..span.start].contains(secret), "{text}");
+        }
+        let star = "token=*";
+        assert_ne!(scrub_text(star), star);
+        assert_eq!(secret_spans(star), vec![6..star.len()]);
+        let two = "a TOKEN=x b TOKEN=y c";
+        let spans = secret_spans(two);
+        assert_eq!(spans.len(), 2, "{spans:?}");
+        assert_eq!(&two[spans[0].clone()], "x");
+        assert_eq!(&two[spans[1].clone()], "y");
+        let unicode = "é TOKEN=ж é";
+        let span = secret_spans(unicode)[0].clone();
+        assert!(unicode.is_char_boundary(span.start) && unicode.is_char_boundary(span.end));
+        assert_eq!(&unicode[span], "ж");
+    }
+
+    /// T19: matches are reported one by one in the text they were found in, so an edit between
+    /// two untouched secrets keeps both spans where they were.
+    #[test]
+    fn secret_spans_are_the_individual_matches_of_every_pass() {
+        let text = "X_TOKEN=first\nkeep this sentence\nZ_TOKEN=second db postgres://u:pw@h/x";
+        let spans = secret_spans(text);
+        let masked: Vec<&str> = spans.iter().map(|span| &text[span.clone()]).collect();
+        assert_eq!(masked, ["u:pw", "first", "second"], "{spans:?}");
+        let middle = text.find("keep").unwrap();
+        assert!(spans
+            .iter()
+            .all(|span| span.end <= middle || span.start >= middle + "keep this sentence".len()));
     }
 
     #[test]

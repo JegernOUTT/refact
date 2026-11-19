@@ -960,6 +960,17 @@ pub fn bind_chat(mandate_id: &str, chat_id: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Whether an unexpired grant is bound to this chat.
+pub fn chat_is_supervised(chat_id: &str) -> Result<bool, String> {
+    let registry = live()
+        .read()
+        .map_err(|_| "supervision authority unavailable")?;
+    let now = Utc::now().timestamp();
+    Ok(registry
+        .values()
+        .any(|grant| grant.expires_at > now && grant.chat_ids.iter().any(|id| id == chat_id)))
+}
+
 pub fn invalidate_chat(chat_id: &str) -> Result<(), String> {
     live()
         .write()

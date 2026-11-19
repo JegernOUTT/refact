@@ -185,6 +185,62 @@ export function approvalAnnouncement(request: PythonApprovalRequest): string {
 
 const DIFF_CONTEXT_LINES = 2;
 
+const lineText = (lines: readonly string[]) =>
+  lines.length ? `${lines.join("\n")}\n` : "";
+
+/**
+ * One chunk per change of a hunk, holding only the changed lines and the
+ * unchanged line on each side: the shared diff view would show unchanged
+ * lines between two changes of one chunk as removed and added again.
+ */
+function hunkChunks(
+  label: string,
+  hunk: { oldStart: number; newStart: number; lines: readonly string[] },
+): DiffChunk[] {
+  const runs: { change: boolean; lines: string[] }[] = [];
+  for (const line of hunk.lines) {
+    if (!/^[ +-]/.test(line)) continue;
+    const change = !line.startsWith(" ");
+    const last = runs.at(-1);
+    if (last?.change === change) last.lines.push(line);
+    else runs.push({ change, lines: [line] });
+  }
+  const chunks: DiffChunk[] = [];
+  let oldLine = hunk.oldStart;
+  let newLine = hunk.newStart;
+  let before: string | undefined;
+  let pending: DiffChunk | undefined;
+  for (const run of runs) {
+    const body = run.lines.map((line) => line.slice(1));
+    if (run.change) {
+      const removed = body.filter((_, i) => run.lines[i].startsWith("-"));
+      const added = body.filter((_, i) => run.lines[i].startsWith("+"));
+      pending = {
+        file_name: label,
+        file_action: "edit",
+        line1: oldLine,
+        line2: newLine,
+        lines_remove: lineText(removed),
+        lines_add: lineText(added),
+        lines_before: before === undefined ? null : `${before}\n`,
+        lines_after: null,
+      };
+      oldLine += removed.length;
+      newLine += added.length;
+      continue;
+    }
+    if (pending) {
+      chunks.push({ ...pending, lines_after: `${body[0]}\n` });
+      pending = undefined;
+      before = body.length > 1 ? body.at(-1) : undefined;
+    } else before = body.at(-1);
+    oldLine += body.length;
+    newLine += body.length;
+  }
+  if (pending) chunks.push(pending);
+  return chunks;
+}
+
 /** Line hunks between two texts, as chunks the shared diff view renders. */
 export function textPairHunks(
   label: string,
@@ -202,27 +258,5 @@ export function textPairHunks(
     "",
     { context: DIFF_CONTEXT_LINES },
   );
-  return patch.hunks.map((hunk) => {
-    const removed: string[] = [];
-    const added: string[] = [];
-    for (const line of hunk.lines) {
-      const body = line.slice(1);
-      if (line.startsWith("-")) removed.push(body);
-      else if (line.startsWith("+")) added.push(body);
-      else if (line.startsWith(" ")) {
-        removed.push(body);
-        added.push(body);
-      }
-    }
-    return {
-      file_name: label,
-      file_action: "edit",
-      line1: hunk.oldStart,
-      line2: hunk.newStart,
-      lines_remove: removed.length ? `${removed.join("\n")}\n` : "",
-      lines_add: added.length ? `${added.join("\n")}\n` : "",
-      lines_before: null,
-      lines_after: null,
-    };
-  });
+  return patch.hunks.flatMap((hunk) => hunkChunks(label, hunk));
 }

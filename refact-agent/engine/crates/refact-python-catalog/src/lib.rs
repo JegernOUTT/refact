@@ -41,6 +41,11 @@ const HELPERS: &[&str] = &[
     "llm",
     "show",
     "engine",
+    "read",
+    "grep",
+    "replace",
+    "git",
+    "run",
 ];
 const KEYWORDS: &[&str] = &[
     "False", "None", "True", "and", "as", "assert", "async", "await", "break", "class", "continue",
@@ -288,6 +293,7 @@ fn reserved_names() -> BTreeSet<String> {
             "ToolResult",
             "LlmResult",
             "LlmUsage",
+            "RunResult",
             "FileChunk",
             "ImageRef",
             "T",
@@ -297,6 +303,11 @@ fn reserved_names() -> BTreeSet<String> {
             "Literal",
             "NotRequired",
             "Unpack",
+            "asyncio",
+            "os",
+            "re",
+            "json",
+            "Path",
         ]
         .map(str::to_string),
     );
@@ -338,7 +349,8 @@ pub fn build_catalog(tools: &[ToolDesc], options: &CatalogOptions) -> PythonCata
         .collect();
     entries.sort_by(|a, b| a.0.py_name.cmp(&b.0.py_name));
     let (functions, lines): (Vec<_>, Vec<_>) = entries.into_iter().unzip();
-    let mut helpers = helper_functions(options.mcp_lazy, options.llm);
+    let run = tools.iter().any(|t| t.name == RUN_TOOL);
+    let mut helpers = helper_functions(options.mcp_lazy, options.llm, run);
     let mut engine = options.engine.clone();
     engine.sort_by(|a, b| a.name.cmp(&b.name));
     if !engine.is_empty() {
@@ -353,7 +365,14 @@ pub fn build_catalog(tools: &[ToolDesc], options: &CatalogOptions) -> PythonCata
         Detail::NoShape,
         Detail::NoParams,
     ] {
-        text = render(&lines, options.mcp_lazy, options.llm, &engine_text, detail);
+        text = render(
+            &lines,
+            options.mcp_lazy,
+            options.llm,
+            run,
+            &engine_text,
+            detail,
+        );
         if fits(&text) {
             break;
         }
@@ -637,6 +656,49 @@ fn show_helper() -> CatalogFunction {
     }
 }
 
+/// Sync helpers the worker runs on its own file system access, next to `open()`.
+pub const FILE_HELPERS: &[&str] = &["read", "grep", "replace"];
+const READ_HELP: &str = "read(path, start=1, end=None, *, numbered=True) returns lines start..end (1-based, inclusive) of a UTF-8 text file. `path` is a str or Path; a relative path starts at PROJECT_ROOT, whatever os.chdir() set. A negative start returns the last lines: read(p, -40) is the last 40 lines (all lines of a shorter file), and end must be None then. An end past the last line is clamped; start=0, an end before start and a start past the last line raise ValueError that states the line count. An empty file gives \"\".\nnumbered=True prefixes every line with its number, `  12 | text`, without its line ending. numbered=False returns the exact text of those lines with their line endings: read(p, numbered=False) is the whole file, and its slices are valid `old` values for replace().\nErrors as for open(): FileNotFoundError, IsADirectoryError, PermissionError for protected paths, and UnicodeDecodeError for a file that is not UTF-8 (use open(path, \"rb\")). A result over the limit a script can receive raises RuntimeError; read a smaller range. The read is listed in files_read with its privacy record, like open(). It reads the file on disk, not unsaved editor buffers.";
+const GREP_HELP: &str = "grep(pattern, path=\".\", *, context=0, glob=None, ignore_case=False, limit=200, data=False) searches a file or a directory for a regular expression in Rust regex syntax, the syntax of search_pattern (no look-around or back-references; the `re` module uses Python syntax instead). Each line is matched without its line ending; a UTF-8 byte order mark is ignored. A relative path starts at PROJECT_ROOT, whatever os.chdir() set.\nA directory is searched with search_pattern's file list: ignore rules apply and files the privacy policy blocks are never read. glob filters that list, relative to path with / separators: a pattern without / matches file names, ** crosses directories. Files over 4 MiB, binary files and files that are not UTF-8 are skipped and counted, as are protected and privacy-blocked files. The search stops early after 20,000 listed entries or 256 MiB read and says so.\nThe text result has one `path:line: text` line per match, `path-line- text` context lines and `--` between groups; lines are cut at 400 characters and the text at 200,000. Final lines say how many matches the limit left out, why the search stopped early and what was skipped, or `no matches (searched N files)`. data=True returns {matches: [{path, line, text}], total, truncated, files_searched, files_skipped} without context lines; truncated is true when more matches exist than were returned or the search stopped early, and total then counts only the files searched.\ncontext must be 0..20 and limit 1..10000; these, an invalid pattern or glob, and a glob with a file path raise ValueError. A missing or protected path raises the error open() raises. Privacy records: in a directory only files with matches are recorded, as for search_pattern, and a named file always is; a result that depends on files without matches (for example no matches) is accepted.";
+const REPLACE_HELP: &str = "replace(path, old, new, *, count=1) replaces exact text in a UTF-8 text file and returns a unified diff of the change, cut at 60 lines (the run card shows all of it). `old` must occur exactly `count` times, counted left to right without overlaps (\"aa\" occurs once in \"aaa\"); count=0 replaces every occurrence and needs at least one. Otherwise nothing is written and ValueError names the real number of occurrences. old must not be empty or equal to new; files over 32 MiB and results over 32 MiB are refused.\nThe new text goes to a temporary file in the same directory with the same mode, which then replaces the file; when the file changed on disk meanwhile, nothing is written and RuntimeError says so. A symlinked path replaces the real file and keeps the link (in a read-only chat a symlinked path is refused); a file with more than one hard link is refused. Line endings and every byte outside the replaced text stay as they were; read(path, numbered=False) shows the exact text to match.\nA relative path starts at PROJECT_ROOT, whatever os.chdir() set. Protected paths raise PermissionError; so does every path outside ARTIFACTS_DIR in a read-only chat (one without file-editing, rm, mv, shell or process_start tools), before the file is read. The edit is listed in files_written with its diff, like an open() write. It works on the file on disk, not on unsaved editor buffers, and undo_textdoc does not undo it.";
+
+fn file_helpers() -> Vec<CatalogFunction> {
+    [
+        (
+            "read",
+            "Read lines of a text file with line numbers.",
+            READ_HELP,
+            json!({"type":"object","additionalProperties":false,"required":["path"],"properties":{"path":{"type":"string"},"start":{"type":"integer"},"end":{"type":["integer","null"]},"numbered":{"type":"boolean"}}}),
+            json!({"type":"string"}),
+        ),
+        (
+            "grep",
+            "Search files for a regex.",
+            GREP_HELP,
+            json!({"type":"object","additionalProperties":false,"required":["pattern"],"properties":{"pattern":{"type":"string"},"path":{"type":"string"},"context":{"type":"integer","minimum":0,"maximum":20},"glob":{"type":["string","null"]},"ignore_case":{"type":"boolean"},"limit":{"type":"integer","minimum":1,"maximum":10000},"data":{"type":"boolean"}}}),
+            json!({"anyOf":[{"type":"string"},{"type":"object","required":["matches","total","truncated","files_searched","files_skipped"],"properties":{"matches":{"type":"array","items":{"type":"object","required":["path","line","text"],"properties":{"path":{"type":"string"},"line":{"type":"integer"},"text":{"type":"string"}}}},"total":{"type":"integer"},"truncated":{"type":"boolean"},"files_searched":{"type":"integer"},"files_skipped":{"type":"integer"}}}]}),
+        ),
+        (
+            "replace",
+            "Replace exact text in a file and return the diff.",
+            REPLACE_HELP,
+            json!({"type":"object","additionalProperties":false,"required":["path","old","new"],"properties":{"path":{"type":"string"},"old":{"type":"string","minLength":1},"new":{"type":"string"},"count":{"type":"integer","minimum":0}}}),
+            json!({"type":"string"}),
+        ),
+    ]
+    .into_iter()
+    .map(|(name, summary, help, input, output)| CatalogFunction {
+        py_name: name.into(),
+        tool_name: name.into(),
+        summary: summary.into(),
+        description: help.into(),
+        input_schema: input,
+        output_schema: Some(output),
+        is_async: false,
+    })
+    .collect()
+}
+
 pub const LLM_HELPER: &str = "llm";
 pub const LLM_POSITIONAL: &[&str] = &["prompt"];
 const LLM_STUB: &str = "async def llm(prompt: str, *, system: str | None = None, schema: dict[str, Any] | None = None, model: Literal[\"light\", \"default\", \"thinking\", \"chat\"] | None = None, max_tokens: int | None = None) -> LlmResult: ...  # one model question without tools or chat history; cheap model by default; budgeted per run. LlmResult = {ok: bool, text: str, data: Any | None, model: str, usage: {input_tokens: int, output_tokens: int}, error: str | None}\n";
@@ -651,6 +713,47 @@ fn llm_helper() -> CatalogFunction {
         input_schema: json!({"type":"object","additionalProperties":false,"required":["prompt"],"properties":{"prompt":{"type":"string","minLength":1},"system":{"type":["string","null"]},"schema":{"type":["object","null"]},"model":{"enum":["light","default","thinking","chat",null]},"max_tokens":{"type":["integer","null"],"minimum":1}}}),
         output_schema: Some(
             json!({"type":"object","required":["ok","text","data","model","usage","error"],"properties":{"ok":{"type":"boolean"},"text":{"type":"string"},"data":{},"model":{"type":"string"},"usage":{"type":"object","required":["input_tokens","output_tokens"],"properties":{"input_tokens":{"type":"integer"},"output_tokens":{"type":"integer"}}},"error":{"type":["string","null"]}}}),
+        ),
+        is_async: true,
+    }
+}
+
+pub const GIT_HELPER: &str = "git";
+/// Keyword names the kernel gives the leading positional arguments of `git(...)`.
+pub const GIT_POSITIONAL: &[&str] = &["subcommand", "#1", "#2"];
+const GIT_STUB: &str = "async def git(subcommand: Literal[\"status\", \"diff\", \"log\", \"show\", \"branches\"], *args, **kwargs) -> ToolResult[dict]: ...  # read-only git data, no shell needed: git(\"status\"), git(\"diff\", rev=None, path=None, staged=False), git(\"log\", n=20, rev=None, path=None), git(\"show\", rev, path=None), git(\"branches\")\n";
+const GIT_HELP: &str = "git(subcommand, ...) returns git data of the repository that holds PROJECT_ROOT, limited to the chat's workspace folders. It only reads: it runs no git program, fetches nothing, never refreshes or writes the index and works in read-only chats. Returns ToolResult: `data` as below, `text` a one-line summary.\n\ngit(\"status\"): {root, branch, head_oid, head_detached, unborn, upstream, ahead, behind, repo_state, changes: [{path, old_path?, status, staged, unstaged}], untracked: [path], conflicted: [{path, ours, theirs, ancestor}], truncated, withheld_count}.\ngit(\"diff\", rev=None, path=None, staged=False): what `git diff` shows: index to worktree; staged=True: HEAD (or rev) to index; rev=\"X\": X to worktree; \"A..B\": A to B; \"A...B\": the merge base of A and B to B. path is a str or a list of str. {root, base, files: [{path, old_path?, status, link, binary, additions?, deletions?, patch, patch_truncated}], truncated, withheld_count}. Untracked files and submodules are left out.\ngit(\"log\", n=20, rev=None, path=None): up to n (1-200) commits, newest first; rev is \"X\" or \"A..B\"; with path, only commits that changed a file under it that git() may show. {root, rev, commits: [{hash, short, author, email, date, subject, message, parents, refs, files: [{path, status}], files_truncated, withheld_count}], scan_truncated, shallow, withheld_count}.\ngit(\"show\", rev, path=None): with path, that file at rev: {root, rev, path, exists, link, binary, size, text, truncated}; without, the commit with its patches: {root, rev, commit, files, truncated, withheld_count}. rev and path may be positional here only.\ngit(\"branches\"): {root, current, head_detached, head_oid, branches: [{name, is_head, upstream, tip_oid, ahead, behind, upstream_gone}], remote_branches: [{name, remote, short_name, tip_oid}], tags: [{name, target_oid}], remotes, truncated}.\n\nrev names a commit: a hash, a branch, a tag or a form like HEAD~2. Blob (X:path), index, reflog (@{...}) and peel (^{...}) forms and values that start with '-' raise TypeError, on each side of a range too. Paths are literal and relative to the repository root.\nLimits: 300 files per diff; a file over 1 MiB is not loaded (no patch, patch_truncated); renames are detected only among at most 200 added and deleted files, none of them over 1 MiB; patches are cut at 64 KiB per file and 512 KiB per call (patch_truncated, truncated); a shown file over 2 MiB is not loaded; 100 files per logged commit; log reads at most 50,000 commits (scan_truncated); branches lists at most 1,000 branches, 1,000 remote branches and 1,000 tags, the first by name (truncated). A call over a very large change set can take long; Stop is honoured between files.\nLinks: a symbolic link stored in the repository is listed with link=True and has no patch and no text; its target is never returned.\nPrivacy: a file the privacy policy or the engine's rules keep from scripts, or whose name is not valid UTF-8 or holds a backslash, is left out of every list, with both sides of a rename, and only counted in withheld_count; naming it as path in diff, log or show raises PermissionError, whether or not it exists. A path is checked as written and as the file it resolves to now through links; both must pass. Files whose content is returned carry privacy records into this run, as reads do. Commit messages, authors and refs are returned as they are.\nErrors: bad arguments raise TypeError; a hook or a mode rule that refuses `git` raises PermissionError; an exhausted call budget raises RuntimeError; a missing repository or revision returns ok=False with `error`, which says so when the repository is shallow; a repository that borrows objects from another one (objects/info/alternates) is not read: ok=False.";
+
+fn git_helper() -> CatalogFunction {
+    CatalogFunction {
+        py_name: GIT_HELPER.into(),
+        tool_name: GIT_HELPER.into(),
+        summary: "Read git status, diffs, history, files at a revision and branches.".into(),
+        description: GIT_HELP.into(),
+        input_schema: json!({"type":"object","additionalProperties":false,"required":["subcommand"],"properties":{"subcommand":{"enum":["status","diff","log","show","branches"]},"rev":{"type":["string","null"]},"path":{"anyOf":[{"type":"string"},{"type":"array","items":{"type":"string"}},{"type":"null"}]},"staged":{"type":"boolean"},"n":{"type":"integer","minimum":1,"maximum":200}}}),
+        output_schema: None,
+        is_async: true,
+    }
+}
+
+/// The tool `run()` calls; it is bound only in chats that have this tool.
+pub const RUN_TOOL: &str = "shell";
+pub const RUN_HELPER: &str = "run";
+pub const RUN_POSITIONAL: &[&str] = &["cmd"];
+const RUN_STUB: &str = "async def run(cmd: str, *, timeout: int | None = None, cwd: str | None = None, tail: int = 60) -> RunResult: ...  # runs a build or test command to its end through the shell tool (same approvals and rules). RunResult = {ok: bool, exit_code: int | None, status: str, duration_s: float, tail: str, problems: list[str], log: str | None, truncated: bool, error: str | None}\n";
+const RUN_HELP: &str = "run(cmd, *, timeout=None, cwd=None, tail=60) runs one shell command to its end through the shell tool, with the same approvals, hooks and rules as calling shell, and returns {ok, exit_code, status, duration_s, tail, problems, log, truncated, error}. It waits as long as the command takes (or `timeout` seconds, 1-3600), so use it for builds and tests instead of starting a process and polling it. `cmd` may be positional; cwd is the shell tool's workdir.\nstatus is \"exited\", \"timed_out\", \"killed\", \"failed\" or \"withheld\"; ok is True only for exit code 0. tail: the last `tail` lines (0-2000), each cut at 1000 characters, at most 64 KiB. problems: up to 20 distinct error lines in output order (compiler errors, failed tests, panics, tracebacks, FAIL and npm ERR! lines), each cut at 300 characters; warnings are left out. log: the path of a file under RUN_DIR/logs with the output the shell kept, stdout and stderr in arrival order; truncated is True when that is not everything the command printed. Read it with read(log, -200) or grep(pattern, log).\nWhen the privacy policy withholds the output, status is \"withheld\", tail and problems are empty, log is None and error says so. A hook that turns the command into a background one makes run() raise RuntimeError. A refusal (allowed tools, a rule, a hook or the user) raises PermissionError, as for a nested shell call. A command that waits for input waits until timeout or Stop; pass a timeout.";
+
+fn run_helper() -> CatalogFunction {
+    CatalogFunction {
+        py_name: RUN_HELPER.into(),
+        tool_name: RUN_HELPER.into(),
+        summary:
+            "Run a build or test command to its end; exit code, last lines, problems, log path."
+                .into(),
+        description: RUN_HELP.into(),
+        input_schema: json!({"type":"object","additionalProperties":false,"required":["cmd"],"properties":{"cmd":{"type":"string","minLength":1},"timeout":{"type":["integer","null"],"minimum":1,"maximum":3600},"cwd":{"type":["string","null"]},"tail":{"type":"integer","minimum":0,"maximum":2000}}}),
+        output_schema: Some(
+            json!({"type":"object","required":["ok","exit_code","status","duration_s","tail","problems","log","truncated","error"],"properties":{"ok":{"type":"boolean"},"exit_code":{"type":["integer","null"]},"status":{"enum":["exited","timed_out","killed","failed","withheld"]},"duration_s":{"type":"number"},"tail":{"type":"string"},"problems":{"type":"array","items":{"type":"string"}},"log":{"type":["string","null"]},"truncated":{"type":"boolean"},"error":{"type":["string","null"]}}}),
         ),
         is_async: true,
     }
@@ -782,7 +885,7 @@ fn engine_help(docs: &[EngineFunctionDoc], name: &str) -> Option<String> {
     Some(s)
 }
 
-fn helper_functions(lazy: bool, llm: bool) -> Vec<CatalogFunction> {
+fn helper_functions(lazy: bool, llm: bool, run: bool) -> Vec<CatalogFunction> {
     let mut entries = vec![
         (
             "help",
@@ -831,6 +934,11 @@ fn helper_functions(lazy: bool, llm: bool) -> Vec<CatalogFunction> {
         })
         .collect();
     helpers.push(show_helper());
+    helpers.extend(file_helpers());
+    helpers.push(git_helper());
+    if run {
+        helpers.push(run_helper());
+    }
     if llm {
         helpers.push(llm_helper());
     }
@@ -1128,7 +1236,7 @@ fn function_help(f: &CatalogFunction, used: &BTreeSet<String>) -> String {
 const CONVENTIONS: &str = "# Await every tool call; arguments are keyword-only and omitted optional arguments default to None. Nested object arguments are plain dicts.\n";
 const ENVELOPE: &str = "# ToolResult = {ok: bool, data: the tool's structured result or None, text: str, files: list[{path: str, line1: int, line2: int, content: str}], diffs: list[dict], images: list[{image: str, index: int}], images_dropped: int, error: str | None, truncated: bool}. Check ok and truncated.\n";
 const CONSTANTS_TEXT: &str = "# Constants: PROJECT_ROOT, CHAT_ID, WORKSPACE_DIR, ARTIFACTS_DIR, RUNS_DIR, RUN_ID, RUN_DIR: str; PARENT_ARTIFACTS_DIR: str | None (None without a parent or when the parent has no Python workspace yet).\n";
-const HELPERS_TEXT: &str = "def help(name: str | None = None) -> str: ...  # one function's full typed signature, parameter docs and data types; no name: the function index\ndef tools() -> list[str]: ...\ndef host_path(p: str) -> str: ...\ndef virtual_path(p: str) -> str: ...\n";
+const HELPERS_TEXT: &str = "def help(name: str | None = None) -> str: ...  # one function's full typed signature, parameter docs and data types; no name: the function index\ndef tools() -> list[str]: ...\ndef host_path(p: str) -> str: ...\ndef virtual_path(p: str) -> str: ...\ndef read(path: str, start: int = 1, end: int | None = None, *, numbered: bool = True) -> str: ...  # lines start..end of a text file (1-based, inclusive; start=-N: last N lines) as \"  12 | text\"; numbered=False: the exact text\ndef grep(pattern: str, path: str = \".\", *, context: int = 0, glob: str | None = None, ignore_case: bool = False, limit: int = 200, data: bool = False) -> str | dict: ...  # regex search in a file or directory (search_pattern syntax and ignore rules): \"path:line: text\" lines\ndef replace(path: str, old: str, new: str, *, count: int = 1) -> str: ...  # exact-text edit; ValueError unless exactly count matches (0: all, at least one); returns a unified diff\n";
 const MCP_STUB: &str = "async def mcp_search(*, query: str) -> ToolResult[Any]: ...\nasync def mcp_call(*, tool_name: str, args: dict[str, Any]) -> ToolResult[Any]: ...\n";
 const FUNCTIONS_HEADER: &str = "# Tool functions are async and take keyword arguments: the same arguments as the direct tool of the same name. Each returns ToolResult. name(a, b, …) lists the required arguments; … means optional ones exist. After -> come the keys of data: key? may be missing or None, key[] is a list, key[{…}] a list of dicts, key{…} a dict, {*} arbitrary keys. help(\"name\") prints the full typed signature and data types.\n";
 
@@ -1147,12 +1255,23 @@ fn line(l: &FunctionLine, detail: Detail) -> String {
     format!("{}({params}){shape}{}\n", l.name, l.comment)
 }
 
-fn render(lines: &[FunctionLine], lazy: bool, llm: bool, engine: &str, detail: Detail) -> String {
+fn render(
+    lines: &[FunctionLine],
+    lazy: bool,
+    llm: bool,
+    run: bool,
+    engine: &str,
+    detail: Detail,
+) -> String {
     let mut s = String::new();
     s.push_str(CONVENTIONS);
     s.push_str(ENVELOPE);
     s.push_str(CONSTANTS_TEXT);
     s.push_str(HELPERS_TEXT);
+    s.push_str(GIT_STUB);
+    if run {
+        s.push_str(RUN_STUB);
+    }
     if llm {
         s.push_str(LLM_STUB);
     }
@@ -1188,6 +1307,7 @@ pub const AVAILABLE_MODULES: &[&str] = &[
     "fnmatch",
     "functools",
     "hashlib",
+    "io",
     "itertools",
     "json",
     "math",
@@ -1212,5 +1332,5 @@ pub const MISSING_MODULES: &[&str] = &[
     "urllib",
 ];
 pub fn runtime_note() -> String {
-    format!("# Monty restricted Python. Imports: {}. Missing: {}. Path.relative_to missing; paths are not orderable (sort with key=str); with_suffix/rglob, os.walk and os.path.join/relpath/splitext available (partial CPython APIs). globals() is missing. Bound methods cannot be passed as values (max(d, key=d.get) fails; use key=lambda k: d[k]); calling d.get(k, 0) works. No third-party/network/subprocess. A script can import its own .py files from PROJECT_ROOT (no relative imports, no sys.path).", AVAILABLE_MODULES.join(","), MISSING_MODULES.join(","))
+    format!("# Monty restricted Python. Imports: {}. Missing: {}. os, re, json, Path and asyncio are imported before every run. io has StringIO, BytesIO and open only (no TextIOWrapper; newline=None does not translate). Path.relative_to missing; paths are not orderable (sort with key=str); with_suffix/rglob, os.walk and os.path.join/relpath/splitext available (partial CPython APIs). globals() is missing. Bound methods cannot be passed as values (max(d, key=d.get) fails; use key=lambda k: d[k]); calling d.get(k, 0) works. No third-party/network/subprocess. A script can import its own .py files from PROJECT_ROOT (no relative imports, no sys.path).", AVAILABLE_MODULES.join(","), MISSING_MODULES.join(","))
 }

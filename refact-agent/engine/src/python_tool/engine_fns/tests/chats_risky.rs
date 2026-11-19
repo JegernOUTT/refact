@@ -2,7 +2,7 @@ use super::*;
 use crate::chat::types::ChatSession;
 use refact_chat_api::PythonEngineClass as Class;
 
-async fn install(app: &AppState) {
+pub(super) async fn install(app: &AppState) {
     let mut caps = crate::caps::CodeAssistantCaps::default();
     for id in ["model", "zone/model-a"] {
         caps.chat_models.insert(
@@ -30,14 +30,14 @@ async fn install(app: &AppState) {
         + 3600;
 }
 
-fn message(id: &str, role: &str, text: &str) -> ChatMessage {
+pub(super) fn message(id: &str, role: &str, text: &str) -> ChatMessage {
     let mut m = ChatMessage::new(role.into(), text.into());
     m.message_id = id.into();
     m
 }
 
 /// A saved chat with five messages: user, assistant, user, assistant, user.
-fn build(id: &str, f: impl FnOnce(&mut ChatSession)) -> ChatSession {
+pub(super) fn build(id: &str, f: impl FnOnce(&mut ChatSession)) -> ChatSession {
     let mut s = ChatSession::new(id.into());
     s.thread.title = format!("{id} title");
     s.thread.model = "zone/model-a".into();
@@ -55,7 +55,7 @@ fn build(id: &str, f: impl FnOnce(&mut ChatSession)) -> ChatSession {
     s
 }
 
-async fn save(app: &AppState, s: &ChatSession) {
+pub(super) async fn save(app: &AppState, s: &ChatSession) {
     crate::chat::trajectories::save_trajectory_snapshot(
         app.gcx.clone(),
         crate::chat::trajectories::trajectory_snapshot_from_session(s),
@@ -64,7 +64,7 @@ async fn save(app: &AppState, s: &ChatSession) {
     .unwrap();
 }
 
-async fn other(
+pub(super) async fn other(
     app: &AppState,
     id: &str,
     f: impl FnOnce(&mut ChatSession),
@@ -81,12 +81,15 @@ async fn other(
 }
 
 /// Holds the queue processor of a chat so a queued command stays visible in `command_queue`.
-fn hold_queue(s: &mut ChatSession) {
+pub(super) fn hold_queue(s: &mut ChatSession) {
     s.queue_processor_running
         .store(true, std::sync::atomic::Ordering::SeqCst);
 }
 
-async fn approve(app: &AppState, code: &str) -> (refact_chat_api::PythonApprovalRequest, Value) {
+pub(super) async fn approve(
+    app: &AppState,
+    code: &str,
+) -> (refact_chat_api::PythonApprovalRequest, Value) {
     let task = spawn(app, code);
     let request = next_request(app, &task).await;
     decide(app, &request.request_id, Decision::AllowOnce)
@@ -95,7 +98,7 @@ async fn approve(app: &AppState, code: &str) -> (refact_chat_api::PythonApproval
     (request, result(&finish(task).await))
 }
 
-async fn deny(app: &AppState, code: &str) -> refact_chat_api::PythonApprovalRequest {
+pub(super) async fn deny(app: &AppState, code: &str) -> refact_chat_api::PythonApprovalRequest {
     let task = spawn(app, code);
     let request = next_request(app, &task).await;
     decide(app, &request.request_id, Decision::Deny)
@@ -106,7 +109,7 @@ async fn deny(app: &AppState, code: &str) -> refact_chat_api::PythonApprovalRequ
 }
 
 /// Raises the card, lets `moved` change the target, then allows; returns `[ok, error]`.
-async fn moved_then_allowed<F>(app: &AppState, code: &str, moved: F) -> Value
+pub(super) async fn moved_then_allowed<F>(app: &AppState, code: &str, moved: F) -> Value
 where
     F: std::future::Future<Output = ()>,
 {
@@ -123,7 +126,7 @@ where
 }
 
 /// Runs a call that must be refused before any card; returns the Python error type.
-async fn refused(app: &AppState, code: &str) -> String {
+pub(super) async fn refused(app: &AppState, code: &str) -> String {
     let m = run(app, code).await;
     assert!(
         session(app)
@@ -148,7 +151,7 @@ fn busy_this_chat() -> impl FnOnce(&mut ChatSession) {
     }
 }
 
-async fn until<F: Fn(&ChatSession) -> bool>(
+pub(super) async fn until<F: Fn(&ChatSession) -> bool>(
     session: &Arc<tokio::sync::Mutex<ChatSession>>,
     done: F,
 ) {
@@ -254,7 +257,7 @@ async fn chat_set_auto_approve_off_is_a_change_and_deny_queues_nothing() {
 // ---------------------------------------------------------------- chats.set_auto_approve
 
 #[tokio::test]
-async fn chats_set_auto_approve_names_the_target_and_refuses_other_trees_and_busy_chats() {
+async fn chats_set_auto_approve_names_the_target_and_refuses_busy_chats() {
     let (_dir, app, _) = fixture().await;
     let target = other(&app, "zone-aa", |_| {}).await;
     let request = deny(
@@ -284,16 +287,11 @@ async fn chats_set_auto_approve_names_the_target_and_refuses_other_trees_and_bus
     .await;
     assert_eq!(request.engine.unwrap().class, Class::Change);
 
-    other(&app, "zone-aa-foreign", |s| {
-        s.thread.root_chat_id = Some("zone-elsewhere".into())
-    })
-    .await;
     other(&app, "zone-aa-busy", |s| {
         s.runtime.state = refact_chat_api::SessionState::Generating
     })
     .await;
     for (id, kind) in [
-        ("zone-aa-foreign", "PermissionError"),
         ("zone-aa-busy", "PermissionError"),
         ("python-test", "TypeError"),
         ("zone-aa-unknown", "TypeError"),
@@ -319,71 +317,6 @@ async fn chats_set_auto_approve_names_the_target_and_refuses_other_trees_and_bus
 }
 
 #[tokio::test]
-async fn chats_set_params_cannot_turn_on_approvals_in_another_tree() {
-    let (_dir, app, _) = fixture().await;
-    install(&app).await;
-    let target = other(&app, "zone-sp-foreign", |s| {
-        s.thread.root_chat_id = Some("zone-elsewhere".into())
-    })
-    .await;
-    assert_eq!(
-        refused(
-            &app,
-            "await engine('chats.set_params', chat_id='zone-sp-foreign', mode='agent')"
-        )
-        .await,
-        "PermissionError"
-    );
-    assert_eq!(target.lock().await.thread.mode, "explore");
-    assert!(target.lock().await.command_queue.is_empty());
-    let request = deny(
-        &app,
-        "await engine('chats.set_params', chat_id='zone-sp-foreign', temperature=0.4)",
-    )
-    .await;
-    assert_eq!(request.engine.unwrap().class, Class::Change);
-    other(&app, "zone-sp-own", |_| {}).await;
-    let request = deny(
-        &app,
-        "await engine('chats.set_params', chat_id='zone-sp-own', mode='agent')",
-    )
-    .await;
-    assert_eq!(request.engine.unwrap().class, Class::Risky);
-}
-
-#[tokio::test]
-async fn chats_set_params_cannot_widen_the_mode_of_another_tree() {
-    let (_dir, app, _) = fixture().await;
-    install(&app).await;
-    let target = other(&app, "zone-wm-foreign", |s| {
-        s.thread.root_chat_id = Some("zone-elsewhere".into())
-    })
-    .await;
-    assert_eq!(
-        refused(
-            &app,
-            "await engine('chats.set_params', chat_id='zone-wm-foreign', mode='debug')"
-        )
-        .await,
-        "PermissionError"
-    );
-    assert_eq!(target.lock().await.thread.mode, "explore");
-    assert!(target.lock().await.command_queue.is_empty());
-    other(&app, "zone-wm-own", |_| {}).await;
-    let request = deny(
-        &app,
-        "await engine('chats.set_params', chat_id='zone-wm-own', mode='debug')",
-    )
-    .await;
-    let card = request.engine.unwrap();
-    assert_eq!(card.class, Class::Risky);
-    assert!(card
-        .warning
-        .unwrap()
-        .contains("The new mode lets tools run without asking you."));
-}
-
-#[tokio::test]
 async fn chats_set_auto_approve_moved_target_is_refused() {
     let (_dir, app, _) = fixture().await;
     let target = other(&app, "zone-aa-moved", |_| {}).await;
@@ -405,7 +338,7 @@ async fn chats_set_auto_approve_moved_target_is_refused() {
 
 // ---------------------------------------------------------------- chats.clear_privacy_records
 
-fn record(path: &str, zone: &str) -> refact_privacy::FileRecord {
+pub(super) fn record(path: &str, zone: &str) -> refact_privacy::FileRecord {
     refact_privacy::FileRecord {
         path: path.into(),
         zone: zone.into(),
@@ -550,7 +483,7 @@ async fn clear_privacy_records_moved_target_is_refused() {
 async fn retry_from_cuts_at_a_user_message_and_starts_a_turn() {
     let (_dir, app, _) = fixture().await;
     install(&app).await;
-    let target = other(&app, "zone-retry", |_| {}).await;
+    let target = other(&app, "zone-retry", |s| s.thread.mode = "ask".into()).await;
     let long = format!("zone new {}", "x".repeat(400));
     let request = deny(
         &app,
@@ -662,7 +595,7 @@ async fn retry_from_refusals_and_moved_target() {
     assert!(target.lock().await.command_queue.is_empty());
 }
 
-fn guarded_policy(app: &AppState) -> refact_privacy::PrivacyPolicy {
+pub(super) fn guarded_policy(app: &AppState) -> refact_privacy::PrivacyPolicy {
     let mut policy = (*app.gcx.privacy_policy_load.read().unwrap().policy).clone();
     policy.zones = vec![refact_privacy::Zone {
         name: "zone_a".into(),
@@ -704,7 +637,7 @@ async fn retry_from_and_edit_message_refuse_text_that_may_not_reach_the_target_m
 async fn edit_message_carries_run_records_and_refuses_non_user_and_unknown_messages() {
     let (dir, app, _) = fixture().await;
     install(&app).await;
-    let target = other(&app, "zone-edit", |_| {}).await;
+    let target = other(&app, "zone-edit", |s| s.thread.mode = "ask".into()).await;
     let mut policy = guarded_policy(&app);
     policy.zones[0].send_to = vec!["*".into()];
     crate::privacy::save_privacy_policy(app.gcx.clone(), policy)
@@ -908,7 +841,7 @@ async fn remove_message_deletes_one_user_message_only() {
 
 // ---------------------------------------------------------------- chats.delete
 
-async fn exists(app: &AppState, id: &str) -> bool {
+pub(super) async fn exists(app: &AppState, id: &str) -> bool {
     crate::chat::trajectories::find_trajectory_path(app.gcx.clone(), id)
         .await
         .is_some()
@@ -954,10 +887,12 @@ async fn delete_removes_a_saved_unloaded_chat() {
     );
 }
 
+/// A loaded idle chat is now deleted after it is closed in the engine (K4); one that a viewer
+/// still holds stays refused (D9), which is the loaded case this test keeps.
 #[tokio::test]
 async fn delete_refuses_this_loaded_parent_and_task_chats() {
     let (_dir, app, _) = fixture().await;
-    other(&app, "zone-del-loaded", |_| {}).await;
+    let _viewer = other(&app, "zone-del-loaded", |_| {}).await;
     save(&app, &build("zone-del-parent", |_| {})).await;
     save(
         &app,
@@ -1283,7 +1218,7 @@ async fn stop_goal_leaves_the_recovery_alone_when_nothing_was_queued() {
     );
 }
 
-fn other_fingerprint(s: &ChatSession) -> Value {
+pub(super) fn other_fingerprint(s: &ChatSession) -> Value {
     json!({
         "thread": serde_json::to_value(&s.thread).unwrap(),
         "queue": s.command_queue.len(),

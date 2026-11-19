@@ -21,7 +21,7 @@ pub fn functions() -> Vec<EngineFn> {
             summary: "This chat's Python session: live, running, background, state size, last reset reason, disk use and the variables as saved after the previous run (in-script dir() is the live view).",
             class: EngineClass::Read,
             input: || json!({"type":"object","additionalProperties":false,"properties":{"variables":{"type":"boolean","description":"Include the saved variable list; true by default."}}}),
-            output: || Some(json!({"type":"object","required":["status","live","state_persisted","state_bytes","last_run_restored","disk","active_run_ids"],"properties":{"status":{"type":"string"},"live":{"type":"boolean"},"state_persisted":{"type":"boolean"},"state_bytes":{"type":"integer"},"saved_at_ms":{"type":"integer"},"last_run_id":{"type":"string"},"reset_reason":{"type":"string"},"last_run_restored":{"type":"boolean"},"variables":{"type":"array","items":{"type":"object","properties":{"name":{"type":"string"},"type_name":{"type":"string"},"preview":{"type":"string"}}}},"variables_truncated":{"type":"boolean"},"variables_total":{"type":"integer"},"disk":{"type":"object","properties":{"workspace_bytes":{"type":"integer"},"quota_bytes":{"type":"integer"}}},"active_run_ids":{"type":"array","items":{"type":"string"}}}})),
+            output: || Some(json!({"type":"object","required":["status","live","state_persisted","state_bytes","last_run_restored","disk","active_run_ids"],"properties":{"status":{"type":"string"},"live":{"type":"boolean"},"state_persisted":{"type":"boolean"},"state_bytes":{"type":"integer"},"saved_at_ms":{"type":"integer"},"last_run_id":{"type":"string"},"reset_reason":{"type":"string"},"last_run_restored":{"type":"boolean"},"variables":{"type":"array","items":{"type":"object","properties":{"name":{"type":"string"},"type_name":{"type":"string"},"preview":{"type":"string"}}}},"variables_truncated":{"type":"boolean"},"variables_total":{"type":"integer"},"variables_unknown":{"type":"boolean","description":"The variables could not be listed; an empty list then says nothing."},"disk":{"type":"object","properties":{"workspace_bytes":{"type":"integer"},"quota_bytes":{"type":"integer"}}},"active_run_ids":{"type":"array","items":{"type":"string"}}}})),
             handler: status,
             preview: None,
             timeout: None,
@@ -165,10 +165,14 @@ fn status<'a>(
         }
         session["disk"] = to_value(&view.disk)?;
         session["active_run_ids"] = json!(ctx.app.python_tool.active_run_ids(&ctx.chat_id));
+        let variables = if view.session.variables_unknown {
+            "variables could not be listed".to_string()
+        } else {
+            format!("{variables} variables")
+        };
         let text = format!(
-            "session {}, {} variables, {:.1} MB of {:.1} MB used",
+            "session {}, {variables}, {:.1} MB of {:.1} MB used",
             view.session.status,
-            variables,
             view.disk.workspace_bytes as f64 / 1e6,
             view.disk.quota_bytes as f64 / 1e6
         );

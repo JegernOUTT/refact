@@ -157,13 +157,84 @@ impl PathFilter {
                 )
         })
         .map(|token| token.trim_end_matches([':', '.']))
-        .filter(|token| {
-            token.starts_with('/')
-                || token.starts_with('~')
-                || (token.len() > 2
-                    && token.as_bytes()[1] == b':'
-                    && matches!(token.as_bytes()[2], b'\\' | b'/'))
-        })
-        .all(|token| self.allows(token))
+        .filter(|token| path_like(token))
+        .all(|token| self.allows(&expand_home(token).unwrap_or_else(|| token.into())))
     }
+
+    /// False when a path the command names is not allowed. The command is split by shell word
+    /// rules, so quoted and escaped paths stay whole, a `name=value` word is checked by its value
+    /// too, and a relative word is taken from `cwd`. A command that cannot be split is refused.
+    pub fn allows_command(&self, command: &str, cwd: Option<&std::path::Path>) -> bool {
+        match shell_words::split(command) {
+            Ok(words) => self.allows_text(command) && self.allows_words(&words, cwd),
+            Err(_) => false,
+        }
+    }
+
+    /// Like `allows_command` for prose such as a description; prose that cannot be split into
+    /// shell words is refused too.
+    pub fn allows_prose(&self, text: &str, cwd: Option<&std::path::Path>) -> bool {
+        self.allows_text(text)
+            && shell_words::split(text).is_ok_and(|words| self.allows_words(&words, cwd))
+    }
+
+    /// A word that cannot be placed is refused: another user's home, or a relative path
+    /// without a working folder.
+    fn allows_words(&self, words: &[String], cwd: Option<&std::path::Path>) -> bool {
+        words
+            .iter()
+            .flat_map(|word| {
+                std::iter::once(word.as_str()).chain(word.split_once('=').map(|(_, value)| value))
+            })
+            .all(|word| {
+                if word.is_empty() || word.starts_with('-') {
+                    true
+                } else if word.starts_with('~') {
+                    expand_home(word).is_some_and(|path| self.allows(&path))
+                } else if path_like(word) {
+                    self.allows(word)
+                } else if let Some(cwd) = cwd {
+                    self.allows(&cwd.join(word).to_string_lossy())
+                } else {
+                    !relative_path_like(word)
+                }
+            })
+    }
+}
+
+/// An absolute path, a home path or a Windows drive path.
+fn path_like(token: &str) -> bool {
+    token.starts_with('/')
+        || token.starts_with('~')
+        || (token.len() > 2
+            && token.as_bytes()[1] == b':'
+            && matches!(token.as_bytes()[2], b'\\' | b'/'))
+}
+
+/// A relative word that may name a file: it has a separator, starts with a dot or has an
+/// extension.
+fn relative_path_like(word: &str) -> bool {
+    let word = word.trim_end_matches([':', '.', ',', ';']);
+    word.contains(['/', '\\'])
+        || word.starts_with('.')
+        || word.rsplit_once('.').is_some_and(|(stem, extension)| {
+            !stem.is_empty()
+                && !extension.is_empty()
+                && extension.chars().all(char::is_alphanumeric)
+        })
+}
+
+/// Whether a word of free text looks like a path, absolute or relative.
+pub fn names_a_path(word: &str) -> bool {
+    let word = word.trim_end_matches([':', '.', ',', ';']);
+    path_like(word) || relative_path_like(word)
+}
+
+/// `~` and `~/...` with the home folder in place of the tilde; nothing for `~user` forms.
+fn expand_home(token: &str) -> Option<String> {
+    let rest = token.strip_prefix('~')?;
+    if !(rest.is_empty() || rest.starts_with(['/', '\\'])) {
+        return None;
+    }
+    Some(format!("{}{rest}", home::home_dir()?.to_string_lossy()))
 }

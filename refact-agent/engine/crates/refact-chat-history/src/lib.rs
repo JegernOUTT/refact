@@ -1,7 +1,10 @@
 pub mod compression_exemption;
 pub mod config;
 pub mod content;
+pub mod history_gates;
 pub mod history_limit;
+pub mod history_patch;
+pub mod linearize;
 pub mod openai_merge;
 pub mod prompt_snippets;
 pub mod retry_policy;

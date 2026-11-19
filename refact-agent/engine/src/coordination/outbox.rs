@@ -54,12 +54,29 @@ pub struct RecoveredDelivery {
 }
 
 /// What a restart found in the outbox: deliveries that provably never reached
-/// the recipient, and messages whose outcome nobody recorded.
+/// the recipient, messages whose outcome nobody recorded, and deliveries the
+/// engine stored but never admitted.
 #[derive(Debug)]
 pub struct OutboxRecovery {
     pub redeliver: Vec<RecoveredDelivery>,
     pub needs_inspection: Vec<DeliveryOutboxRecord>,
+    pub unadmitted: Vec<DeliveryOutboxRecord>,
 }
+
+/// Payload key of a delivery stored before its caller admitted it under the
+/// lock that accepts it.
+const AWAITING_ADMISSION: &str = "awaiting_admission";
+
+fn awaiting_admission(record: &DeliveryOutboxRecord) -> bool {
+    serde_json::from_str::<serde_json::Value>(&record.payload)
+        .ok()
+        .and_then(|payload| payload.get(AWAITING_ADMISSION).and_then(|v| v.as_bool()))
+        == Some(true)
+}
+
+/// Delivery ids whose next state transition fails, to test the paths after a failed write.
+#[cfg(test)]
+pub(crate) static FAIL_NEXT_TRANSITION: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 pub struct DeliveryOutbox {
     store: Arc<CoordinationStore>,
@@ -127,19 +144,91 @@ impl DeliveryOutbox {
             .await
     }
 
-    /// Persist and hand off in one step. `false` means durability could not be
+    /// Persist and hand off in one step. `None` means durability could not be
     /// achieved: the caller proceeds without it rather than refusing to
     /// deliver, and the failure is reported through the store warning channel.
-    pub async fn accept_for_dispatch(&self, recipient: &str, delivery: &PendingDelivery) -> bool {
+    /// `Some(false)` means the row was stored but its hand-off was not: the
+    /// caller keeps the outbox so a later refusal can still mark it failed.
+    pub async fn accept_for_dispatch(
+        &self,
+        recipient: &str,
+        delivery: &PendingDelivery,
+    ) -> Option<bool> {
         if let Err(error) = self.persist_accepted(recipient, delivery).await {
             note_durability_unavailable(self.store.path(), error.to_string());
-            return false;
+            return None;
         }
         if let Err(error) = self.mark_dispatched(&delivery.id).await {
             note_durability_unavailable(self.store.path(), error.to_string());
-            return false;
+            return Some(false);
         }
-        true
+        Some(true)
+    }
+
+    /// `accept_for_dispatch` for a delivery its caller still admits under the
+    /// lock that accepts it: one write stores it in flight and marked as not
+    /// admitted, so a restart never replays it and marks it failed instead.
+    /// `admitted` clears the mark. An existing row is left as it is.
+    pub async fn accept_for_admission(&self, recipient: &str, delivery: &PendingDelivery) -> bool {
+        let stored = async {
+            if self
+                .store
+                .get_outbox_message(&self.access, &delivery.id)
+                .await?
+                .is_some()
+            {
+                return Ok(());
+            }
+            let mut payload = serde_json::to_value(delivery)
+                .map_err(|error| StoreError::Decode(format!("encode delivery payload: {error}")))?;
+            payload[AWAITING_ADMISSION] = serde_json::Value::Bool(true);
+            let now = refact_work_core::now_ms();
+            self.store
+                .put_outbox_message(
+                    &self.access,
+                    &DeliveryOutboxRecord {
+                        project: self.access.project().clone(),
+                        message_id: delivery.id.clone(),
+                        recipient: recipient.to_string(),
+                        state: DeliveryState::InFlight,
+                        attempts: 1,
+                        created_at_ms: now,
+                        updated_at_ms: now,
+                        payload: payload.to_string(),
+                    },
+                )
+                .await
+        };
+        match stored.await {
+            Ok(()) => true,
+            Err(error) => {
+                note_durability_unavailable(self.store.path(), error.to_string());
+                false
+            }
+        }
+    }
+
+    /// The delivery passed its admission: its row becomes an ordinary
+    /// dispatched one.
+    pub async fn admitted(&self, delivery_id: &str) -> Result<(), StoreError> {
+        let Some(mut record) = self
+            .store
+            .get_outbox_message(&self.access, delivery_id)
+            .await?
+        else {
+            return Ok(());
+        };
+        if record.state != DeliveryState::InFlight || !awaiting_admission(&record) {
+            return Ok(());
+        }
+        let mut payload: serde_json::Value = serde_json::from_str(&record.payload)
+            .map_err(|error| StoreError::Decode(format!("decode delivery payload: {error}")))?;
+        if let Some(payload) = payload.as_object_mut() {
+            payload.remove(AWAITING_ADMISSION);
+        }
+        record.payload = payload.to_string();
+        record.updated_at_ms = refact_work_core::now_ms();
+        self.store.put_outbox_message(&self.access, &record).await
     }
 
     /// Record what the recipient itself reports. `Unknown` writes nothing: an
@@ -161,6 +250,16 @@ impl DeliveryOutbox {
         state: DeliveryState,
         bump_attempts: bool,
     ) -> Result<(), StoreError> {
+        #[cfg(test)]
+        {
+            let mut failing = FAIL_NEXT_TRANSITION
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(at) = failing.iter().position(|id| id == delivery_id) {
+                failing.remove(at);
+                return Err(StoreError::Io("injected transition failure".into()));
+            }
+        }
         let Some(mut record) = self
             .store
             .get_outbox_message(&self.access, delivery_id)
@@ -200,12 +299,16 @@ impl DeliveryOutbox {
     /// Everything a restart has to act on. A row whose payload cannot be
     /// decoded is reported for inspection rather than dropped or guessed at.
     pub async fn recover(&self) -> Result<OutboxRecovery, StoreError> {
+        let (unadmitted, needs_inspection) = self
+            .store
+            .list_outbox_messages_in_states(&self.access, &[DeliveryState::InFlight])
+            .await?
+            .into_iter()
+            .partition(awaiting_admission);
         let mut recovery = OutboxRecovery {
             redeliver: Vec::new(),
-            needs_inspection: self
-                .store
-                .list_outbox_messages_in_states(&self.access, &[DeliveryState::InFlight])
-                .await?,
+            needs_inspection,
+            unadmitted,
         };
         for record in self
             .store
@@ -373,6 +476,19 @@ pub async fn recover_and_redeliver(app: &AppState, outbox: &DeliveryOutbox) -> u
             "outbox message was dispatched without a recorded outcome; \
              it needs inspection and is not retried automatically"
         );
+    }
+    for record in &recovery.unadmitted {
+        tracing::warn!(
+            message_id = %record.message_id,
+            recipient = %record.recipient,
+            "outbox delivery failed: the engine restarted before it was admitted; it is never delivered"
+        );
+        if let Err(error) = outbox
+            .record_status(&record.message_id, DeliveryStatus::Failed)
+            .await
+        {
+            tracing::warn!(message_id = %record.message_id, %error, "outbox could not mark an unadmitted delivery failed");
+        }
     }
     let mut redelivered = 0;
     for recovered in recovery.redeliver {
@@ -674,6 +790,125 @@ mod tests {
         assert_eq!(beta_recovery.redeliver.len(), 1);
         assert_eq!(beta_recovery.redeliver[0].delivery.id, "beta-only");
         assert_eq!(beta.status_of("alpha-only").await.unwrap(), None);
+    }
+
+    async fn delivery_app(
+        chat_id: &str,
+    ) -> (
+        tempfile::TempDir,
+        tempfile::TempDir,
+        AppState,
+        Arc<AMutex<ChatSession>>,
+    ) {
+        let workspace = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+            workspace.path().join("cache"),
+            config.path().to_path_buf(),
+        )
+        .await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() =
+            vec![workspace.path().to_path_buf()];
+        let app = AppState::from_gcx(gcx).await;
+        let session = Arc::new(AMutex::new(ChatSession::new(chat_id.to_string())));
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(chat_id.to_string(), session.clone());
+        (workspace, config, app, session)
+    }
+
+    /// T3: a delivery that still needs admission is stored as not replayable; when the engine
+    /// stops before its admission, the restart marks it failed and never delivers it.
+    #[serial_test::serial(runtime_settings)]
+    #[tokio::test]
+    async fn outbox_a_delivery_stored_before_its_admission_fails_after_a_restart_and_never_lands() {
+        let (_workspace, _config, app, session) = delivery_app("admit-chat").await;
+        let (entered, release) = (
+            Arc::new(tokio::sync::Notify::new()),
+            Arc::new(tokio::sync::Notify::new()),
+        );
+        crate::chat::delivery::ACCEPT_GATE.lock().unwrap().push((
+            "admit-chat".into(),
+            entered.clone(),
+            release.clone(),
+        ));
+        let sender = app.clone();
+        let task = tokio::spawn(async move {
+            let admit = |_: &ChatSession| -> Result<(), String> { Ok(()) };
+            crate::chat::delivery::deliver_to_chat_admitted(
+                sender,
+                "admit-chat",
+                delivery("unadmitted"),
+                &admit,
+            )
+            .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(10), entered.notified())
+            .await
+            .expect("the delivery was not stored");
+        task.abort();
+        let _ = task.await;
+        release.notify_one();
+        let project = project_key_for_root(&app, None).await;
+        let outbox = outbox_for(&app, project).await.unwrap();
+        assert_eq!(recover_and_redeliver(&app, &outbox).await, 0);
+        assert_eq!(
+            outbox.status_of("unadmitted").await.unwrap(),
+            Some(DeliveryState::Failed),
+            "the engine restarted before it was admitted"
+        );
+        assert!(
+            session.lock().await.messages.is_empty(),
+            "an unadmitted delivery landed"
+        );
+    }
+
+    /// T3: when the row of a delivery was stored but its hand-off write failed, a refusal that
+    /// follows still marks the row failed, so it is never replayed.
+    #[serial_test::serial(runtime_settings)]
+    #[tokio::test]
+    async fn outbox_a_refused_delivery_whose_hand_off_failed_is_still_marked_failed() {
+        let (_workspace, _config, app, session) = delivery_app("refusing-chat").await;
+        {
+            let mut guard = session.lock().await;
+            guard.start_stream().unwrap();
+            guard.test_queue_capacity = Some(100);
+            let mut index = 0;
+            while guard
+                .enqueue_delivery(delivery(&format!("filler-{index}")))
+                .is_ok()
+            {
+                index += 1;
+                assert!(index < 1_000, "the pending queue must be bounded");
+            }
+        }
+        FAIL_NEXT_TRANSITION
+            .lock()
+            .unwrap()
+            .push("refused-hand-off".into());
+        assert!(crate::chat::deliver_to_chat(
+            app.clone(),
+            "refusing-chat",
+            delivery("refused-hand-off")
+        )
+        .await
+        .is_err());
+        let project = project_key_for_root(&app, None).await;
+        let outbox = outbox_for(&app, project).await.unwrap();
+        assert_eq!(
+            outbox.status_of("refused-hand-off").await.unwrap(),
+            Some(DeliveryState::Failed),
+            "a refused delivery stayed replayable"
+        );
+        assert!(outbox
+            .recover()
+            .await
+            .unwrap()
+            .redeliver
+            .iter()
+            .all(|recovered| recovered.delivery.id != "refused-hand-off"));
     }
 
     #[serial_test::serial(runtime_settings)]

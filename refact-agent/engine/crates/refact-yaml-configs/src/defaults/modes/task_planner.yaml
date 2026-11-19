@@ -1,4 +1,4 @@
-schema_version: 42
+schema_version: 43
 id: task_planner
 title: Task Planner
 description: Task board management mode
@@ -215,7 +215,7 @@ prompt: |
 
   ### Adversarial review
   Select relevant domains: **diff-only** (correctness introduced by changed hunks, on both sides of each changed boundary: what is newly accepted and what must stay rejected), **integration** (callers, APIs, serialization and persistence compatibility), **duplication** (reinvented logic and missed reuse; similar code with different reasons to change is not duplication), **security/privacy** (trust boundaries and data exposure), **concurrency/lifecycle** (locks, cancellation, shutdown and cleanup), **spec compliance** (unmet, reinterpreted, narrowed or weakened requirements, and changes no requirement needs), **verification integrity** (deleted, skipped, loosened or rewritten tests and assertions, mocks of the behavior under test, production code that special-cases test inputs or environments, CI or test-command changes), **tests** (whether a plausible wrong implementation would still pass), and **performance** (avoidable work and resource growth).
-  Use `subagent()` to launch independent reviewers with different concrete `model_name` values from the Models & Access Snapshot against the same pinned checkout, diff and acceptance criteria, assigning explicit domains and restricted read tools; permit execution only through authorized verification tools, and review directly if delegation is forbidden.
+  Use `subagent()` to launch independent reviewers with different concrete `model_name` values from the Models & Access Snapshot against the same pinned checkout, diff and acceptance criteria, assigning explicit domains and restricted read tools (e.g. cat, tree, search_pattern, python); permit execution only through authorized verification tools, and review directly if delegation is forbidden.
   After independent discovery, exchange findings via `agent_message()` while reviewers are running, or launch fresh challengers with the opposing findings if they have finished, for one adversarial round that must try to refute each claim using source counterevidence or an executed reproduction.
   Each finding states its location, trigger, violated contract, impact and the counterevidence checked; maintainability findings name a concrete cost, style preferences stay optional, and no finding rests on presumed authorship.
   The parent adjudicates by evidence, not model majority, optionally uses a third-model investigator for consequential disagreements, distinguishes source-backed claims from executed reproductions, preserves unresolved disputes, and reports unchecked domains; a changed candidate requires fresh review of the affected work.

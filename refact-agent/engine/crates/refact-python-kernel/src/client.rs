@@ -6,7 +6,10 @@ use std::{
     collections::HashMap,
     io,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
+    },
     time::Duration,
 };
 use tokio::{
@@ -52,6 +55,7 @@ pub struct KernelClient {
     events: mpsc::UnboundedReceiver<ClientEvent>,
     kill: Option<mpsc::UnboundedSender<()>>,
     pid: Option<u32>,
+    rss: Option<Arc<AtomicU64>>,
 }
 impl KernelClient {
     pub fn spawn(command: WorkerCommand, options: ClientOptions) -> io::Result<Self> {
@@ -141,13 +145,15 @@ impl KernelClient {
             }
         });
         let mut child = ReapGuard(child);
+        let rss = Arc::new(AtomicU64::new(0));
+        let polled = rss.clone();
         tokio::spawn(async move {
             let mut ticker =
                 tokio::time::interval(Duration::from_millis(options.memory_poll_ms.max(1)));
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             let mut exceeded = None;
             let status = loop {
-                tokio::select! {status=child.wait()=>break status,_=kill_rx.recv()=>{let _=child.start_kill();break child.wait().await},_=ticker.tick()=>{if let Some(pid)=pid {let pid=sysinfo::Pid::from_u32(pid);let rss=tokio::task::spawn_blocking(move||{let mut system=sysinfo::System::new();system.refresh_processes_specifics(sysinfo::ProcessesToUpdate::Some(&[pid]),true,sysinfo::ProcessRefreshKind::nothing().with_memory());system.process(pid).map(|p|p.memory()).unwrap_or(0)}).await.unwrap_or(0);if options.memory_limit_bytes>0&&rss>options.memory_limit_bytes{exceeded=Some(rss);let _=child.start_kill();break child.wait().await}}}}
+                tokio::select! {status=child.wait()=>break status,_=kill_rx.recv()=>{let _=child.start_kill();break child.wait().await},_=ticker.tick()=>{if let Some(pid)=pid {let pid=sysinfo::Pid::from_u32(pid);let rss=tokio::task::spawn_blocking(move||{let mut system=sysinfo::System::new();system.refresh_processes_specifics(sysinfo::ProcessesToUpdate::Some(&[pid]),true,sysinfo::ProcessRefreshKind::nothing().with_memory());system.process(pid).map(|p|p.memory()).unwrap_or(0)}).await.unwrap_or(0);polled.store(rss,Ordering::Relaxed);if options.memory_limit_bytes>0&&rss>options.memory_limit_bytes{exceeded=Some(rss);let _=child.start_kill();break child.wait().await}}}}
             };
             writer.abort();
             let _ = output.await;
@@ -168,6 +174,7 @@ impl KernelClient {
             events: event_rx,
             kill: Some(kill),
             pid,
+            rss: Some(rss),
         })
     }
     pub fn spawn_in_thread(os: Box<dyn OsBackend>, _options: ClientOptions) -> io::Result<Self> {
@@ -225,6 +232,7 @@ impl KernelClient {
             events: event_rx,
             kill: Some(kill),
             pid: None,
+            rss: None,
         })
     }
     pub async fn send(&self, mut cmd: KernelCommand) -> io::Result<()> {
@@ -279,6 +287,13 @@ impl KernelClient {
     }
     pub fn pid(&self) -> Option<u32> {
         self.pid
+    }
+    /// The worker's resident memory at the last poll; unknown for an in-thread worker.
+    pub fn rss_bytes(&self) -> Option<u64> {
+        self.rss
+            .as_ref()
+            .map(|rss| rss.load(Ordering::Relaxed))
+            .filter(|rss| *rss > 0)
     }
     pub fn kill_handle(&self) -> Option<mpsc::UnboundedSender<()>> {
         self.kill.clone()

@@ -1,13 +1,42 @@
 use futures::future::BoxFuture;
 use serde_json::{json, Value};
 
-use super::common::{limit, limit_schema, redact, require_root_chat, PathFilter};
+use super::common::{limit, limit_schema, names_a_path, redact, require_root_chat, PathFilter};
 use super::mask::item;
 use super::{previewed, EngineClass, EngineCtx, EngineError, EngineFn, EngineOutput, Preview};
 use crate::tool_jobs::JobStatus;
-use refact_exec::{ExecProcessFilter, ExecStatus};
+use refact_exec::{types::normalize_workspace_path, ExecProcessFilter, ExecStatus};
 
 const HIDDEN: &str = "<hidden: other chat>";
+
+/// The description another chat's process may show, if its command and description name no
+/// path this chat's model may not see; anything that cannot be classified is hidden.
+fn shown(filter: &PathFilter, meta: &refact_exec::ExecProcessMeta) -> Option<String> {
+    let cwd = meta.cwd.as_deref();
+    let description = description(meta)?;
+    (filter.allows_command(&meta.command, cwd) && filter.allows_prose(&description, cwd))
+        .then_some(description)
+}
+
+/// The description as kept by the exec layer, without its last token when that layer cut it at
+/// its length limit: a cut path no longer matches the policy that blocks the whole path, so a
+/// rest that still holds a quote or a path-like word is not shown at all.
+fn description(meta: &refact_exec::ExecProcessMeta) -> Option<String> {
+    let text = &meta.short_description;
+    match text.strip_suffix('\u{2026}') {
+        Some(kept) if text.chars().count() >= refact_exec::types::SHORT_DESC_MAX_LEN => {
+            let kept = kept.trim_end();
+            let whole = kept
+                .rfind(char::is_whitespace)
+                .map_or("", |at| kept[..at].trim_end());
+            if whole.contains(['\'', '"', '`']) || whole.split_whitespace().any(names_a_path) {
+                return None;
+            }
+            Some(format!("{whole}\u{2026}"))
+        }
+        _ => Some(text.clone()),
+    }
+}
 
 /// Tools whose jobs only read; cancelling any other job midway can leave partial effects.
 const READ_ONLY_TOOLS: &[&str] = &[
@@ -136,20 +165,20 @@ async fn plan_kill(ctx: &EngineCtx, args: &Value) -> Result<KillPlan, EngineErro
         .lock()
         .unwrap()
         .clone();
-    if !owner
-        .workspace
-        .as_ref()
-        .is_some_and(|workspace| folders.iter().any(|folder| workspace.starts_with(folder)))
-    {
+    if !owner.workspace.as_ref().is_some_and(|workspace| {
+        let workspace = normalize_workspace_path(workspace);
+        folders
+            .iter()
+            .any(|folder| workspace.starts_with(normalize_workspace_path(folder)))
+    }) {
         return Err(EngineError::Permission(format!(
             "process {id} does not run in one of this engine's workspace folders"
         )));
     }
     let filter = PathFilter::new(ctx).await?;
-    let preview = if filter.allows_text(&snapshot.meta.short_description) {
-        redact(&super::mask::scrub_text(&snapshot.meta.short_description))
-    } else {
-        HIDDEN.to_string()
+    let preview = match shown(&filter, &snapshot.meta) {
+        Some(description) => redact(&super::mask::scrub_text(&description)),
+        None => HIDDEN.to_string(),
     };
     Ok(KillPlan {
         snapshot,
@@ -287,13 +316,18 @@ fn list<'a>(
             if rows.len() >= limit {
                 continue;
             }
-            let preview = if !own && !filter.allows_text(&s.meta.short_description) {
-                HIDDEN.to_string()
-            } else {
+            let preview = if own {
                 redact(&crate::integrations::mcp::redaction::scrub_text(
                     &s.meta.short_description,
                     &[],
                 ))
+            } else if let Some(description) = shown(&filter, &s.meta) {
+                redact(&crate::integrations::mcp::redaction::scrub_text(
+                    &description,
+                    &[],
+                ))
+            } else {
+                HIDDEN.to_string()
             };
             let mut row = json!({
                 "process_id": s.meta.process_id.as_str(),
@@ -317,7 +351,12 @@ fn list<'a>(
                 row["exit_code"] = json!(code);
             }
             if let Some(workspace) = &s.meta.owner.workspace {
-                row["workspace"] = json!(workspace.to_string_lossy());
+                let workspace = workspace.to_string_lossy();
+                row["workspace"] = if own || filter.allows(&workspace) {
+                    json!(workspace)
+                } else {
+                    json!(HIDDEN)
+                };
             }
             rows.push(row);
         }
@@ -478,4 +517,70 @@ fn cancel_job<'a>(
             format!("cancel requested for {} job", plan.tool_name),
         ))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn meta(
+        command: &str,
+        description: Option<&str>,
+        cwd: Option<&std::path::Path>,
+    ) -> refact_exec::ExecProcessMeta {
+        let mut meta =
+            refact_exec::ExecProcessMeta::new(refact_exec::ExecMode::Background, command.into());
+        if let Some(description) = description {
+            meta = meta.with_short_description(description.into());
+        }
+        meta.cwd = cwd.map(Into::into);
+        meta
+    }
+
+    #[tokio::test]
+    async fn foreign_previews_that_cannot_be_placed_are_hidden() {
+        let (dir, app, _) = crate::tools::tool_python::tests::fixture().await;
+        let project = dir.path().join("project");
+        let home = home::home_dir().unwrap();
+        let mut policy = (*app.gcx.privacy_policy_load.read().unwrap().policy).clone();
+        policy.blocked = [
+            project.join("customer-records.txt"),
+            home.join("zone-private-previews/customers.txt"),
+        ]
+        .iter()
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect();
+        crate::privacy::save_privacy_policy(app.gcx.clone(), policy)
+            .await
+            .unwrap();
+        let filter = PathFilter::new_for_test(&app, "model").await;
+        let cut = format!("Count rows in 'customer file' {}", "x".repeat(80));
+        for hidden in [
+            meta("sleep 1", Some("Check Bob's file"), Some(&project)),
+            meta("cat customer-records.txt", None, None),
+            meta("sleep 1", Some("Read customer-records.txt"), None),
+            meta(
+                "cat ~/zone-private-previews/customers.txt",
+                Some("Read the list"),
+                Some(&project),
+            ),
+            meta("cat ~other/notes", Some("Read the notes"), Some(&project)),
+            meta("sleep 1", Some(&cut), Some(&project)),
+        ] {
+            assert_eq!(
+                shown(&filter, &hidden),
+                None,
+                "{} / {}",
+                hidden.command,
+                hidden.short_description
+            );
+        }
+        for public in [
+            meta("cargo test --lib", None, None),
+            meta("cat notes.txt", None, Some(&project)),
+            meta("sleep 1", Some("Count the lines"), None),
+        ] {
+            assert!(shown(&filter, &public).is_some(), "{}", public.command);
+        }
+    }
 }

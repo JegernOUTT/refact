@@ -2706,6 +2706,8 @@ export type PythonRunExtra = {
     traceback: string;
     /** Optional 1-based failing line in this run's code. */
     line?: number;
+    /** Optional one line of advice for this error. */
+    hint?: string;
   } | null;
   /** Optional one-sentence description of what the script does. */
   description?: string;
@@ -2721,6 +2723,10 @@ export type PythonRunExtra = {
     bytes: number;
     /** Optional engine note on the session state after this run. */
     note?: string;
+    /** Optional: why this run's state was not saved, and where variables come from. */
+    not_saved?: string;
+    /** Optional engine notes on the session (fork, eviction, refused save, unreadable state). */
+    notes?: string[];
   };
   /** Optional displays the script showed, at most 12. */
   displays?: PythonDisplay[];
@@ -2733,6 +2739,8 @@ export type PythonRunExtra = {
   engine_changes_total?: number;
   /** Optional: the value of the script's last expression was cut by the engine. */
   result_truncated?: boolean;
+  /** Optional: the chat's scripts could write files only under ARTIFACTS_DIR. */
+  read_only?: true;
 };
 
 function isPythonNumber(value: unknown): value is number {
@@ -2846,6 +2854,7 @@ function pythonExtraAdditions(value: Record<string, unknown>) {
   if (isPythonNumber(value.engine_changes_total))
     additions.engine_changes_total = value.engine_changes_total;
   if (value.result_truncated === true) additions.result_truncated = true;
+  if (value.read_only === true) additions.read_only = true;
   return additions;
 }
 
@@ -2857,7 +2866,19 @@ const PYTHON_EXTRA_ADDITIONS = [
   "engine_changes",
   "engine_changes_total",
   "result_truncated",
+  "read_only",
 ];
+
+/** State notes the engine sends as `null` when it has none. */
+const PYTHON_STATE_NOTES = ["note", "not_saved", "notes"];
+
+function withoutNullStateNotes(state: Record<string, unknown>) {
+  return Object.fromEntries(
+    Object.entries(state).filter(
+      ([key, item]) => !(PYTHON_STATE_NOTES.includes(key) && item === null),
+    ),
+  );
+}
 
 /** Drops optional newer-engine fields whose value has an unexpected type. */
 function withoutInvalidOptionals(
@@ -3150,8 +3171,9 @@ function normalizeRunExtraUncached(
   const candidate = {
     ...base,
     ...pythonExtraAdditions(value),
+    state: withoutNullStateNotes(value.state),
     error: isRecord(value.error)
-      ? withoutInvalidOptionals(value.error, ["line"])
+      ? withoutInvalidOptionals(value.error, ["line", "hint"])
       : value.error,
     status:
       typeof value.status === "string" &&
@@ -3220,6 +3242,10 @@ function isPythonRunExtraShape(value: unknown): value is PythonRunExtra {
     typeof state.persisted === "boolean" &&
     (state.reset_reason === null || typeof state.reset_reason === "string") &&
     (state.note === undefined || typeof state.note === "string") &&
+    (state.not_saved === undefined || typeof state.not_saved === "string") &&
+    (state.notes === undefined ||
+      (Array.isArray(state.notes) &&
+        state.notes.every((note: unknown) => typeof note === "string"))) &&
     isPythonNumber(state.bytes)
   );
 }

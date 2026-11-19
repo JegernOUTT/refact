@@ -2,8 +2,14 @@ use super::*;
 #[test]
 fn render_respects_result_char_budget() {
     let extra = json!({"error":{"type":"Error","message":"x".repeat(5000),"traceback":"trace"},"state":{"persisted":true}});
-    let text =
-        crate::python_tool::render::render(&"é".repeat(10000), &"out".repeat(10000), &extra, 1000);
+    let text = crate::python_tool::render::render(
+        &"é".repeat(10000),
+        &"out".repeat(10000),
+        &extra,
+        "",
+        "",
+        1000,
+    );
     assert!(text.chars().count() <= 1000);
     assert!(text.contains("more chars"));
 }
@@ -100,6 +106,137 @@ async fn exception_marks_tool_failed_with_traceback() {
         .as_str()
         .unwrap()
         .is_empty());
+}
+#[tokio::test]
+async fn print_only_run_gets_the_unused_result_budget() {
+    let (_dir, _app, ccx) = fixture().await;
+    let m = run(ccx, "print('x' * 50000)", false).await;
+    let text = m.content.content_text_only();
+    assert!(text.chars().count() <= 20_000, "{}", text.chars().count());
+    assert!(
+        text.matches('x').count() >= 19_000,
+        "{}",
+        text.matches('x').count()
+    );
+}
+#[tokio::test]
+async fn long_output_never_pushes_out_error_and_state_lines() {
+    let (dir, _app, ccx) = fixture().await;
+    std::fs::write(
+        dir.path().join("project/.refact/coordination.yaml"),
+        "python_max_result_chars: 1000\npython_max_state_bytes: 1048576\n",
+    )
+    .unwrap();
+    let message = format!("boom {}", "z".repeat(400));
+    let m = run(
+        ccx,
+        &format!("big = 'b' * 2000000\nprint('y' * 50000)\nraise ValueError('{message}')"),
+        false,
+    )
+    .await;
+    let text = m.content.content_text_only();
+    assert!(text.chars().count() <= 1000, "{}", text.chars().count());
+    assert!(
+        text.starts_with(&format!(
+            "Error: ValueError: {message}\nState: not saved (state is 2.0 MB, over the limit 1.0 MB); variables stay in memory until this session is restarted or evicted; set large variables to None and the next run saves again\n\nPrinted output:\nyyy"
+        )),
+        "{text}"
+    );
+}
+#[tokio::test]
+async fn display_notes_count_in_the_result_budget() {
+    let (dir, _app, ccx) = fixture().await;
+    std::fs::write(
+        dir.path().join("project/.refact/coordination.yaml"),
+        "python_max_result_chars: 1000\n",
+    )
+    .unwrap();
+    let m = run(
+        ccx,
+        "for i in range(14):\n    show([{'a': i}], title=f'table {i}')\nprint('y' * 50000)\n'r' * 50000",
+        false,
+    )
+    .await;
+    let text = m.content.content_text_only();
+    assert!(
+        text.chars().count() <= 1000,
+        "{}: {text}",
+        text.chars().count()
+    );
+    assert!(text.contains("shown to the user: table"), "{text}");
+    assert!(text.contains("Printed output:\nyyy"), "{text}");
+}
+#[tokio::test]
+async fn results_show_non_json_values_readably_without_a_limit_note() {
+    let (_dir, _app, ccx) = fixture().await;
+    let m = run(
+        ccx,
+        "from pathlib import Path\nimport datetime\n[Path('a/b'), {1, 2}, b'abc', {1: 'a'}, datetime.date(2024, 1, 2)]",
+        false,
+    )
+    .await;
+    let text = m.content.content_text_only();
+    for part in [
+        "PosixPath('a/b')",
+        "[\n    1,\n    2\n  ]",
+        "b'abc'",
+        "{1: 'a'}",
+        "datetime.date(2024, 1, 2)",
+    ] {
+        assert!(text.contains(part), "{part}: {text}");
+    }
+    assert!(!text.contains("over the result limit"), "{text}");
+}
+#[tokio::test]
+async fn oversized_helper_arguments_report_the_measured_size() {
+    let (dir, _app, ccx) = fixture().await;
+    std::fs::write(
+        dir.path().join("project/.refact/coordination.yaml"),
+        "python_max_nested_result_bytes: 65536\n",
+    )
+    .unwrap();
+    let m = run(ccx, "help('x' * 100000)", false).await;
+    let message = m.extra["python"]["error"]["message"].as_str().unwrap();
+    assert!(
+        message.starts_with("help() arguments are too large to send: at least "),
+        "{message}"
+    );
+    assert!(
+        message.ends_with(" bytes, over the 65536-byte limit; pass a file path or a smaller value"),
+        "{message}"
+    );
+}
+#[tokio::test]
+async fn a_refused_binding_fails_the_run_and_keeps_the_session() {
+    let (_dir, _app, ccx) = fixture().await;
+    run(ccx.clone(), "x = 41", false).await;
+    let m = run(ccx.clone(), "print('ran')\nPROJECT_ROOT = 'x'", false).await;
+    assert_eq!(m.extra["python"]["status"], "failed");
+    assert_eq!(m.extra["python"]["error"]["type"], "SyntaxError");
+    assert_eq!(m.extra["python"]["error"]["line"], 2);
+    assert!(m.extra["python"]["error"]["message"]
+        .as_str()
+        .unwrap()
+        .starts_with("line 2 binds 'PROJECT_ROOT', a constant set before every run."));
+    assert_eq!(m.extra["python"]["stdout_preview"], "");
+    let m = run(ccx, "x + 1", false).await;
+    assert!(m.content.content_text_only().contains("Result:\n42"));
+}
+#[tokio::test]
+async fn known_interpreter_gaps_get_a_hint_under_the_error() {
+    let (_dir, _app, ccx) = fixture().await;
+    let m = run(ccx.clone(), "x = 1\ndel x", false).await;
+    let hint = m.extra["python"]["error"]["hint"].as_str().unwrap();
+    assert!(hint.starts_with("del is not supported"), "{hint}");
+    let text = m.content.content_text_only();
+    assert!(
+        text.starts_with("Error: NotImplementedError: ")
+            && text.contains(&format!("'del' statement\nHint: {hint}")),
+        "{text}"
+    );
+    let m = run(ccx, "1 / 0", false).await;
+    assert!(m.extra["python"]["error"].get("hint").is_none());
+    assert!(!m.content.content_text_only().contains("Hint:"));
 }
 #[tokio::test]
 async fn variables_persist_between_runs() {
@@ -1196,7 +1333,7 @@ async fn corrupt_privacy_ledger_fails_closed_without_erasing_provenance() {
         .await
         .unwrap();
     std::fs::write(ws.dir().join("privacy_ledger.json"), "not json").unwrap();
-    let before = std::fs::read(ws.state_path()).unwrap();
+    let before = std::fs::read(ws.dir().join("state.json")).unwrap();
     let artifact = ws.artifacts_dir().join("not-created");
     let error = ToolPython::default()
         .tool_execute(
@@ -1214,7 +1351,7 @@ async fn corrupt_privacy_ledger_fails_closed_without_erasing_provenance() {
         std::fs::read(ws.dir().join("privacy_ledger.json")).unwrap(),
         b"not json"
     );
-    assert_eq!(std::fs::read(ws.state_path()).unwrap(), before);
+    assert_eq!(std::fs::read(ws.dir().join("state.json")).unwrap(), before);
     assert!(!artifact.exists());
 }
 
@@ -2883,4 +3020,721 @@ async fn large_context_file_reaches_the_script_cut_only_with_the_flag() {
     let big = out[1].as_array().unwrap();
     assert_eq!(big[2], true, "a cut file must set truncated: {out}");
     assert!(big[1].as_u64().unwrap() < 200000, "{out}");
+}
+
+#[tokio::test]
+async fn a_save_without_an_answer_retires_the_worker_and_says_where_variables_come_from() {
+    let (_dir, app, ccx) = fixture().await;
+    run(ccx.clone(), "x = 1", false).await;
+    let ws = PythonWorkspace::for_chat(&app, "python-test")
+        .await
+        .unwrap();
+    crate::python_tool::workspace::arm_save_fault(ws.dir(), "snapshot_timeout");
+    let failed = run(ccx.clone(), "x = 2", false).await;
+    let text = failed.content.content_text_only();
+    assert!(
+        text.contains("State: not saved (Python worker gave no answer within ")
+            && text.contains("); variables come from the last successful save"),
+        "{text}"
+    );
+    let next = run(ccx.clone(), "x", false).await;
+    assert!(
+        next.content.content_text_only().contains("Result:\n1"),
+        "{:?}",
+        next.content
+    );
+    assert_eq!(next.extra["python"]["state"]["restored"], true);
+    assert!(next.extra["python"]["state"]["reset_reason"].is_null());
+}
+
+#[tokio::test]
+async fn a_large_state_names_its_largest_variables_until_it_grows_again() {
+    tokio::time::timeout(Duration::from_secs(120), async {
+        let (_dir, _app, ccx) = fixture().await;
+        let first = run(ccx.clone(), "big = 'x' * 17000000", false).await;
+        let text = first.content.content_text_only();
+        assert!(
+            text.contains("State: the session holds 17.0 MB of variables. Largest: big str[17000000] ~17.0 MB. Set variables you no longer need to None (del is not supported), or start over with restart=true."),
+            "{text}"
+        );
+        let quiet = run(ccx.clone(), "y = 1", false).await;
+        let text = quiet.content.content_text_only();
+        assert!(!text.contains("the session holds"), "{text}");
+        let grown = run(ccx.clone(), "more = 'z' * 9000000", false).await;
+        let text = grown.content.content_text_only();
+        assert!(
+            text.contains("Largest: big str[17000000] ~17.0 MB, more str[9000000] ~9.0 MB"),
+            "{text}"
+        );
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn a_session_whose_variables_cannot_be_listed_says_so_in_its_metadata() {
+    let (_dir, app, ccx) = fixture().await;
+    run(ccx.clone(), "def locals():\n    return {}", false).await;
+    let ws = PythonWorkspace::for_chat(&app, "python-test")
+        .await
+        .unwrap();
+    let meta: Value =
+        serde_json::from_slice(&std::fs::read(ws.dir().join("state.json")).unwrap()).unwrap();
+    assert_eq!(meta["variables_unknown"], true, "{meta}");
+    assert_eq!(meta["variables"], json!([]), "{meta}");
+}
+
+#[tokio::test]
+async fn optional_state_fields_are_sent_only_when_they_say_something() {
+    let (dir, _app, ccx) = fixture().await;
+    let ordinary = run(ccx.clone(), "x = 1", false).await;
+    let state = ordinary.extra["python"]["state"]
+        .as_object()
+        .unwrap()
+        .clone();
+    for key in ["not_saved", "note", "notes"] {
+        assert!(!state.contains_key(key), "{key}: {state:?}");
+    }
+    std::fs::write(
+        dir.path().join("project/.refact/coordination.yaml"),
+        "python_max_state_bytes: 1048576\n",
+    )
+    .unwrap();
+    let refused = run(ccx, "big = 'b' * 2000000", false).await;
+    let state = &refused.extra["python"]["state"];
+    assert_eq!(state["persisted"], false);
+    assert!(
+        state["not_saved"]
+            .as_str()
+            .unwrap()
+            .starts_with("not saved (state is 2.0 MB, over the limit 1.0 MB)"),
+        "{state}"
+    );
+    assert!(
+        state.get("note").is_none() && state.get("notes").is_none(),
+        "{state}"
+    );
+    assert!(!refused
+        .content
+        .content_text_only()
+        .contains("State: not persisted"));
+}
+
+#[tokio::test]
+async fn a_fork_note_reaches_the_next_run_of_the_destination_and_is_not_a_reset() {
+    let (_dir, app, ccx) = fixture().await;
+    app.chat.sessions.write().await.insert(
+        "fork-source".into(),
+        Arc::new(AMutex::new(crate::chat::types::ChatSession::new(
+            "fork-source".into(),
+        ))),
+    );
+    let source = PythonWorkspace::for_chat(&app, "fork-source")
+        .await
+        .unwrap();
+    source.ensure_dirs().await.unwrap();
+    std::fs::write(source.dir().join("state.json"), "{not json").unwrap();
+    let outcome = PythonWorkspace::fork(&app, "fork-source", "python-test")
+        .await
+        .unwrap();
+    assert_eq!(
+        outcome.summary().as_deref(),
+        Some("Python variables were not copied (missing or invalid Python state metadata).")
+    );
+    let m = run(ccx, "1", false).await;
+    let text = m.content.content_text_only();
+    assert!(
+        text.contains("State: variables were not copied from chat fork-source: missing or invalid Python state metadata"),
+        "{text}"
+    );
+    assert!(!text.contains("State: reset"), "{text}");
+    assert!(m.extra["python"]["state"]["reset_reason"].is_null());
+    assert_eq!(
+        m.extra["python"]["state"]["notes"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stop_during_the_grep_listing_keeps_the_session() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let (_dir, _app, ccx) = fixture().await;
+        let first = run(ccx.clone(), "x = 41\nPROJECT_ROOT", false).await;
+        let root = saved_result(&first.extra["python"]);
+        let pause = crate::python_tool::workspace::arm_blocking_pause(
+            std::path::Path::new(root.as_str().unwrap()),
+            "grep_listing",
+        );
+        let abort = ccx.lock().await.abort_flag.clone();
+        let stopped = tokio::spawn({
+            let ccx = ccx.clone();
+            async move { run(ccx, "grep('TODO', '.')", false).await }
+        });
+        tokio::task::spawn_blocking({
+            let abort = abort.clone();
+            move || {
+                pause.reached();
+                abort.store(true, Ordering::Release);
+                pause.release();
+            }
+        })
+        .await
+        .unwrap();
+        let stopped = stopped.await.unwrap();
+        assert_eq!(stopped.extra["python"]["status"], "cancelled");
+        abort.store(false, Ordering::Release);
+        let next = run(ccx, "x + 1", false).await;
+        let text = next.content.content_text_only();
+        assert!(text.contains("Result:\n42"), "{text}");
+        assert_eq!(next.extra["python"]["state"]["restored"], false);
+        assert!(next.extra["python"]["state"]["reset_reason"].is_null());
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn script_writes_follow_saved_child_tools_a_tool_wide_deny_rule_and_mv() {
+    let (_dir, app, ccx) = fixture().await;
+    let agent = app
+        .tool_registry
+        .acquire_tool_catalog("agent", Some("model"), None)
+        .await;
+    for (tools, writable) in [
+        (vec!["cat", "python"], false),
+        (vec!["cat", "python", "mv"], true),
+        (vec!["cat", "python", "rm"], true),
+    ] {
+        let mut config = crate::subchat::test_support::minimal_config("python-test", "parent");
+        config.tools =
+            crate::subchat::ToolsPolicy::Only(tools.iter().map(|tool| tool.to_string()).collect());
+        app.agent_executions.remember_config("saved-agent", config);
+        ccx.lock().await.background_agent_id = Some("saved-agent".into());
+        assert_eq!(
+            super::script_writes(&app, &ccx, &agent, &[], "agent", "model").await,
+            writable,
+            "{tools:?}"
+        );
+    }
+    ccx.lock().await.background_agent_id = Some("agent-without-saved-tools".into());
+    assert!(!super::script_writes(&app, &ccx, &agent, &[], "agent", "model").await);
+    ccx.lock().await.background_agent_id = None;
+    let only_mv = vec!["cat".to_string(), "python".into(), "mv".into()];
+    assert!(super::script_writes(&app, &ccx, &agent, &only_mv, "agent", "model").await);
+    let rule =
+        |pattern: &str, action: &str| crate::yaml_configs::customization_types::ToolConfirmRule {
+            match_pattern: pattern.into(),
+            action: action.into(),
+        };
+    let root = crate::files_correction::get_project_dirs(app.gcx.clone())
+        .await
+        .remove(0);
+    for (rules, writable) in [
+        (vec![rule("mv", "auto"), rule("*", "deny")], true),
+        (vec![rule("*", "deny")], false),
+    ] {
+        let mut registry =
+            crate::yaml_configs::customization_registry::get_project_registry(app.gcx.clone())
+                .await
+                .unwrap();
+        registry.modes.get_mut("agent").unwrap().tool_confirm.rules = rules;
+        app.gcx
+            .project_registry_cache
+            .write()
+            .unwrap()
+            .insert(root.clone(), registry);
+        app.gcx.tool_catalog_generations.advance_customization();
+        assert_eq!(
+            super::script_writes(&app, &ccx, &agent, &[], "agent", "model").await,
+            writable
+        );
+    }
+}
+
+#[tokio::test]
+async fn file_helpers_report_reads_and_writes_with_a_diff_and_make_no_call_records() {
+    let (dir, _app, ccx) = fixture().await;
+    let notes = dir.path().join("project/notes.txt");
+    std::fs::write(&notes, "alpha\nbeta\n").unwrap();
+    let m = run(
+        ccx,
+        "t = read('notes.txt', numbered=False)\nreplace('notes.txt', 'beta', 'gamma')\nt",
+        false,
+    )
+    .await;
+    let python = &m.extra["python"];
+    assert_eq!(python["status"], "completed", "{python}");
+    assert_eq!(saved_result(python), json!("alpha\nbeta\n"));
+    assert_eq!(std::fs::read_to_string(&notes).unwrap(), "alpha\ngamma\n");
+    let read = python["files_read"].as_array().unwrap();
+    assert!(
+        read.iter()
+            .any(|path| path.as_str().unwrap().ends_with("notes.txt")),
+        "{python}"
+    );
+    let written = python["files_written"].as_array().unwrap();
+    assert_eq!(written.len(), 1, "{python}");
+    assert!(written[0]["path"].as_str().unwrap().ends_with("notes.txt"));
+    let diff = serde_json::to_string(&written[0]["diffs"]).unwrap();
+    assert!(diff.contains("beta") && diff.contains("gamma"), "{diff}");
+    assert_eq!(python["calls"], json!([]));
+    assert_eq!(python["calls_total"], 0);
+}
+
+#[tokio::test]
+async fn audited_scenario_file_helper_ranges_context_and_replace_mismatch() {
+    let (dir, _app, ccx) = fixture().await;
+    let root = dir.path().join("project");
+    let notes = root.join("notes.txt");
+    let original = "header\nbefore\nneedle\ncafé after\ntail needle";
+    std::fs::write(&notes, original).unwrap();
+    std::fs::write(root.join("other.txt"), "needle\n").unwrap();
+
+    let m = run(
+        ccx.clone(),
+        "span = read('notes.txt', start=2, end=3)\ntail = read('notes.txt', -2, numbered=False)\nhits = grep('^needle$', 'notes.txt', context=1)\n[span, tail, hits]",
+        false,
+    )
+    .await;
+    let python = &m.extra["python"];
+    assert_eq!(python["status"], "completed", "{python}");
+    assert_eq!(
+        saved_result(python),
+        json!([
+            "   2 | before\n   3 | needle\n",
+            "café after\ntail needle",
+            "notes.txt-2- before\nnotes.txt:3: needle\nnotes.txt-4- café after"
+        ])
+    );
+
+    let m = run(
+        ccx,
+        "replace('notes.txt', 'needle', 'thread', count=1)",
+        false,
+    )
+    .await;
+    let python = &m.extra["python"];
+    assert_eq!(m.tool_failed, Some(true), "{python}");
+    assert_eq!(python["error"]["type"], "ValueError", "{python}");
+    assert!(python["error"]["message"].as_str().unwrap().starts_with(
+        "replace(): found 2 occurrences of old in notes.txt, expected 1; the file is unchanged."
+    ), "{python}");
+    assert_eq!(std::fs::read(&notes).unwrap(), original.as_bytes());
+    assert_eq!(python["files_written"], json!([]), "{python}");
+    assert_eq!(saved_result(python), Value::Null);
+    let run_dir = std::path::Path::new(python["run_dir"].as_str().unwrap());
+    let files = crate::python_tool::run_output::run_data_files(run_dir)
+        .await
+        .unwrap();
+    assert!(
+        !files
+            .iter()
+            .any(|path| path.starts_with(run_dir.join("captures"))
+                || path
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("diff-")),
+        "unexpected capture or diff: {files:?}"
+    );
+}
+
+#[tokio::test]
+async fn audited_scenario_capped_output_keeps_error_hint_and_state_notice() {
+    let (dir, _app, ccx) = fixture().await;
+    std::fs::write(
+        dir.path().join("project/.refact/coordination.yaml"),
+        "python_max_result_chars: 1000\n",
+    )
+    .unwrap();
+    let m = run(ccx, "print('y' * 50000)\nstr.maketrans('a', 'b')", true).await;
+    let python = &m.extra["python"];
+    assert_eq!(m.tool_failed, Some(true), "{python}");
+    assert_eq!(python["error"]["type"], "AttributeError", "{python}");
+    assert_eq!(python["state"]["reset_reason"], "requested restart");
+    assert_eq!(python["stdout_bytes"], 50_001);
+    let hint = "Translate with a dict: ''.join(table.get(c, c) for c in s).";
+    assert_eq!(python["error"]["hint"], hint);
+    let text = m.content.content_text_only();
+    assert!(text.chars().count() <= 1000, "{text}");
+    assert!(text.starts_with(&format!(
+        "Error: AttributeError: type object 'str' has no attribute 'maketrans'\nHint: {hint}\nState: reset (requested restart)\n\nPrinted output:\nyyy"
+    )), "{text}");
+    assert!(text.contains("more chars"), "{text}");
+}
+
+#[tokio::test]
+async fn audited_scenario_production_bindings_reject_shadowing_without_losing_state() {
+    let (_dir, _app, ccx) = fixture().await;
+    let m = run(
+        ccx.clone(),
+        "import os\nimport os.path\nimport re\nimport json as json\nimport asyncio\nfrom pathlib import Path\nkept = json.loads('41')\n[kept, os.path.basename('a/b'), re.sub('a', 'b', 'a'), Path('a/b').name]",
+        false,
+    )
+    .await;
+    assert_eq!(m.tool_failed, Some(false), "{m:?}");
+    assert_eq!(saved_result(&m.extra["python"]), json!([41, "b", "b", "b"]));
+
+    for (code, diagnostic, recovery) in [
+        (
+            "def show(value):\n    return value",
+            "line 2 defines 'show', a helper bound by this session.",
+            "Rename it (for example 'show_').",
+        ),
+        (
+            "rm = []",
+            "line 2 binds 'rm', an async function bound by this session (a tool or helper).",
+            "Rename it (for example 'rm_').",
+        ),
+        (
+            "import glob",
+            "line 2 imports glob, but glob is the file-search tool (await glob(pattern=...));",
+            "for local patterns use Path(dir).glob(...) or .rglob(...). Remove the import.",
+        ),
+    ] {
+        let m = run(ccx.clone(), &format!("print('ran')\n{code}"), false).await;
+        let python = &m.extra["python"];
+        assert_eq!(m.tool_failed, Some(true), "{code}: {python}");
+        assert_eq!(python["status"], "failed", "{code}: {python}");
+        assert_eq!(python["error"]["type"], "SyntaxError", "{code}: {python}");
+        assert_eq!(python["error"]["line"], 2, "{code}: {python}");
+        let message = python["error"]["message"].as_str().unwrap();
+        assert!(message.starts_with(diagnostic), "{code}: {message}");
+        assert!(
+            message.ends_with(&format!("{recovery} Nothing in this script ran.")),
+            "{code}: {message}"
+        );
+        assert_eq!(python["stdout_preview"], "", "{code}: {python}");
+        assert_eq!(python["stdout_bytes"], 0, "{code}: {python}");
+    }
+
+    let m = run(ccx, "kept + 1", false).await;
+    assert_eq!(m.tool_failed, Some(false), "{m:?}");
+    assert_eq!(saved_result(&m.extra["python"]), json!(42));
+    assert_eq!(m.extra["python"]["state"]["restored"], false);
+    assert!(m.extra["python"]["state"]["reset_reason"].is_null());
+}
+
+#[tokio::test]
+async fn audited_scenario_interpreter_hints_and_stringio_round_trip() {
+    let (dir, _app, ccx) = fixture().await;
+    let original = "café\nsecond line\n";
+    std::fs::write(dir.path().join("project/labels.txt"), original).unwrap();
+    for (code, exception, diagnostic, hint) in [
+        (
+            "next(item for item in ['pear'])",
+            "TypeError",
+            "'list' object is not an iterator",
+            "Generator expressions and map/filter/zip/enumerate/reversed return lists here: use next(iter(...), None) or index the list.",
+        ),
+        (
+            "re.subn('a', 'b', 'aaa')",
+            "AttributeError",
+            "module 're' has no attribute 'subn'",
+            "Use new = re.sub(p, r, s) and n = len(re.findall(p, s)).",
+        ),
+        (
+            "Path('labels.txt').read_text(encoding='utf-8')",
+            "TypeError",
+            "read_text() takes no",
+            "Files are always UTF-8 here: call p.read_text() or p.write_text(s) without encoding or errors; for undecodable data use p.read_bytes().decode('utf-8', errors='replace').",
+        ),
+    ] {
+        let m = run(ccx.clone(), code, false).await;
+        let error = &m.extra["python"]["error"];
+        assert_eq!(m.tool_failed, Some(true), "{code}: {error}");
+        assert_eq!(error["type"], exception, "{code}: {error}");
+        let message = error["message"].as_str().unwrap();
+        assert!(message.contains(diagnostic), "{code}: {message}");
+        assert_eq!(error["hint"], hint, "{code}: {error}");
+        let text = m.content.content_text_only();
+        assert!(text.starts_with(&format!("Error: {exception}: {message}\nHint: {hint}\n")), "{code}: {text}");
+    }
+
+    let m = run(
+        ccx,
+        "import io\nbuf = io.StringIO()\nbuf.write(Path('labels.txt').read_text())\nbuf.seek(0)\nbuf.read()",
+        false,
+    )
+    .await;
+    assert_eq!(m.tool_failed, Some(false), "{m:?}");
+    assert_eq!(saved_result(&m.extra["python"]), json!(original));
+}
+
+#[tokio::test]
+async fn grep_leaves_out_ignored_and_blocked_files_and_records_a_derived_zone_it_matched() {
+    let (dir, app, ccx) = fixture().await;
+    let project = dir.path().join("project/src");
+    std::fs::create_dir_all(dir.path().join("config")).unwrap();
+    std::fs::write(
+        dir.path().join("config/indexing.yaml"),
+        "blocklist:\n  - ignored\nadditional_indexing_dirs: []\n",
+    )
+    .unwrap();
+    crate::files_blocklist::reload_indexing_everywhere_now(app.gcx.clone()).await;
+    std::fs::create_dir_all(project.join("ignored")).unwrap();
+    std::fs::write(project.join("ignored/hidden.txt"), "needle ignored\n").unwrap();
+    std::fs::write(project.join("blocked.txt"), "needle blocked\n").unwrap();
+    std::fs::write(project.join("derived.txt"), "needle derived\n").unwrap();
+    let mut policy = (*app.gcx.privacy_policy_load.read().unwrap().policy).clone();
+    policy.blocked = vec![project.join("blocked.txt").to_string_lossy().into_owned()];
+    policy.zones = vec![refact_privacy::Zone {
+        name: "restricted".into(),
+        patterns: vec!["no-file-is-named-like-this".into()],
+        send_to: vec!["model".into()],
+        ..Default::default()
+    }];
+    crate::privacy::save_privacy_policy(app.gcx.clone(), policy)
+        .await
+        .unwrap();
+    let derived = ccx.lock().await.derived_privacy_zones.clone();
+    derived.write().unwrap().insert(
+        project.join("derived.txt"),
+        crate::privacy::records::DerivedZone {
+            zone: "restricted".into(),
+            origin: Some("source.txt".into()),
+        },
+    );
+    let m = run(ccx, "grep('needle', 'src', data=True)", false).await;
+    let python = &m.extra["python"];
+    assert_eq!(python["status"], "completed", "{python}");
+    let out = saved_result(python);
+    let matched: Vec<_> = out["matches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["text"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(matched, ["needle derived"], "{out}");
+    assert!(out["files_skipped"].as_u64().unwrap() >= 1, "{out}");
+    let text = m.content.content_text_only();
+    assert!(
+        !text.contains("needle blocked") && !text.contains("needle ignored"),
+        "{text}"
+    );
+    let records = m.extra["privacy"]["files"].as_array().unwrap();
+    assert!(
+        records.iter().any(
+            |record| record["path"].as_str().unwrap().ends_with("derived.txt")
+                && record["zone"] == "restricted"
+        ),
+        "{records:?}"
+    );
+}
+
+#[tokio::test]
+async fn grep_discards_results_when_the_admission_snapshot_changes() {
+    let (dir, app, ccx) = fixture().await;
+    let root = crate::files_correction::get_active_project_path(app.gcx.clone())
+        .await
+        .unwrap();
+    std::fs::write(dir.path().join("project/fixture.txt"), "apple sample\n").unwrap();
+    let pause = crate::python_tool::workspace::arm_pause(&root, "grep_scanned");
+    let (message, ()) = tokio::time::timeout(Duration::from_secs(60), async {
+        tokio::join!(
+            run(ccx, "print(grep('apple', 'fixture.txt', data=True))", false),
+            async {
+                pause.reached().await;
+                let blocked = vec!["fixture.txt".into()];
+                crate::privacy::save_privacy_policy(
+                    app.gcx.clone(),
+                    refact_privacy::PrivacyPolicy {
+                        blocked: blocked.clone(),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+                let load = app.gcx.privacy_policy_load.read().unwrap();
+                assert!(load.error.is_none(), "{:?}", load.error);
+                assert_eq!(load.policy.blocked, blocked);
+                pause.release();
+            }
+        )
+    })
+    .await
+    .unwrap();
+    let python = &message.extra["python"];
+    assert_eq!(message.tool_failed, Some(true), "{python}");
+    assert_eq!(python["status"], "failed", "{python}");
+    assert_eq!(python["error"]["type"], "RuntimeError", "{python}");
+    assert_eq!(
+        python["error"]["message"], "grep(): results unavailable",
+        "{python}"
+    );
+    assert_eq!(python["stdout_bytes"], 0, "{python}");
+    assert_eq!(saved_result(python), Value::Null, "{python}");
+    assert_eq!(python["files_read"], json!([]), "{python}");
+    assert!(
+        !message.extra.contains_key("privacy"),
+        "{:?}",
+        message.extra
+    );
+}
+
+#[tokio::test]
+async fn grep_blocks_project_relative_paths_before_reading() {
+    let (dir, app, ccx) = fixture().await;
+    let src = dir.path().join("project/src");
+    std::fs::create_dir(&src).unwrap();
+    std::fs::write(src.join("blocked.txt"), "fruit plum\n").unwrap();
+    std::fs::write(src.join("allowed.txt"), "fruit pear\n").unwrap();
+    crate::privacy::save_privacy_policy(
+        app.gcx.clone(),
+        refact_privacy::PrivacyPolicy {
+            blocked: vec!["src/blocked*.txt".into()],
+            zones: vec![refact_privacy::Zone {
+                name: "allowed-fixture".into(),
+                patterns: vec!["src/allowed.txt".into()],
+                send_to: vec!["model".into()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let explicit = run(
+        ccx.clone(),
+        "[grep('fruit', 'src/blocked.txt', data=True), grep('fruit', 'src/blocked.txt')]",
+        false,
+    )
+    .await;
+    let python = &explicit.extra["python"];
+    assert_eq!(explicit.tool_failed, Some(false), "{python}");
+    assert_eq!(
+        saved_result(python),
+        json!([
+            {"matches": [], "total": 0, "truncated": false, "files_searched": 0, "files_skipped": 1},
+            "no matches (searched 0 files)\nskipped: 1 privacy-blocked file"
+        ])
+    );
+    assert_eq!(python["files_read"], json!([]), "{python}");
+    assert!(
+        !explicit.extra.contains_key("privacy"),
+        "{:?}",
+        explicit.extra
+    );
+
+    let directory = run(ccx, "grep('fruit', 'src', data=True)", false).await;
+    let python = &directory.extra["python"];
+    assert_eq!(directory.tool_failed, Some(false), "{python}");
+    assert_eq!(
+        saved_result(python),
+        json!({
+            "matches": [{"path": "src/allowed.txt", "line": 1, "text": "fruit pear"}],
+            "total": 1, "truncated": false, "files_searched": 1, "files_skipped": 1
+        })
+    );
+    let reads = python["files_read"].as_array().unwrap();
+    assert_eq!(reads.len(), 1, "{reads:?}");
+    let read = reads[0].as_str().unwrap();
+    assert!(
+        std::path::Path::new(read).ends_with("src/allowed.txt"),
+        "{reads:?}"
+    );
+    assert_eq!(
+        directory.extra["privacy"]["files"],
+        json!([{"path": read.replace('\\', "/"), "zone": "allowed-fixture", "attribution": "observed"}])
+    );
+}
+
+fn listed(answer: Result<(Value, Arc<Snapshot>), String>) -> Value {
+    answer.unwrap().0
+}
+
+#[tokio::test]
+async fn the_grep_listing_walks_only_the_requested_folder_and_globs_before_the_privacy_partition() {
+    let (dir, app, _) = fixture().await;
+    let src = dir.path().join("project/src");
+    let extra = dir.path().join("extra");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::create_dir_all(&extra).unwrap();
+    for name in ["a.rs", "b.rs", "secret.env"] {
+        std::fs::write(src.join(name), "x").unwrap();
+    }
+    for n in 0..5 {
+        std::fs::write(extra.join(format!("{n}.rs")), "x").unwrap();
+    }
+    std::fs::create_dir_all(dir.path().join("config")).unwrap();
+    std::fs::write(
+        dir.path().join("config/indexing.yaml"),
+        format!(
+            "blocklist: []\nadditional_indexing_dirs:\n  - {}\n",
+            extra.display()
+        ),
+    )
+    .unwrap();
+    crate::files_blocklist::reload_indexing_everywhere_now(app.gcx.clone()).await;
+    let mut policy = (*app.gcx.privacy_policy_load.read().unwrap().policy).clone();
+    policy.blocked = vec![src.join("secret.env").to_string_lossy().into_owned()];
+    crate::privacy::save_privacy_policy(app.gcx.clone(), policy)
+        .await
+        .unwrap();
+    let abort = std::sync::atomic::AtomicBool::new(false);
+    let request = |glob: Option<&str>| json!([{"path": src, "max_entries": 4, "glob": glob}]);
+    let all = listed(super::grep_files(app.gcx.clone(), &request(None), &abort).await);
+    assert_eq!(
+        (
+            all["files"].as_array().unwrap().len(),
+            &all["blocked"],
+            &all["truncated"]
+        ),
+        (2, &json!(1), &json!(false)),
+        "{all}"
+    );
+    let rust = listed(super::grep_files(app.gcx.clone(), &request(Some("*.rs")), &abort).await);
+    assert_eq!(
+        (rust["files"].as_array().unwrap().len(), &rust["blocked"]),
+        (2, &json!(0)),
+        "{rust}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn the_grep_listing_leaves_out_and_counts_names_that_are_not_utf8() {
+    use std::os::unix::ffi::OsStrExt;
+    let (dir, app, _) = fixture().await;
+    let src = dir.path().join("project/src");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join(std::ffi::OsStr::from_bytes(b"caf\xe9.txt")), "x").unwrap();
+    std::fs::write(src.join("plain.txt"), "x").unwrap();
+    let abort = std::sync::atomic::AtomicBool::new(false);
+    let list = listed(
+        super::grep_files(
+            app.gcx.clone(),
+            &json!([{"path": src, "max_entries": 100}]),
+            &abort,
+        )
+        .await,
+    );
+    assert_eq!(list["unlisted"], 1, "{list}");
+    assert_eq!(list["files"].as_array().unwrap().len(), 1, "{list}");
+}
+
+#[tokio::test]
+async fn the_grep_listing_returns_at_most_twenty_thousand_files_whatever_is_asked() {
+    let (dir, app, _) = fixture().await;
+    let many = dir.path().join("project/many");
+    std::fs::create_dir_all(&many).unwrap();
+    for n in 0..20_001 {
+        std::fs::File::create(many.join(n.to_string())).unwrap();
+    }
+    let abort = std::sync::atomic::AtomicBool::new(false);
+    let list = listed(
+        super::grep_files(
+            app.gcx.clone(),
+            &json!([{"path": many, "max_entries": 1_000_000}]),
+            &abort,
+        )
+        .await,
+    );
+    assert_eq!(list["files"].as_array().unwrap().len(), 20_000);
+    assert_eq!(list["truncated"], true);
 }

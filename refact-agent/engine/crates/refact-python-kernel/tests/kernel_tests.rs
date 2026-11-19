@@ -303,6 +303,7 @@ async fn snapshot_round_trip_restores_variables() {
         .join(format!("kernel-test-{}.snapshot", std::process::id()))
         .to_string_lossy()
         .into_owned();
+    let _ = std::fs::remove_file(&path);
     c.send(KernelCommand::Snapshot {
         path: path.clone(),
     })
@@ -491,11 +492,10 @@ async fn hostfs_import_glob_append_and_reconfiguration() {
 }
 
 #[tokio::test]
-async fn snapshot_ignores_and_removes_stale_temporary_file() {
+async fn snapshot_never_replaces_an_existing_file() {
     let mut c = client().await;
-    let path = std::env::temp_dir().join(format!("stale-snapshot-{}", std::process::id()));
-    let stale = format!("{}.{}.tmp", path.display(), std::process::id());
-    std::fs::write(&stale, "stale").unwrap();
+    let path = std::env::temp_dir().join(format!("kept-snapshot-{}", std::process::id()));
+    std::fs::write(&path, "kept").unwrap();
     c.send(KernelCommand::Snapshot {
         path: path.to_string_lossy().into_owned(),
     })
@@ -503,9 +503,9 @@ async fn snapshot_ignores_and_removes_stale_temporary_file() {
     .unwrap();
     assert!(matches!(
         event(&mut c).await,
-        ClientEvent::Kernel(KernelEvent::SnapshotDone { .. })
+        ClientEvent::Kernel(KernelEvent::SnapshotFailed { .. })
     ));
-    assert!(!std::path::Path::new(&stale).exists());
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "kept");
     std::fs::remove_file(path).unwrap();
 }
 
@@ -533,15 +533,134 @@ async fn variable_names(c: &mut KernelClient) -> Vec<String> {
     items.into_iter().map(|item| item.name).collect()
 }
 #[tokio::test]
-async fn user_variable_named_asyncio_is_kept_and_listed() {
+async fn a_session_value_under_a_default_import_name_is_replaced_by_the_next_run() {
     let mut c = client().await;
-    feed(&c, "asyncio = 5", vec![]).await;
-    completed(&mut c).await;
-    feed(&c, "asyncio + 1", vec![]).await;
-    assert_eq!(completed(&mut c).await, json!(6));
-    assert!(variable_names(&mut c)
-        .await
-        .contains(&"asyncio".to_string()));
+    feed(
+        &c,
+        "exec('asyncio = 5')\nexec('json = 6')\n[asyncio, json]",
+        vec![],
+    )
+    .await;
+    assert_eq!(completed(&mut c).await, json!([5, 6]));
+    let names = variable_names(&mut c).await;
+    assert!(
+        names.contains(&"asyncio".to_string()) && names.contains(&"json".to_string()),
+        "{names:?}"
+    );
+    feed(&c, "await asyncio.sleep(0)\njson.dumps([1])", vec![]).await;
+    assert_eq!(completed(&mut c).await, json!("[1]"));
+    let names = variable_names(&mut c).await;
+    assert!(
+        !names.contains(&"asyncio".to_string()) && !names.contains(&"json".to_string()),
+        "{names:?}"
+    );
+}
+#[tokio::test]
+async fn a_saved_session_with_values_under_every_default_name_gets_the_defaults_back() {
+    let mut c = client().await;
+    feed(
+        &c,
+        "for name in ['asyncio', 'os', 're', 'json', 'Path']:\n    exec(name + ' = 0')\nkept = 6\n[asyncio, os, re, json, Path, kept]",
+        vec![],
+    )
+    .await;
+    assert_eq!(completed(&mut c).await, json!([0, 0, 0, 0, 0, 6]));
+    let path = std::env::temp_dir().join(format!(
+        "legacy-defaults-{}-{}.snapshot",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    c.send(KernelCommand::Snapshot {
+        path: path.to_string_lossy().into(),
+    })
+    .await
+    .unwrap();
+    let ClientEvent::Kernel(KernelEvent::SnapshotDone {
+        sha256, ..
+    }) = event(&mut c).await
+    else {
+        panic!("the snapshot was not written")
+    };
+    let mut c = client().await;
+    c.send(KernelCommand::LoadSnapshot {
+        max_state_bytes: 1024 * 1024 * 1024,
+        expected_sha256: sha256,
+        path: path.to_string_lossy().into(),
+    })
+    .await
+    .unwrap();
+    assert!(matches!(
+        event(&mut c).await,
+        ClientEvent::Kernel(KernelEvent::Loaded)
+    ));
+    std::fs::remove_file(&path).unwrap();
+    feed(
+        &c,
+        "await asyncio.sleep(0)\n[os.sep, re.escape('.'), json.dumps([1]), Path('a/b').name, kept]",
+        vec![],
+    )
+    .await;
+    assert_eq!(completed(&mut c).await, json!(["/", "\\.", "[1]", "b", 6]));
+    let names = variable_names(&mut c).await;
+    for name in ["asyncio", "os", "re", "json", "Path"] {
+        assert!(!names.contains(&name.to_string()), "{name}: {names:?}");
+    }
+    assert!(names.contains(&"kept".to_string()), "{names:?}");
+}
+#[tokio::test]
+async fn default_imports_are_bound_for_every_run_and_hidden() {
+    let mut c = client().await;
+    let code =
+        "await asyncio.sleep(0)\n[os.sep, re.escape('.'), json.dumps([1]), Path('a/b').name]";
+    let expected = json!(["/", "\\.", "[1]", "b"]);
+    feed(&c, code, vec![]).await;
+    assert_eq!(completed(&mut c).await, expected);
+    let names = variable_names(&mut c).await;
+    for name in ["asyncio", "os", "re", "json", "Path"] {
+        assert!(!names.contains(&name.to_string()), "{name}: {names:?}");
+    }
+    c.send(KernelCommand::Reset).await.unwrap();
+    event(&mut c).await;
+    feed(&c, code, vec![]).await;
+    assert_eq!(completed(&mut c).await, expected);
+    let path = std::env::temp_dir()
+        .join(format!("kernel-defaults-{}.snapshot", std::process::id()))
+        .to_string_lossy()
+        .into_owned();
+    let _ = std::fs::remove_file(&path);
+    c.send(KernelCommand::Snapshot {
+        path: path.clone(),
+    })
+    .await
+    .unwrap();
+    assert!(matches!(
+        event(&mut c).await,
+        ClientEvent::Kernel(KernelEvent::SnapshotDone { .. })
+    ));
+    let mut c = client().await;
+    c.send(KernelCommand::LoadSnapshot {
+        max_state_bytes: 1024 * 1024 * 1024,
+        expected_sha256: {
+            use sha2::Digest;
+            sha2::Sha256::digest(std::fs::read(&path).unwrap())
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
+        },
+        path: path.clone(),
+    })
+    .await
+    .unwrap();
+    assert!(matches!(
+        event(&mut c).await,
+        ClientEvent::Kernel(KernelEvent::Loaded)
+    ));
+    feed(&c, code, vec![]).await;
+    assert_eq!(completed(&mut c).await, expected);
+    std::fs::remove_file(path).unwrap();
 }
 #[tokio::test]
 async fn injected_asyncio_module_is_usable_and_hidden() {
@@ -708,6 +827,7 @@ fn older_call_started_and_raised_frames_still_parse() {
         kwargs: json!({}),
         line: None,
         col: None,
+        exceeded: None,
     })
     .unwrap();
     assert!(v["CallStarted"].get("line").is_none());
@@ -757,4 +877,186 @@ async fn path_objects_are_not_orderable_but_sort_with_key_str() {
         outcome(&mut c, "from pathlib import Path\n[str(min([Path('b'), Path('a')], key=str)), str(max([Path('b'), Path('a')], key=str))]").await,
         Ok(json!(["a", "b"]))
     );
+}
+
+async fn variables(c: &mut KernelClient) -> KernelEvent {
+    c.send(KernelCommand::Inspect).await.unwrap();
+    match event(c).await {
+        ClientEvent::Kernel(
+            e @ KernelEvent::Variables {
+                ..
+            },
+        ) => e,
+        other => panic!("expected variables, got {other:?}"),
+    }
+}
+#[tokio::test]
+async fn inspect_lists_a_large_session_and_estimates_its_largest_variables() {
+    let mut c = client().await;
+    feed(
+        &c,
+        "lines = ['0123456789'] * 400000\ntext = 'y' * 1000000\nsmall = 1\nconfig = {'a': [1, 2]}",
+        vec![],
+    )
+    .await;
+    completed(&mut c).await;
+    for _ in 0..2 {
+        let KernelEvent::Variables {
+            items,
+            total,
+            unknown,
+            largest,
+            previews_truncated,
+            ..
+        } = variables(&mut c).await
+        else {
+            unreachable!()
+        };
+        assert!(!unknown);
+        assert_eq!(total, Some(4));
+        let shown: Vec<(&str, &str, &str)> = items
+            .iter()
+            .map(|v| (v.name.as_str(), v.type_name.as_str(), v.preview.as_str()))
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                ("lines", "list", "list[400000]"),
+                ("text", "str", &*format!("'{}", "y".repeat(119))),
+                ("small", "int", "1"),
+                ("config", "dict", "{'a': [1, 2]}"),
+            ]
+        );
+        assert!(previews_truncated);
+        let sizes: Vec<(&str, Option<u64>, Option<u64>)> = largest
+            .iter()
+            .map(|s| (s.name.as_str(), s.len, s.approx_bytes))
+            .collect();
+        assert_eq!(
+            sizes[..2],
+            [
+                ("lines", Some(400_000), Some(64 + 400_000 * 60)),
+                ("text", Some(1_000_000), Some(1_000_000)),
+            ]
+        );
+    }
+}
+#[tokio::test]
+async fn unmeasured_variables_list_instances_first_and_are_counted_without_modules_classes_or_functions(
+) {
+    let mut c = client().await;
+    feed(
+        &c,
+        "import math, csv, random, itertools, collections\nfrom pathlib import Path\nclass Index:\n    pass\nclass Cache:\n    pass\ndef f():\n    return 1\np1 = Path('a')\np2 = Path('b')\np3 = Path('c')\np4 = Path('d')\np5 = Path('e')\nr = range(3)\ncache = Cache()\nindex = Index()\ndata = [1, 2]",
+        vec![],
+    )
+    .await;
+    completed(&mut c).await;
+    let listed = serde_json::to_value(variables(&mut c).await).unwrap();
+    let listed = &listed["Variables"];
+    let unmeasured: Vec<&str> = listed["largest"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|size| size["approx_bytes"].is_null())
+        .map(|size| size["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(unmeasured, ["cache", "index", "p1", "p2", "p3"]);
+    assert_eq!(listed["unmeasured"], json!(8));
+    assert!(listed["largest"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|size| size["name"] == "data"));
+}
+
+#[tokio::test]
+async fn the_listing_cuts_names_and_type_names_at_200_characters() {
+    let mut c = client().await;
+    let name = "v".repeat(300);
+    let class = "C".repeat(300);
+    feed(
+        &c,
+        &format!("class {class}:\n    pass\n{name} = {class}()"),
+        vec![],
+    )
+    .await;
+    completed(&mut c).await;
+    let KernelEvent::Variables {
+        items,
+        largest,
+        ..
+    } = variables(&mut c).await
+    else {
+        unreachable!()
+    };
+    let listed: Vec<(String, String)> = items
+        .iter()
+        .map(|v| (v.name.clone(), v.type_name.clone()))
+        .collect();
+    assert_eq!(
+        listed,
+        [
+            ("C".repeat(200), "type".to_string()),
+            ("v".repeat(200), "C".repeat(200)),
+        ]
+    );
+    assert!(largest
+        .iter()
+        .all(|s| s.name.chars().count() <= 200 && s.type_name.chars().count() <= 200));
+}
+
+#[tokio::test]
+async fn inspect_never_calls_a_name_or_a_method_the_script_defined() {
+    let mut c = client().await;
+    feed(
+        &c,
+        "calls = []\nclass Obj:\n    def __repr__(self):\n        calls.append('repr')\n        return 'Obj'\n    def __len__(self):\n        calls.append('__len__')\n        return 1\ndef len(x):\n    calls.append('len')\n    return 0\ndef type(x):\n    calls.append('type')\n    return int\no = Obj()\ndata = [1, 2, 3]",
+        vec![],
+    )
+    .await;
+    completed(&mut c).await;
+    let KernelEvent::Variables {
+        items,
+        unknown,
+        largest,
+        ..
+    } = variables(&mut c).await
+    else {
+        unreachable!()
+    };
+    assert!(!unknown);
+    let preview = |name: &str| {
+        items
+            .iter()
+            .find(|v| v.name == name)
+            .map(|v| v.preview.clone())
+    };
+    assert_eq!(preview("o").as_deref(), Some("<Obj>"));
+    assert_eq!(preview("data").as_deref(), Some("[1, 2, 3]"));
+    assert!(largest
+        .iter()
+        .any(|s| s.name == "o" && s.approx_bytes.is_none()));
+    feed(&c, "calls", vec![]).await;
+    assert_eq!(completed(&mut c).await, json!([]));
+    let mut c = client().await;
+    feed(
+        &c,
+        "calls = []\ndef locals():\n    calls.append('locals')\n    return {}",
+        vec![],
+    )
+    .await;
+    completed(&mut c).await;
+    let KernelEvent::Variables {
+        items,
+        unknown,
+        total,
+        ..
+    } = variables(&mut c).await
+    else {
+        unreachable!()
+    };
+    assert!(unknown && items.is_empty() && total.is_none());
+    feed(&c, "calls", vec![]).await;
+    assert_eq!(completed(&mut c).await, json!([]));
 }

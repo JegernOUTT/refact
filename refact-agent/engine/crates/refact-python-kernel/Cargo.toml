@@ -21,9 +21,15 @@ sysinfo.workspace = true
 
 chrono.workspace = true
 rand = "0.8.5"
+ruff_python_ast = "=0.0.14"
+ruff_python_parser = "=0.0.14"
+ruff_text_size = "=0.0.14"
+regex.workspace = true
+glob.workspace = true
+similar = "2.3.0"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-same-file = "1.0.6"
+winapi-util = "0.1"

@@ -198,14 +198,19 @@ fn raise(error: EngineError) -> Result<Value, Raise> {
     }
 }
 
-fn failed_envelope(message: &str) -> Value {
+pub(crate) fn failed_envelope(message: &str) -> Value {
     let message = super::mask::scrub_text(message);
     json!({"ok":false,"data":null,"text":"","files":[],"diffs":[],"images":[],"images_dropped":0,"error":message,"truncated":false})
 }
 
 /// An envelope the script can receive whole. Over the cap a read returns ok:false saying why;
 /// an applied change keeps ok:true with `data` null and `truncated` true.
-fn fit_for_script(name: &str, envelope: Value, max_bytes: usize, applied: bool) -> Value {
+pub(crate) fn fit_for_script(
+    name: &str,
+    envelope: Value,
+    max_bytes: usize,
+    applied: bool,
+) -> Value {
     use refact_python_kernel::convert::{fits_result, json_size, result_nodes_for, too_large_message};
     let size = json_size(&envelope);
     let max_bytes = max_bytes as u64;
@@ -347,29 +352,26 @@ pub(crate) fn unattended_kind(
     None
 }
 
-/// The delivery that started this turn when no person's message did. A message typed by a
-/// person carries no delivery stamp; every delivery (scheduler, webhook, agent completion, goal
-/// monitor, tool-job result) stamps `extra.delivery.source`, so any stamped message after the
-/// last typed one means the turn may have been woken by automation.
-pub(crate) fn turn_origin(messages: &[crate::call_validation::ChatMessage]) -> Option<String> {
-    let source = |m: &crate::call_validation::ChatMessage| {
-        m.extra
-            .get(refact_chat_api::DELIVERY_EXTRA_KEY)
-            .map(|stamp| {
-                stamp
-                    .get("source")
-                    .and_then(Value::as_str)
-                    .unwrap_or("an unknown delivery")
-                    .to_string()
-            })
+/// Why this run may not raise engine change cards, from the origin its chat latched when the
+/// current turn started (A2); never from the transcript.
+async fn latched_origin_refusal(d: &NestedDispatcher) -> Option<String> {
+    let c = &d.config;
+    let session = c.app.chat.sessions.read().await.get(&c.chat_id).cloned();
+    let (origin, started) = match session {
+        Some(session) => {
+            let s = session.lock().await;
+            (
+                s.turn_origin.clone(),
+                s.runtime
+                    .python_runs
+                    .iter()
+                    .find(|run| run.run_id == c.run_id)
+                    .map(|run| run.started_at_ms),
+            )
+        }
+        None => (None, None),
     };
-    let last_user = messages.iter().rposition(|m| m.role == "user");
-    if let Some(origin) = last_user.and_then(|i| source(&messages[i])) {
-        return Some(origin);
-    }
-    messages[last_user.map_or(0, |i| i + 1)..]
-        .iter()
-        .find_map(source)
+    refact_chat_history::history_gates::engine_change_origin_refusal(origin.as_ref(), started)
 }
 
 /// Masked copy of call arguments for every record, file, hook payload and approval request.
@@ -406,8 +408,69 @@ pub(crate) fn unmask_rewrite(rewritten: &mut Value, sent: &Value, original: &Val
     }
 }
 
-fn masked_preview(args: &Value) -> String {
-    crate::python_tool::approvals::args_preview(&masked(args).to_string(), 1000, 200)
+/// Privacy records a preview added to the run (P1): taken out of the run's taint so that they
+/// travel once, with this call's records, whatever happens to the call afterwards.
+fn taint_since(
+    run: &std::sync::Mutex<crate::python_tool::llm::RunPrivacy>,
+    start: usize,
+) -> Vec<Value> {
+    let mut run = run.lock().unwrap_or_else(|e| e.into_inner());
+    if run.taint.len() > start {
+        run.taint.split_off(start)
+    } else {
+        Vec::new()
+    }
+}
+
+/// Functions whose approval card shows message text of another chat (P2): the call summary, the
+/// call file and the stored change items keep their labels, counts and flags, never that text.
+fn card_shows_other_chat_text(name: &str) -> bool {
+    matches!(
+        name,
+        "chats.patch"
+            | "chats.edit_message"
+            | "chats.remove_message"
+            | "chats.retry_from"
+            | "chats.cancel_queued"
+    )
+}
+
+/// The arguments the call file keeps (P2): a `chats.patch` `find` fragment is text of the other
+/// chat, so only its size is stored.
+fn stored_kwargs(name: &str, args: &Value) -> Value {
+    let mut kwargs = masked(args);
+    if name == "chats.patch" {
+        for op in kwargs["ops"].as_array_mut().into_iter().flatten() {
+            if let Some(bytes) = op.get("find").and_then(Value::as_str).map(str::len) {
+                op["find"] = json!(format!("({bytes} bytes, shown on the approval card only)"));
+            }
+        }
+    }
+    kwargs
+}
+
+fn without_card_text(
+    items: &[refact_chat_api::PythonEngineItem],
+) -> Vec<refact_chat_api::PythonEngineItem> {
+    let keep = |value: &Option<Value>| {
+        value.as_ref().map(|value| match value {
+            Value::Null | Value::Bool(_) | Value::Number(_) => value.clone(),
+            other => json!(format!(
+                "({} bytes, shown on the approval card only)",
+                serde_json::to_vec(other).map_or(0, |bytes| bytes.len())
+            )),
+        })
+    };
+    items
+        .iter()
+        .map(|item| refact_chat_api::PythonEngineItem {
+            label: item.label.clone(),
+            old: keep(&item.old),
+            new: keep(&item.new),
+            truncated: false,
+            label_is_name: item.label_is_name,
+        })
+        .collect()
 }
 
 /// How a change ended after its handler started.
@@ -423,7 +486,7 @@ impl NestedDispatcher {
         &self,
         seq: u32,
         kwargs: Value,
-        truncated: bool,
+        too_large: Option<String>,
         site: (Option<u32>, Option<u32>),
     ) -> NestedOutcome {
         let c = &self.config;
@@ -440,7 +503,11 @@ impl NestedDispatcher {
             seq,
             call_id: format!("py_{}_{}", c.run_id, seq),
             tool: format!("engine.{name}"),
-            args_preview: masked_preview(&args),
+            args_preview: crate::python_tool::approvals::args_preview(
+                &stored_kwargs(&name, &args).to_string(),
+                1000,
+                200,
+            ),
             status: PythonCallStatus::Running,
             summary: String::new(),
             started_at_ms: crate::agents::approval::now_ms(),
@@ -454,8 +521,7 @@ impl NestedDispatcher {
             tokens_out: None,
         };
         c.sink.call_started(&record);
-        let mut log =
-            json!({"seq":seq,"call_id":record.call_id,"tool":record.tool,"kwargs":masked(&args)});
+        let mut log = json!({"seq":seq,"call_id":record.call_id,"tool":record.tool,"kwargs":stored_kwargs(&name, &args)});
         let mut privacy = Vec::new();
         let awaiting = std::sync::atomic::AtomicBool::new(false);
         let handler_started = std::sync::atomic::AtomicBool::new(false);
@@ -463,7 +529,7 @@ impl NestedDispatcher {
             let inner = self.engine_inner(
                 &name,
                 args,
-                truncated,
+                too_large.as_deref(),
                 &mut record,
                 &mut log,
                 &mut privacy,
@@ -566,7 +632,7 @@ impl NestedDispatcher {
         &self,
         name: &str,
         args: Value,
-        truncated: bool,
+        too_large: Option<&str>,
         record: &mut PythonCallRecord,
         log: &mut Value,
         privacy: &mut Vec<Value>,
@@ -609,8 +675,12 @@ impl NestedDispatcher {
             }
             Err(("PermissionError", message, false))
         };
-        if truncated {
-            return Err(("TypeError", "engine() arguments too large".into(), false));
+        if let Some(size) = too_large {
+            return Err((
+                "TypeError",
+                format!("engine() arguments are too large to send: {size}; pass smaller values"),
+                false,
+            ));
         }
         let schema = (function.input)();
         let mut args = crate::python_tool::dispatcher::normalize_optional_nulls(&schema, &args);
@@ -630,9 +700,8 @@ impl NestedDispatcher {
             if let Some(refusal) = auto_commands_refusal(&ctx.settings, &thread, name) {
                 return refused(refusal, record);
             }
-            let messages = c.ccx.lock().await.messages.clone();
-            if let Some(origin) = turn_origin(&messages) {
-                return refused(format!("engine changes run only in a turn a person started; this turn was started by {origin}; {name} was not run"), record);
+            if let Some(reason) = latched_origin_refusal(self).await {
+                return refused(format!("engine changes run only in a turn a person started; {reason}; {name} was not run"), record);
             }
         }
         let tool = format!("engine.{name}");
@@ -641,8 +710,12 @@ impl NestedDispatcher {
                 unmask_rewrite(&mut rewritten, &masked(&args), &args);
                 validate(&schema, &rewritten)?;
                 args = rewritten;
-                record.args_preview = masked_preview(&args);
-                log["kwargs"] = masked(&args);
+                record.args_preview = crate::python_tool::approvals::args_preview(
+                    &stored_kwargs(name, &args).to_string(),
+                    1000,
+                    200,
+                );
+                log["kwargs"] = stored_kwargs(name, &args);
             }
             Ok(None) => {}
             Err((_, message, _)) => return refused(message, record),
@@ -676,7 +749,10 @@ impl NestedDispatcher {
                 }
             },
         };
-        let mut preview = match self.engine_preview(function, &ctx, &args).await {
+        let taint_before = c.run_privacy.lock().unwrap().taint.len();
+        let previewed = self.engine_preview(function, &ctx, &args).await;
+        privacy.extend(taint_since(&c.run_privacy, taint_before));
+        let mut preview = match previewed {
             Ok(preview) => preview,
             Err((exc, message, stopped)) => {
                 record.approval = PythonCallApproval::Denied;
@@ -721,7 +797,15 @@ impl NestedDispatcher {
                 return Err(("RuntimeError", "python run stopped".into(), true));
             }
         }
-        log["preview"] = json!(request(name, &preview));
+        let audit = card_shows_other_chat_text(name).then(|| Preview {
+            title: preview.title.clone(),
+            items: without_card_text(&preview.items),
+            scope: preview.scope.clone(),
+            class: preview.class,
+            warning: preview.warning.clone(),
+            plan: super::Plan::default(),
+        });
+        log["preview"] = json!(request(name, audit.as_ref().unwrap_or(&preview)));
         let _apply = if runs_without_apply_lock(name) {
             None
         } else {
@@ -744,8 +828,31 @@ impl NestedDispatcher {
                 "internal error: {name} did not apply the approved plan; whether it changed anything is unknown"
             )));
         }
+        let stopped = result
+            .as_ref()
+            .ok()
+            .and_then(|output| output.stopped.as_ref())
+            .map(|stopped| stopped.applied.clone());
+        if stopped.as_ref().is_some_and(Vec::is_empty) {
+            applied = Applied::No;
+        }
         if !matches!(applied, Applied::No) {
-            self.record_change(name, record, &preview, &applied, &state);
+            let shown = audit.as_ref().unwrap_or(&preview);
+            let part = stopped.map(|items| Preview {
+                title: shown.title.clone(),
+                items,
+                scope: shown.scope.clone(),
+                class: shown.class,
+                warning: shown.warning.clone(),
+                plan: super::Plan::default(),
+            });
+            self.record_change(
+                name,
+                record,
+                part.as_ref().unwrap_or(shown),
+                &applied,
+                &state,
+            );
         }
         if let Some(reason) = hook_denied {
             let message = format!(
@@ -759,11 +866,12 @@ impl NestedDispatcher {
             Err(error) => return raise(error),
         };
         let envelope = self.finish_output(output, record, privacy);
+        let ok = envelope["ok"] == true;
         Ok(fit_for_script(
             name,
             envelope,
             c.max_nested_result_bytes,
-            true,
+            ok,
         ))
     }
 
@@ -795,11 +903,15 @@ impl NestedDispatcher {
     ) -> Value {
         super::mask::scrub(&mut output.data);
         let text = super::mask::scrub_text(&output.text);
+        let error = output
+            .stopped
+            .as_ref()
+            .map(|stopped| super::mask::scrub_text(&stopped.error));
         if record.summary.is_empty() {
-            record.summary = summary_preview(&text);
+            record.summary = summary_preview(error.as_deref().unwrap_or(&text));
         }
         privacy.extend(output.privacy);
-        json!({"ok":true,"data":output.data,"text":text,"files":[],"diffs":[],"images":[],"images_dropped":0,"error":null,"truncated":false})
+        json!({"ok":error.is_none(),"data":output.data,"text":text,"files":[],"diffs":[],"images":[],"images_dropped":0,"error":error,"truncated":false})
     }
 
     fn record_change(
@@ -876,6 +988,7 @@ impl NestedDispatcher {
             },
             plan: std::sync::Mutex::new(None),
             run: c.engine.clone(),
+            completing: std::sync::Mutex::new(None),
         })
     }
 
@@ -885,22 +998,7 @@ impl NestedDispatcher {
         args: &Value,
         call_id: &str,
     ) -> Result<Option<Value>, Raise> {
-        let c = &self.config;
-        let mut payload = HookPayload::new(
-            &HookEvent::PreToolUse,
-            c.chat_id.clone(),
-            get_project_dir_string(c.app.clone()).await,
-        )
-        .with_tool(tool, Some(masked(args)));
-        payload
-            .extra
-            .insert("python_run_id".into(), json!(c.run_id));
-        payload.extra.insert(
-            "python_parent_tool_call_id".into(),
-            json!(c.outer_tool_call_id),
-        );
-        payload.extra.insert("tool_call_id".into(), json!(call_id));
-        match run_control_hooks(c.app.clone(), HookEvent::PreToolUse, payload).await {
+        match self.pre_tool_use(tool, masked(args), call_id).await {
             ControlVerdict::Allow => Ok(None),
             ControlVerdict::Deny(reason) => Err(("PermissionError", reason, false)),
             ControlVerdict::Rewrite(value) if value.is_object() => Ok(Some(value)),
@@ -912,21 +1010,18 @@ impl NestedDispatcher {
         }
     }
 
-    /// Mode `tool_confirm` rules matching `engine.<name>`: deny refuses; `auto` never skips a change's ask.
-    async fn engine_deny_rule(&self, tool: &str) -> Option<String> {
+    /// Mode `tool_confirm` rules matching `tool` (`engine.<name>`, `git`): deny refuses; `auto`
+    /// never skips a change's ask.
+    pub(crate) async fn engine_deny_rule(&self, tool: &str) -> Option<String> {
         let c = &self.config;
-        let mode_id =
-            crate::yaml_configs::customization_registry::map_legacy_mode_to_id(&c.mode_id);
-        let mode = crate::yaml_configs::customization_registry::get_mode_config(
-            c.app.gcx.clone(),
-            mode_id,
+        let rules = crate::tools::tool_python::mode_confirm_rules(
+            &c.app,
+            &c.mode_id,
             c.model_id.as_deref(),
         )
-        .await?;
-        let action = crate::yaml_configs::customization_registry::match_tool_confirm_action(
-            &mode.tool_confirm.rules,
-            tool,
-        )?;
+        .await;
+        let action =
+            crate::yaml_configs::customization_registry::match_tool_confirm_action(&rules, tool)?;
         (action == "deny").then(|| format!("mode policy: deny ({tool})"))
     }
 
@@ -1133,14 +1228,24 @@ async fn run_handler(
             ))),
             true,
         ),
-        Err(_) => (
-            Err(EngineError::Failed(format!(
-                "{} timed out after {} s",
-                function.name,
-                timeout.as_secs_f64()
-            ))),
-            true,
-        ),
+        Err(_) => {
+            let completing = ctx
+                .completing
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take();
+            (
+                Err(EngineError::Failed(format!(
+                    "{} timed out after {} s{}",
+                    function.name,
+                    timeout.as_secs_f64(),
+                    completing
+                        .map(|note| format!("; {note}"))
+                        .unwrap_or_default()
+                ))),
+                true,
+            )
+        }
     }
 }
 

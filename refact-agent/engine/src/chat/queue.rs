@@ -36,6 +36,8 @@ use crate::worktrees::types::{WorktreeMeta, WorktreeReference};
 
 #[path = "command_handlers.rs"]
 mod command_handlers;
+#[cfg(test)]
+pub(crate) use command_handlers::latch_turn_origin;
 
 pub fn worktree_activation_message(worktree: &WorktreeMeta) -> ChatMessage {
     let branch = worktree.branch.as_deref().unwrap_or("unknown");
@@ -221,6 +223,7 @@ pub(crate) fn prepare_guarded_command(
                 | ChatCommand::SubmitQuestionResponse { .. }
                 | ChatCommand::UpdateMessage { .. }
                 | ChatCommand::RemoveMessage { .. }
+                | ChatCommand::PatchMessages { .. }
         )
     {
         crate::buddy::supervision_authority::invalidate_chat(&session.chat_id)?;
@@ -1951,10 +1954,33 @@ async fn select_next_command(session_arc: &Arc<AMutex<ChatSession>>) -> Option<S
         (cmd, None)
     };
 
+    if command.is_some() {
+        session.commands_taken += 1;
+    }
     Some(SelectedCommand {
         command,
         waiter,
     })
+}
+
+/// Test barrier in the gap after the processor took a command and before its handler runs.
+#[cfg(test)]
+pub(crate) static COMMAND_TAKEN_GATE: std::sync::Mutex<
+    Option<(String, Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
+> = std::sync::Mutex::new(None);
+
+#[cfg(test)]
+async fn command_taken_gate(session_arc: &Arc<AMutex<ChatSession>>) {
+    let chat_id = session_arc.lock().await.chat_id.clone();
+    let gate = COMMAND_TAKEN_GATE
+        .lock()
+        .unwrap()
+        .clone()
+        .filter(|(id, _, _)| *id == chat_id);
+    if let Some((_, entered, resume)) = gate {
+        entered.notify_one();
+        resume.notified().await;
+    }
 }
 
 async fn process_command_queue_inner(
@@ -1962,20 +1988,21 @@ async fn process_command_queue_inner(
     session_arc: Arc<AMutex<ChatSession>>,
     processor_running: Arc<AtomicBool>,
 ) {
-    struct ProcessorGuard {
+    struct ProcessorGuard<'a> {
         app: AppState,
         processor_running: Arc<AtomicBool>,
-        session_arc: Arc<AMutex<ChatSession>>,
+        session_arc: &'a Arc<AMutex<ChatSession>>,
     }
 
-    impl Drop for ProcessorGuard {
+    impl Drop for ProcessorGuard<'_> {
         fn drop(&mut self) {
             let app = self.app.clone();
             let processor_running = self.processor_running.clone();
-            let session_arc = self.session_arc.clone();
+            let session_arc = Arc::clone(self.session_arc);
             tokio::spawn(async move {
                 let restart = {
-                    let session = session_arc.lock().await;
+                    let mut session = session_arc.lock().await;
+                    session.commands_taken = 0;
                     session
                         .queue_processor_counters
                         .processor_exits
@@ -1994,7 +2021,7 @@ async fn process_command_queue_inner(
     let _guard = ProcessorGuard {
         app: app.clone(),
         processor_running,
-        session_arc: session_arc.clone(),
+        session_arc: &session_arc,
     };
 
     {
@@ -2037,10 +2064,13 @@ async fn process_command_queue_inner(
         let Some(request) = command else {
             continue;
         };
+        #[cfg(test)]
+        command_taken_gate(&session_arc).await;
 
         {
             let mut session = session_arc.lock().await;
             if let Err(error) = prepare_guarded_command(&mut session, &request) {
+                session.commands_taken = session.commands_taken.saturating_sub(1);
                 reject_guard(&mut session, &request.client_request_id, error);
                 continue;
             }
@@ -2055,6 +2085,7 @@ async fn process_command_queue_inner(
         checkpoint_changed_error_artifacts(&app, &session_arc, error_artifacts).await;
         {
             let mut session = session_arc.lock().await;
+            session.commands_taken = session.commands_taken.saturating_sub(1);
             let mut queued_ids: std::collections::HashSet<_> = session
                 .command_queue
                 .iter()
@@ -2157,6 +2188,16 @@ fn hidden_role_extra(msg: &ChatMessage) -> serde_json::Map<String, serde_json::V
             .as_object()
             .unwrap()
             .clone()
+    } else if msg.role == "user" {
+        msg.extra
+            .get(refact_chat_api::DELIVERY_EXTRA_KEY)
+            .map(|stamp| {
+                serde_json::Map::from_iter([(
+                    refact_chat_api::DELIVERY_EXTRA_KEY.to_string(),
+                    stamp.clone(),
+                )])
+            })
+            .unwrap_or_default()
     } else {
         serde_json::Map::new()
     }
@@ -3108,6 +3149,30 @@ mod tests {
             assert_eq!(copy.extra, error.extra);
             assert_ne!(copy.message_id, error.message_id);
         }
+    }
+
+    /// A3, T15: a user message a script wrote keeps its delivery stamp through a branch, a fork
+    /// and a restore, so its text stays literal in the copy; other extras are still dropped.
+    #[test]
+    fn copies_of_a_user_message_keep_its_delivery_stamp() {
+        let mut user = ChatMessage::new("user".into(), "see @web https://x.example".into());
+        user.extra.insert(
+            refact_chat_api::DELIVERY_EXTRA_KEY.into(),
+            json!({"id":"d1","source":"engine.chats.send","push":"when_idle","at_ms":1}),
+        );
+        user.extra.insert("transient".into(), json!(true));
+        for copy in [
+            sanitize_message_for_branch(&user),
+            sanitize_message_for_restore(&user),
+        ] {
+            assert_eq!(
+                copy.extra[refact_chat_api::DELIVERY_EXTRA_KEY]["source"],
+                "engine.chats.send"
+            );
+            assert!(!copy.extra.contains_key("transient"));
+        }
+        let typed = ChatMessage::new("user".into(), "typed".into());
+        assert!(sanitize_message_for_branch(&typed).extra.is_empty());
     }
 
     #[test]

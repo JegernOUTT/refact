@@ -659,7 +659,10 @@ export function useAllChatsSubscription() {
               streamedBytesRef.current.delete(chatId);
               pendingBytesRef.current.delete(chatId);
             }
-            if (envelope.type === "process_completed") {
+            if (
+              envelope.type === "process_completed" &&
+              envelope.mode !== "foreground"
+            ) {
               dispatch(processCompleted(envelope));
             }
             dispatch(applyChatEvent(envelope));

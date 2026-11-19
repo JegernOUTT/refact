@@ -119,6 +119,7 @@ pub struct JobEvent {
 pub enum Submission {
     Inline(JobResult),
     Accepted(JobReceipt),
+    Interrupted,
 }
 
 /// Delivery candidate without the native payload; landing loads it through its checked path.
@@ -132,6 +133,7 @@ pub struct TerminalRef {
 enum Owner {
     Undecided,
     Inline,
+    Interrupted,
     Background,
     InternalReadiness,
 }
@@ -150,6 +152,15 @@ struct Record {
     released: bool,
     finished: u64,
     claiming: bool,
+}
+
+impl Record {
+    fn request_cancel(&mut self) {
+        if !self.status.terminal() && self.status != JobStatus::CancelRequested {
+            self.cancel.store(true, Ordering::Release);
+            self.status = JobStatus::CancelRequested;
+        }
+    }
 }
 
 struct State {
@@ -179,6 +190,24 @@ pub struct JobRuntime {
 struct ForegroundClaim {
     runtime: std::sync::Weak<JobRuntime>,
     job_id: String,
+    execution_abort: Option<Arc<AtomicBool>>,
+}
+
+impl ForegroundClaim {
+    fn cancel_if_interrupted(&self, record: &mut Record) -> bool {
+        if record.owner != Owner::Undecided
+            || !self
+                .execution_abort
+                .as_ref()
+                .is_some_and(|abort| abort.load(Ordering::SeqCst))
+        {
+            return false;
+        }
+        record.owner = Owner::Interrupted;
+        record.consumed = true;
+        record.request_cancel();
+        true
+    }
 }
 
 impl Drop for ForegroundClaim {
@@ -187,7 +216,7 @@ impl Drop for ForegroundClaim {
             let mut state = runtime.state.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(record) = state.records.get_mut(&self.job_id) {
                 record.claiming = false;
-                if record.owner == Owner::Undecided {
+                if record.owner == Owner::Undecided && !self.cancel_if_interrupted(record) {
                     record.owner = Owner::Background;
                     if record.status.terminal() {
                         let _ = runtime.events.send(JobRuntime::event(record));
@@ -435,7 +464,7 @@ impl JobRuntime {
             .unwrap_or(Some(budget));
         #[cfg(not(test))]
         let budget = Some(budget);
-        self.submit_owned(binding, budget, false, false, None, make)
+        self.submit_owned(binding, budget, false, false, None, None, make)
             .await
     }
 
@@ -445,6 +474,7 @@ impl JobRuntime {
         budget: Duration,
         abort: Arc<AtomicBool>,
         shutdown: Arc<AtomicBool>,
+        execution_abort: Option<Arc<AtomicBool>>,
         make: Make,
     ) -> Result<Submission, String>
     where
@@ -459,8 +489,16 @@ impl JobRuntime {
             .unwrap_or(Some(budget));
         #[cfg(not(test))]
         let budget = Some(budget);
-        self.submit_owned(binding, budget, false, false, Some((abort, shutdown)), make)
-            .await
+        self.submit_owned(
+            binding,
+            budget,
+            false,
+            false,
+            Some((abort, shutdown)),
+            execution_abort,
+            make,
+        )
+        .await
     }
 
     pub(crate) async fn submit_unbounded_with_abort<F, Make>(
@@ -474,8 +512,16 @@ impl JobRuntime {
         F: Future<Output = (JobStatus, JobResult)> + Send + 'static,
         Make: FnOnce(Arc<AtomicBool>) -> F,
     {
-        self.submit_owned(binding, None, false, true, Some((abort, shutdown)), make)
-            .await
+        self.submit_owned(
+            binding,
+            None,
+            false,
+            true,
+            Some((abort, shutdown)),
+            None,
+            make,
+        )
+        .await
     }
 
     #[cfg(test)]
@@ -489,11 +535,11 @@ impl JobRuntime {
         Make: FnOnce(Arc<AtomicBool>) -> F,
     {
         match self
-            .submit_owned(binding, None, false, false, None, make)
+            .submit_owned(binding, None, false, false, None, None, make)
             .await?
         {
             Submission::Accepted(receipt) => Ok(receipt),
-            Submission::Inline(_) => unreachable!("background submission never claims inline"),
+            Submission::Inline(_) | Submission::Interrupted => unreachable!(),
         }
     }
 
@@ -507,11 +553,11 @@ impl JobRuntime {
         Make: FnOnce(Arc<AtomicBool>) -> F,
     {
         match self
-            .submit_owned(binding, None, true, false, None, make)
+            .submit_owned(binding, None, true, false, None, None, make)
             .await?
         {
             Submission::Accepted(receipt) => Ok(receipt),
-            Submission::Inline(_) => unreachable!(),
+            Submission::Inline(_) | Submission::Interrupted => unreachable!(),
         }
     }
 
@@ -567,6 +613,7 @@ impl JobRuntime {
         internal_readiness: bool,
         wait_until_terminal: bool,
         abort: Option<(Arc<AtomicBool>, Arc<AtomicBool>)>,
+        execution_abort: Option<Arc<AtomicBool>>,
         make: Make,
     ) -> Result<Submission, String>
     where
@@ -713,9 +760,10 @@ impl JobRuntime {
             state.records.get_mut(&job_id).expect("inserted job").task = Some(task);
         }
         drop(transition);
-        let _claim = ForegroundClaim {
+        let claim = ForegroundClaim {
             runtime: Arc::downgrade(self),
             job_id: job_id.clone(),
+            execution_abort,
         };
         let completed_inline = match budget {
             Some(budget) => tokio::time::timeout(budget, &mut rx).await.is_ok(),
@@ -738,28 +786,24 @@ impl JobRuntime {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let record = state.records.get_mut(&job_id).ok_or("job ownership lost")?;
         record.claiming = false;
-        // Completion may race timeout. Claim under the same mutex used by completion.
-        let inline = match record.result.clone() {
-            Some(result) if completed_inline => {
-                record.owner = Owner::Inline;
-                record.consumed = true;
-                Some(result)
+        // A timeout is not a detach until this ownership decision.
+        let submission = if claim.cancel_if_interrupted(record) {
+            Submission::Interrupted
+        } else if let Some(result) = record.result.as_ref().filter(|_| completed_inline) {
+            record.owner = Owner::Inline;
+            record.consumed = true;
+            Submission::Inline(result.clone())
+        } else {
+            if !internal_readiness {
+                record.owner = Owner::Background;
             }
-            _ => {
-                if !internal_readiness {
-                    record.owner = Owner::Background;
-                }
-                if record.status.terminal() && record.owner == Owner::Background {
-                    let _ = self.events.send(Self::event(record));
-                }
-                None
+            if record.status.terminal() && record.owner == Owner::Background {
+                let _ = self.events.send(Self::event(record));
             }
+            Submission::Accepted(receipt)
         };
         self.enforce_retention(&mut state);
-        Ok(match inline {
-            Some(result) => Submission::Inline(result),
-            None => Submission::Accepted(receipt),
-        })
+        Ok(submission)
     }
 
     #[cfg(test)]
@@ -885,10 +929,7 @@ impl JobRuntime {
         if record.receipt.binding.chat_id != chat_id {
             return None;
         }
-        if !record.status.terminal() && record.status != JobStatus::CancelRequested {
-            record.cancel.store(true, Ordering::Release);
-            record.status = JobStatus::CancelRequested;
-        }
+        record.request_cancel();
         Some(record.status)
     }
 
@@ -1002,6 +1043,7 @@ mod tests {
             Duration::ZERO,
             abort.clone(),
             Arc::new(AtomicBool::new(false)),
+            None,
             |_| async {
                 panic!("aborted admission must not execute");
             },
@@ -1028,6 +1070,7 @@ mod tests {
             Duration::ZERO,
             abort.clone(),
             Arc::new(AtomicBool::new(false)),
+            None,
             |_| async move {
                 released.await.unwrap();
                 (JobStatus::Succeeded, result())
@@ -1048,6 +1091,135 @@ mod tests {
         assert!(runtime.background_terminal_refs().is_empty());
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn interrupted_attached_observer_cancels_without_background_delivery() {
+        for (opt_in, interrupted) in [(true, true), (true, false), (false, true)] {
+            let runtime = JobRuntime::new(4, 65536);
+            let execution_abort = Arc::new(AtomicBool::new(false));
+            let (release, released) = oneshot::channel();
+            let mut events = runtime.subscribe();
+            let mut pending = Box::pin(runtime.submit_with_abort(
+                binding(),
+                Duration::from_secs(60),
+                Arc::new(AtomicBool::new(false)),
+                Arc::new(AtomicBool::new(false)),
+                opt_in.then(|| execution_abort.clone()),
+                |cancel| async move {
+                    released.await.unwrap();
+                    let status = if cancel.load(Ordering::Acquire) {
+                        JobStatus::Cancelled
+                    } else {
+                        JobStatus::Succeeded
+                    };
+                    (status, result())
+                },
+            ));
+            assert!(futures::poll!(&mut pending).is_pending());
+            let jobs = runtime.list(Some("chat"));
+            let [(running, _)] = jobs.as_slice() else {
+                panic!("expected exactly one admitted job");
+            };
+            assert_eq!(running.status, JobStatus::Running);
+            let id = &running.receipt.job_id;
+
+            execution_abort.store(interrupted, Ordering::SeqCst);
+            drop(pending);
+            let cancelled = opt_in && interrupted;
+            assert_eq!(
+                runtime.get("chat", id).unwrap().status,
+                if cancelled {
+                    JobStatus::CancelRequested
+                } else {
+                    JobStatus::Running
+                },
+            );
+            release.send(()).unwrap();
+            let terminal = runtime.wait_terminal("chat", id).await.unwrap();
+            assert_eq!(
+                terminal.status,
+                if cancelled {
+                    JobStatus::Cancelled
+                } else {
+                    JobStatus::Succeeded
+                },
+            );
+            assert_eq!(terminal.result.unwrap().messages.len(), 1);
+            let refs = runtime.background_terminal_refs();
+            if cancelled {
+                assert!(refs.is_empty());
+            } else {
+                assert_eq!(refs.len(), 1);
+                assert_eq!(&refs[0].receipt.job_id, id);
+                assert_eq!(&events.try_recv().unwrap().job_id, id);
+            }
+            assert!(matches!(
+                events.try_recv(),
+                Err(broadcast::error::TryRecvError::Empty)
+            ));
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn interruption_before_timeout_handoff_is_not_a_detach() {
+        for interrupt_before_handoff in [true, false] {
+            let runtime = JobRuntime::new(4, 65536);
+            let execution_abort = Arc::new(AtomicBool::new(false));
+            let (release, released) = oneshot::channel();
+            let budget = Duration::from_secs(60);
+            let mut pending = Box::pin(runtime.submit_with_abort(
+                binding(),
+                budget,
+                Arc::new(AtomicBool::new(false)),
+                Arc::new(AtomicBool::new(false)),
+                Some(execution_abort.clone()),
+                |cancel| async move {
+                    released.await.unwrap();
+                    let status = if cancel.load(Ordering::Acquire) {
+                        JobStatus::Cancelled
+                    } else {
+                        JobStatus::Succeeded
+                    };
+                    (status, result())
+                },
+            ));
+            assert!(futures::poll!(&mut pending).is_pending());
+            let jobs = runtime.list(Some("chat"));
+            let [(running, _)] = jobs.as_slice() else {
+                panic!("expected exactly one admitted job");
+            };
+            let id = &running.receipt.job_id;
+
+            let transition = runtime.transition.lock().await;
+            tokio::time::advance(budget).await;
+            assert!(futures::poll!(&mut pending).is_pending());
+            if interrupt_before_handoff {
+                execution_abort.store(true, Ordering::SeqCst);
+            }
+            drop(transition);
+            let submission = pending.await.unwrap();
+            let expected = if interrupt_before_handoff {
+                assert!(matches!(submission, Submission::Interrupted));
+                JobStatus::Cancelled
+            } else {
+                let Submission::Accepted(receipt) = submission else {
+                    panic!("timeout should detach an uninterrupted invocation");
+                };
+                assert_eq!(&receipt.job_id, id);
+                execution_abort.store(true, Ordering::SeqCst);
+                JobStatus::Succeeded
+            };
+            release.send(()).unwrap();
+            assert_eq!(
+                runtime.wait_terminal("chat", id).await.unwrap().status,
+                expected
+            );
+            assert_eq!(
+                runtime.background_terminal_refs().len(),
+                usize::from(!interrupt_before_handoff)
+            );
+        }
+    }
+
     #[tokio::test]
     async fn fence_cancellation_unwinds_nested_admission_without_deadlock() {
         let runtime = JobRuntime::new(4, 65536);
@@ -1064,6 +1236,7 @@ mod tests {
                         Duration::ZERO,
                         outer_cancel,
                         Arc::new(AtomicBool::new(false)),
+                        None,
                         |_| async {
                             panic!("cancelled nested admission must not execute");
                         },

@@ -36,6 +36,27 @@ fn companion_command_allowed(command: &ChatCommand) -> bool {
     crate::buddy::companion::command_allowed(command)
 }
 
+/// Latches who starts the turn this command starts (A2); whether a turn may raise engine change
+/// cards is decided from this latch, never from the transcript.
+pub(crate) fn latch_turn_origin(session: &mut ChatSession, request: &CommandRequest) {
+    let source = session.messages.iter().rev().find_map(|message| {
+        message
+            .extra
+            .get(refact_chat_api::DELIVERY_EXTRA_KEY)?
+            .get("source")?
+            .as_str()
+    });
+    if let Some(origin) = refact_chat_history::history_gates::turn_origin_of(
+        &request.client_request_id,
+        &request.command,
+        session.turn_origin.as_ref(),
+        source,
+        crate::agents::approval::now_ms(),
+    ) {
+        session.turn_origin = Some(origin);
+    }
+}
+
 #[cfg(test)]
 mod companion_command_gate_tests {
     use super::*;
@@ -76,6 +97,7 @@ pub(super) async fn handle_queue_command(
             reject_guard(&mut session, &request.client_request_id, "Companion conversations cannot change execution settings or restore another session".into());
             return QueueCommandOutcome::Continue;
         }
+        latch_turn_origin(&mut session, &request);
     }
     let board_operation = if matches!(
         &request.command,
@@ -495,6 +517,9 @@ pub(super) async fn handle_queue_command(
             message_id,
             regenerate,
         } => Box::pin(handle_remove_message(&context, message_id, regenerate)).await,
+        ChatCommand::PatchMessages {
+            patch,
+        } => Box::pin(handle_patch_messages(&context, patch)).await,
         ChatCommand::Regenerate {} => Box::pin(handle_regenerate(&context)).await,
         ChatCommand::RestoreMessages {
             messages,
@@ -765,12 +790,24 @@ async fn handle_retry_from_index(
     session.recovery_budget = None;
     session.truncate_messages(index);
     let parsed_content = parse_content_with_attachments(&content, &attachments);
-    let user_message = ChatMessage {
+    let mut user_message = ChatMessage {
         message_id: Uuid::new_v4().to_string(),
         role: "user".to_string(),
         content: parsed_content,
         ..Default::default()
     };
+    if context
+        .request_id
+        .starts_with(refact_chat_history::history_gates::ENGINE_REQUEST_PREFIX)
+    {
+        let delivery = PendingDelivery::new(
+            vec![user_message.clone()],
+            PushMode::WhenIdle,
+            "engine.chats.retry_from",
+            false,
+        );
+        user_message = delivery.stamp_messages().pop().unwrap_or(user_message);
+    }
     session.add_message(user_message);
     note_user_turn_resets_goal_pursuit(&mut session);
     drop(session);
@@ -1348,6 +1385,21 @@ async fn handle_update_message(
     {
         let mut updated_msg = session.messages[idx].clone();
         updated_msg.content = parsed_content;
+        if context
+            .request_id
+            .starts_with(refact_chat_history::history_gates::ENGINE_REQUEST_PREFIX)
+        {
+            let delivery = PendingDelivery::with_id(
+                refact_core::chat_types::delivery_id_of_message(&updated_msg)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| Uuid::new_v4().to_string()),
+                vec![updated_msg.clone()],
+                PushMode::WhenIdle,
+                "engine.chats.edit_message",
+                false,
+            );
+            updated_msg = delivery.stamp_messages().pop().unwrap_or(updated_msg);
+        }
         session.update_message(&message_id, updated_msg);
         if regenerate && idx + 1 < session.messages.len() {
             session.truncate_messages(idx + 1);
@@ -1400,6 +1452,32 @@ async fn handle_remove_message(
             start_generation(app.clone(), session_arc.clone()).await;
         }
     }
+    QueueCommandOutcome::Finished
+}
+
+/// A patch `chat.patch` queued, applied now that the turn that queued it has ended; a refusal is
+/// shown in the chat, since the script that queued it has finished.
+async fn handle_patch_messages(
+    context: &QueueCommandContext,
+    patch: refact_chat_api::QueuedPatch,
+) -> QueueCommandOutcome {
+    {
+        let mut session = context.session_arc.lock().await;
+        if let Err(reason) =
+            crate::python_tool::engine_fns::apply_queued_patch(&mut session, &patch)
+        {
+            let error = format!("chat.patch was not applied: {reason}");
+            session.append_error_message_deduped(&error);
+            reject_guard(&mut session, &context.request_id, error);
+            return QueueCommandOutcome::Continue;
+        }
+    }
+    maybe_save_trajectory_with_intent(
+        context.app.clone(),
+        context.session_arc.clone(),
+        TrajectoryCommitIntent::Required,
+    )
+    .await;
     QueueCommandOutcome::Finished
 }
 
@@ -1776,11 +1854,15 @@ async fn handle_branch_from_chat(
         TrajectoryCommitIntent::Required,
     )
     .await;
-    if let Err(error) =
-        crate::python_tool::workspace::PythonWorkspace::fork(&app, &source_chat_id, &before.id)
-            .await
+    match crate::python_tool::workspace::PythonWorkspace::fork(&app, &source_chat_id, &before.id)
+        .await
     {
-        warn!("Python workspace branch failed: {error}");
+        Ok(outcome) => {
+            if let Some(summary) = outcome.summary() {
+                warn!("Python workspace branch: {summary}");
+            }
+        }
+        Err(error) => warn!("Python workspace branch failed: {error}"),
     }
     QueueCommandOutcome::Finished
 }

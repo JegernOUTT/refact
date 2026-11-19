@@ -82,19 +82,34 @@ fn workspace(root: &std::path::Path, id: &str) -> PythonWorkspace {
         root.join("config/python_state.key"),
     )
 }
-async fn snapshot(ws: &PythonWorkspace) {
+async fn snapshot(ws: &PythonWorkspace) -> std::path::PathBuf {
+    record(ws, vec![], false).await
+}
+async fn record(
+    ws: &PythonWorkspace,
+    taint: Vec<serde_json::Value>,
+    variables_truncated: bool,
+) -> std::path::PathBuf {
     ws.ensure_dirs().await.unwrap();
-    fs::write(ws.state_path(), b"trusted dump").await.unwrap();
+    let generation = ws.new_generation_path();
+    fs::write(&generation, b"trusted dump").await.unwrap();
     ws.record_snapshot(
-        format!("{:x}", Sha256::digest(b"trusted dump")),
-        12,
-        "run".into(),
-        vec![],
-        vec![],
+        NewState {
+            generation: generation.clone(),
+            sha256: format!("{:x}", Sha256::digest(b"trusted dump")),
+            bytes: 12,
+            last_run_id: "run".into(),
+            taint,
+            variables: vec![],
+            variables_truncated,
+            variables_total: None,
+            variables_unknown: false,
+        },
         1024,
     )
     .await
     .unwrap();
+    generation
 }
 #[test]
 fn workspace_dir_is_inside_chat_trajectory_folder() {
@@ -129,10 +144,8 @@ async fn state_meta_round_trip_with_valid_hmac() {
 async fn tampered_state_is_rejected_with_reset_reason() {
     let temp = tempfile::tempdir().unwrap();
     let ws = workspace(temp.path(), "chat");
-    snapshot(&ws).await;
-    fs::write(ws.state_path(), b"malicious bytes")
-        .await
-        .unwrap();
+    let generation = snapshot(&ws).await;
+    fs::write(generation, b"malicious bytes").await.unwrap();
     assert!(ws
         .verify_state()
         .await
@@ -144,10 +157,15 @@ async fn tampered_state_is_rejected_with_reset_reason() {
 async fn state_for_other_chat_id_is_rejected() {
     let temp = tempfile::tempdir().unwrap();
     let ws = workspace(temp.path(), "chat");
-    snapshot(&ws).await;
+    let generation = snapshot(&ws).await;
     let other = workspace(temp.path(), "other");
     other.ensure_dirs().await.unwrap();
-    fs::copy(ws.state_path(), other.state_path()).await.unwrap();
+    fs::copy(
+        &generation,
+        other.dir().join(generation.file_name().unwrap()),
+    )
+    .await
+    .unwrap();
     fs::copy(ws.dir().join("state.json"), other.dir().join("state.json"))
         .await
         .unwrap();
@@ -162,14 +180,34 @@ async fn state_for_other_chat_id_is_rejected() {
 async fn oversized_state_is_not_persisted() {
     let temp = tempfile::tempdir().unwrap();
     let ws = workspace(temp.path(), "chat");
-    snapshot(&ws).await;
+    let saved = snapshot(&ws).await;
+    let generation = ws.new_generation_path();
+    fs::write(&generation, b"trusted dump").await.unwrap();
     let out = ws
-        .record_snapshot("unused".into(), 12, "run".into(), vec![], vec![], 1)
+        .record_snapshot(
+            NewState {
+                generation: generation.clone(),
+                sha256: "unused".into(),
+                bytes: 12,
+                last_run_id: "run".into(),
+                taint: vec![],
+                variables: vec![],
+                variables_truncated: false,
+                variables_total: None,
+                variables_unknown: false,
+            },
+            1,
+        )
         .await
         .unwrap();
     assert!(!out.persisted);
-    assert!(!ws.state_path().exists());
-    assert!(ws.read_state_meta().await.is_none());
+    assert!(!generation.exists());
+    assert!(saved.exists());
+    assert_eq!(
+        ws.read_state_meta().await.unwrap().generation,
+        saved.file_name().unwrap().to_string_lossy()
+    );
+    assert!(ws.verify_state().await.is_ok());
 }
 #[tokio::test]
 async fn clear_state_keeps_artifacts_and_runs() {
@@ -221,7 +259,7 @@ async fn delete_for_chat_removes_workspace() {
 async fn quota_prunes_oldest_runs_but_keeps_state_and_artifacts() {
     let temp = tempfile::tempdir().unwrap();
     let ws = workspace(temp.path(), "chat");
-    snapshot(&ws).await;
+    let generation = snapshot(&ws).await;
     fs::write(ws.artifacts_dir().join("a"), b"artifact")
         .await
         .unwrap();
@@ -252,7 +290,7 @@ async fn quota_prunes_oldest_runs_but_keeps_state_and_artifacts() {
         .unwrap();
     assert!(!ws.run_dir("old").exists());
     assert!(ws.run_dir("new").exists());
-    assert!(ws.state_path().exists());
+    assert!(generation.exists());
     assert!(ws.artifacts_dir().join("a").exists());
 }
 #[test]
@@ -444,20 +482,10 @@ async fn quota_discovers_only_owned_storage_roots() {
 async fn fork_carries_signed_taint_and_remaps_artifact_ledger() {
     let temp = tempfile::tempdir().unwrap();
     let src = workspace(temp.path(), "src");
-    snapshot(&src).await;
     let taint = vec![
         serde_json::json!({"files":[{"path":"secret","zone":"blocked","attribution":"observed"}]}),
     ];
-    src.record_snapshot(
-        format!("{:x}", Sha256::digest(b"trusted dump")),
-        12,
-        "run".into(),
-        vec![],
-        taint.clone(),
-        1024,
-    )
-    .await
-    .unwrap();
+    record(&src, taint.clone(), false).await;
     let artifact = src.artifacts_dir().join("a");
     fs::write(&artifact, "derived").await.unwrap();
     // DerivedZone's wire representation is the persisted ledger contract.
@@ -488,8 +516,7 @@ async fn fork_carries_signed_taint_and_remaps_artifact_ledger() {
 async fn variable_truncation_metadata_survives_persistence() {
     let temp = tempfile::tempdir().unwrap();
     let ws = workspace(temp.path(), "chat");
-    snapshot(&ws).await;
-    ws.set_variables_truncated(true).await.unwrap();
+    record(&ws, vec![], true).await;
     assert!(ws.read_state_meta().await.unwrap().variables_truncated);
     assert!(ws.verify_state().await.is_ok());
 }
@@ -628,4 +655,42 @@ async fn quota_and_failed_guard_work_under_a_symlinked_ancestor() {
         false,
     ));
     assert!(!temp.path().join("victim/run.json").exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_fork_of_a_busy_source_leaves_out_artifacts_the_run_has_not_labelled_yet() {
+    let temp = tempfile::tempdir().unwrap();
+    let real = temp.path().join("real");
+    std::fs::create_dir_all(&real).unwrap();
+    std::os::unix::fs::symlink(&real, temp.path().join("alias")).unwrap();
+    let src = workspace(&temp.path().join("alias"), "src");
+    std::fs::create_dir_all(src.artifacts_dir()).unwrap();
+    std::fs::create_dir_all(src.runs_dir()).unwrap();
+    let canonical = std::fs::canonicalize(src.artifacts_dir()).unwrap();
+    assert_ne!(canonical, src.artifacts_dir());
+    let old = src.artifacts_dir().join("old.txt");
+    std::fs::write(&old, "written before the run").unwrap();
+    filetime::set_file_mtime(&old, filetime::FileTime::from_unix_time(1, 0)).unwrap();
+    let _busy = ActiveRunPath::new(src.run_dir("busy"));
+    std::fs::write(src.artifacts_dir().join("new.txt"), "written by the run").unwrap();
+    std::fs::write(src.artifacts_dir().join("labelled.txt"), "labelled").unwrap();
+    let ledger = serde_json::json!([[canonical.join("labelled.txt"), {"zone":"blocked", "origin":"secret"}]]);
+    std::fs::write(src.dir().join("privacy_ledger.json"), ledger.to_string()).unwrap();
+    let dst = workspace(temp.path(), "dst");
+    let outcome = src.fork_to(&dst).await.unwrap();
+    assert_eq!(outcome.artifacts_skipped, 1);
+    assert!(dst.artifacts_dir().join("old.txt").exists());
+    assert!(dst.artifacts_dir().join("labelled.txt").exists());
+    assert!(!dst.artifacts_dir().join("new.txt").exists());
+    let copied: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dst.dir().join("privacy_ledger.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        copied[0][0],
+        dst.artifacts_dir()
+            .join("labelled.txt")
+            .to_string_lossy()
+            .as_ref()
+    );
 }

@@ -77,6 +77,7 @@ import {
 } from "./scriptDisplayHelpers";
 import { EngineChangesContext, engineChangeCount } from "./engineChanges";
 import { EngineChangesSection } from "./EngineChangesSection";
+import { ReadOnlyChip } from "./ReadOnlyChip";
 import { ShikiCodeBlock } from "../../Markdown";
 import { selectChatWorkspaceRoots } from "./pythonRoots";
 import {
@@ -95,6 +96,7 @@ import {
   sessionSummary,
   splitCodeLines,
   splitDisplayPath,
+  stateLines,
   type ScriptChange,
   type WorkspaceRoots,
 } from "./pythonDisplay";
@@ -302,6 +304,7 @@ export function PythonTool({
     (run && run.status !== "finished" ? run.started_at_ms : undefined);
   const background = extra?.background ?? run?.background ?? receipt !== null;
   const live = busy || receiptPending;
+  const readOnly = extra?.read_only === true;
   const engineChanges = extra?.engine_changes;
   const engineCount = engineChangeCount(
     engineChanges,
@@ -395,8 +398,9 @@ export function PythonTool({
       statusLabel={transcriptStatus === "done" ? undefined : statusLabel}
       rowClassName={styles.scriptRow}
       quickAction={
-        busy || open ? (
+        busy || open || readOnly ? (
           <>
+            {readOnly && <ReadOnlyChip />}
             {busy && (
               <Button
                 leftIcon={Square}
@@ -559,13 +563,18 @@ function StateLine({
         {limitSentence(extra)}
       </p>
     );
-  if (extra.error)
+  if (extra.error) {
+    const hint = extra.error.hint?.trim();
     return (
-      <p className={styles.stateDanger} role={announce ? "alert" : undefined}>
-        <span className={styles.errorType}>{extra.error.type}</span>
-        {extra.error.message && `: ${extra.error.message}`}
-      </p>
+      <div className={styles.errorState} role={announce ? "alert" : undefined}>
+        <p className={styles.stateDanger}>
+          <span className={styles.errorType}>{extra.error.type}</span>
+          {extra.error.message && `: ${extra.error.message}`}
+        </p>
+        {hint && <p className={styles.stateHint}>{hint}</p>}
+      </div>
     );
+  }
   if (extra.status === "timed_out")
     return (
       <p className={styles.stateDanger} role={announce ? "alert" : undefined}>
@@ -573,6 +582,20 @@ function StateLine({
       </p>
     );
   return null;
+}
+
+function StateNotes({ extra }: { extra: PythonRunExtra }) {
+  const { notSaved, notes } = stateLines(extra);
+  return (
+    <>
+      {notSaved && <p className={styles.stateWarning}>{notSaved}</p>}
+      {notes.map((note, index) => (
+        <p key={index} className={styles.stateMuted}>
+          {note}
+        </p>
+      ))}
+    </>
+  );
 }
 
 type BodyProps = {
@@ -667,6 +690,7 @@ function ScriptBody({
           backgroundLive={backgroundLive}
           announce={announce}
         />
+        {extra && <StateNotes extra={extra} />}
         {code.trim() ? (
           <ScriptCodeView
             code={code}

@@ -155,15 +155,44 @@ describe("engine value rules", () => {
   it("computes real line hunks for a text pair", () => {
     const before = Array.from({ length: 40 }, (_, i) => `line ${i}`).join("\n");
     const after = before.replace("line 20", "line twenty");
-    const hunks = textPairHunks("prompt", before, after);
-    expect(hunks).toHaveLength(1);
-    expect(hunks[0].lines_remove).toBe(
-      "line 18\nline 19\nline 20\nline 21\nline 22\n",
-    );
-    expect(hunks[0].lines_add).toBe(
-      "line 18\nline 19\nline twenty\nline 21\nline 22\n",
-    );
-    expect(hunks[0].line1).toBe(19);
+    expect(textPairHunks("prompt", before, after)).toEqual([
+      {
+        file_name: "prompt",
+        file_action: "edit",
+        line1: 21,
+        line2: 21,
+        lines_remove: "line 20\n",
+        lines_add: "line twenty\n",
+        lines_before: "line 19\n",
+        lines_after: "line 21\n",
+      },
+    ]);
+  });
+  it("splits a hunk into one chunk per change, each unchanged line shown once", () => {
+    const chunks = (before: string[], after: string[]) =>
+      textPairHunks("message", before.join("\n"), after.join("\n")).map(
+        (hunk) => [
+          hunk.line1,
+          hunk.line2,
+          hunk.lines_before,
+          hunk.lines_remove,
+          hunk.lines_add,
+          hunk.lines_after,
+        ],
+      );
+    expect(
+      chunks(["a", "b", "c", "d", "e"], ["a", "B", "c", "d", "E"]),
+    ).toEqual([
+      [2, 2, "a\n", "b\n", "B\n", "c\n"],
+      [5, 5, "d\n", "e\n", "E\n", null],
+    ]);
+    expect(chunks(["a", "b", "c"], ["A", "b", "C"])).toEqual([
+      [1, 1, null, "a\n", "A\n", "b\n"],
+      [3, 3, null, "c\n", "C\n", null],
+    ]);
+    expect(chunks(["a", "b"], ["a", "x", "b"])).toEqual([
+      [2, 2, "a\n", "", "x\n", "b\n"],
+    ]);
   });
   it("shows invisible format characters in values as markers", () => {
     expect(engineValueView("a\u202Eb", "new").text).toBe('"a⟨U+202E⟩b"');

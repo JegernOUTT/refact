@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 pub use refact_core::chat_types::PushMode;
 
-const SHORT_DESC_MAX_LEN: usize = 80;
+pub const SHORT_DESC_MAX_LEN: usize = 80;
 pub const DEFAULT_EXEC_OUTPUT_LIMIT_BYTES: usize = 512 * 1024;
 pub const EXEC_ENV_DEFAULTS: &[(&str, &str)] = &[
     ("NO_COLOR", "1"),

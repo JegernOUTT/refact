@@ -86,8 +86,14 @@ pub async fn run_at_commands_locally(
 
         info!("msg {} user_posted {:?} which is {} tokens, that leaves {} tokens for context of this message", idx + user_msg_starts, crate::nicer_logs::first_n_chars(&content, 50), content_n_tokens, context_limit);
 
+        let written_by_script = msg
+            .extra
+            .get(refact_chat_api::DELIVERY_EXTRA_KEY)
+            .and_then(|stamp| stamp.get("source"))
+            .and_then(|source| source.as_str())
+            .is_some_and(|source| source.starts_with("engine."));
         let mut messages_exec_output = vec![];
-        if content.contains("@") {
+        if content.contains("@") && !written_by_script {
             let (res, _) = execute_at_commands_in_query(ccx.clone(), &mut content).await;
             messages_exec_output.extend(res);
         }
@@ -332,4 +338,117 @@ pub fn parse_words_from_line(line: &String) -> Vec<(String, usize, usize)> {
         }
     }
     results
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::at_commands::at_commands::{AtCommand, AtParam};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct Probe {
+        params: Vec<Box<dyn AtParam>>,
+        runs: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl AtCommand for Probe {
+        fn params(&self) -> &Vec<Box<dyn AtParam>> {
+            &self.params
+        }
+        async fn at_execute(
+            &self,
+            _ccx: Arc<AMutex<AtCommandsContext>>,
+            _cmd: &mut AtCommandMember,
+            _args: &mut Vec<AtCommandMember>,
+        ) -> Result<(Vec<ContextEnum>, String), String> {
+            self.runs.fetch_add(1, Ordering::SeqCst);
+            Ok((Vec::new(), "expanded".to_string()))
+        }
+    }
+
+    #[tokio::test]
+    async fn at_commands_run_for_typed_text_and_never_for_text_a_script_wrote() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let mut ccx = AtCommandsContext::new(
+            gcx,
+            8192,
+            1,
+            false,
+            vec![],
+            "at-literal".into(),
+            None,
+            String::new(),
+            None,
+            None,
+        )
+        .await;
+        let runs = Arc::new(AtomicUsize::new(0));
+        ccx.at_commands.insert(
+            "@probe".into(),
+            Arc::new(Probe {
+                params: Vec::new(),
+                runs: runs.clone(),
+            }),
+        );
+        let ccx = Arc::new(AMutex::new(ccx));
+        let text = "look @probe here";
+        let user = || ChatMessage::new("user".into(), text.into());
+        let last_text =
+            |messages: &[ChatMessage]| messages.last().unwrap().content.content_text_only();
+        let (out, _) = run_at_commands_locally(
+            ccx.clone(),
+            None,
+            1024,
+            vec![user()],
+            &mut HasRagResults::new(),
+        )
+        .await;
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+        assert_eq!(last_text(&out), "look expanded");
+        for source in [
+            "engine.chats.patch",
+            "engine.chats.send",
+            "engine.chat.send",
+            "engine.chats.create",
+            "engine.chats.edit_message",
+            "engine.chats.retry_from",
+        ] {
+            let delivery = refact_chat_api::PendingDelivery::new(
+                vec![user()],
+                refact_chat_api::PushMode::WhenIdle,
+                source,
+                true,
+            );
+            let (out, _) = run_at_commands_locally(
+                ccx.clone(),
+                None,
+                1024,
+                delivery.stamp_messages(),
+                &mut HasRagResults::new(),
+            )
+            .await;
+            assert_eq!(runs.load(Ordering::SeqCst), 1, "{source}");
+            assert_eq!(last_text(&out), text, "{source}");
+        }
+        let delivery = refact_chat_api::PendingDelivery::new(
+            vec![user()],
+            refact_chat_api::PushMode::WhenIdle,
+            "scheduler.cron",
+            true,
+        );
+        run_at_commands_locally(
+            ccx.clone(),
+            None,
+            1024,
+            delivery.stamp_messages(),
+            &mut HasRagResults::new(),
+        )
+        .await;
+        assert_eq!(
+            runs.load(Ordering::SeqCst),
+            2,
+            "other deliveries keep running at commands"
+        );
+    }
 }

@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use serde::{Deserialize, Serialize};
@@ -47,6 +47,9 @@ pub struct SessionView {
     pub variables_truncated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub variables_total: Option<u64>,
+    /// The variables could not be listed; an empty list then says nothing.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub variables_unknown: bool,
     pub last_run_restored: bool,
 }
 #[derive(Debug, Serialize, Deserialize)]
@@ -82,6 +85,9 @@ pub struct RunView {
     /// Applied engine changes; omitted when zero.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub engine_changes: Option<u64>,
+    /// Scripts of this run could write only under ARTIFACTS_DIR; omitted otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub read_only: Option<bool>,
 }
 #[derive(Debug, Default, Serialize)]
 pub struct DiskView {
@@ -137,24 +143,53 @@ pub async fn workspace_view(app: &AppState, chat_id: &str) -> Result<WorkspaceVi
     .map_err(|e| e.to_string())
 }
 
-fn real_path(path: &Path) -> bool {
-    path.ancestors().all(|p| {
-        std::fs::symlink_metadata(p)
-            .map(|m| !m.file_type().is_symlink())
-            .unwrap_or(false)
-    })
+struct Storage {
+    root: PathBuf,
+    real: PathBuf,
 }
-fn read_json(path: &Path) -> Option<Value> {
-    read_json_bounded(path, 4 * 1024 * 1024)
+impl Storage {
+    fn resolve(workspace: &PythonWorkspace) -> Option<Self> {
+        let root = workspace.storage_root();
+        let real = std::fs::canonicalize(&root).ok()?;
+        Some(Self {
+            root,
+            real,
+        })
+    }
+    /// The path below the checked storage base that `path`, as the workspace spells it, stands
+    /// for; every component below the base is checked not to be a link. Reads use this path, so
+    /// a storage alias changed after the check is never followed.
+    fn real(&self, path: &Path) -> Option<PathBuf> {
+        let relative = path.strip_prefix(&self.root).ok()?;
+        let mut current = self.real.clone();
+        for component in relative.components() {
+            let std::path::Component::Normal(part) = component else {
+                return None;
+            };
+            current.push(part);
+            let metadata = std::fs::symlink_metadata(&current).ok()?;
+            if metadata.file_type().is_symlink() || super::run_output::is_reparse_point(&metadata) {
+                return None;
+            }
+        }
+        Some(current)
+    }
 }
-fn read_json_bounded(path: &Path, limit: u64) -> Option<Value> {
+fn read_json(storage: &Storage, path: &Path) -> Option<Value> {
+    read_json_bounded(storage, path, 4 * 1024 * 1024)
+}
+fn read_json_bounded(storage: &Storage, path: &Path, limit: u64) -> Option<Value> {
+    read_json_file(&storage.real(path)?, limit)
+}
+/// Reads a file found below the checked base; a link there is not a file and is not read.
+fn read_json_file(real: &Path, limit: u64) -> Option<Value> {
     use std::io::Read;
-    let metadata = std::fs::symlink_metadata(path).ok()?;
-    if !real_path(path) || !metadata.is_file() || metadata.len() > limit {
+    let metadata = std::fs::symlink_metadata(real).ok()?;
+    if !metadata.is_file() || metadata.len() > limit {
         return None;
     }
     let mut bytes = Vec::new();
-    std::fs::File::open(path)
+    std::fs::File::open(real)
         .ok()?
         .take(limit + 1)
         .read_to_end(&mut bytes)
@@ -187,7 +222,29 @@ fn collect(
     status: SessionStatus,
     active: &[String],
 ) -> WorkspaceView {
-    let exists = real_path(workspace.dir()) && workspace.dir().is_dir();
+    collect_in(
+        Storage::resolve(workspace),
+        workspace,
+        chat_id,
+        quota,
+        status,
+        active,
+    )
+}
+/// Every read, listing and walk goes through `storage`, the base checked once.
+fn collect_in(
+    storage: Option<Storage>,
+    workspace: &PythonWorkspace,
+    chat_id: &str,
+    quota: u64,
+    status: SessionStatus,
+    active: &[String],
+) -> WorkspaceView {
+    let real_dir = storage
+        .as_ref()
+        .and_then(|storage| storage.real(workspace.dir()))
+        .filter(|dir| dir.is_dir());
+    let exists = real_dir.is_some();
     let mut view = WorkspaceView {
         schema: 1,
         chat_id: chat_id.into(),
@@ -206,9 +263,9 @@ fn collect(
         displays_truncated: false,
         disk: DiskView::default(),
     };
-    if !exists {
+    let (Some(storage), Some(real_dir)) = (storage, real_dir) else {
         return view;
-    }
+    };
     view.disk.quota_bytes = quota;
     view.session.live = status.live;
     view.session.status = if status.background {
@@ -219,11 +276,12 @@ fn collect(
         "idle"
     }
     .into();
-    if let Some(meta) = read_json(&workspace.dir().join("state.json")) {
+    if let Some(meta) = read_json(&storage, &workspace.dir().join("state.json")) {
         view.session.state_persisted = true;
         view.session.state_bytes = meta["bytes"].as_u64().unwrap_or_default();
         view.session.saved_at_ms = meta["saved_at_ms"].as_u64();
         view.session.last_run_id = meta["last_run_id"].as_str().map(str::to_owned);
+        view.session.variables_unknown = meta["variables_unknown"] == true;
 
         if let Some(vars) = meta["variables"].as_array() {
             view.session.variables_truncated =
@@ -239,26 +297,28 @@ fn collect(
         }
     }
     let artifacts = workspace.artifacts_dir();
-    let mut pending = vec![(workspace.dir().to_owned(), 0usize)];
+    let mut pending = vec![(workspace.dir().to_owned(), real_dir, 0usize)];
     let mut visited = 0usize;
-    while let Some((path, depth)) = pending.pop() {
+    while let Some((path, real, depth)) = pending.pop() {
         visited += 1;
         if visited > 10000 || depth > 16 {
             view.artifacts_truncated = true;
             view.runs_truncated = true;
             continue;
         }
-        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+        let Ok(meta) = std::fs::symlink_metadata(&real) else {
             continue;
         };
         if meta.is_dir() {
-            for child in children(&path) {
+            for child in children(&real) {
                 if pending.len() + visited >= 10000 {
                     view.artifacts_truncated = true;
                     view.runs_truncated = true;
                     break;
                 }
-                pending.push((child, depth + 1));
+                if let Some(name) = child.file_name() {
+                    pending.push((path.join(name), child.clone(), depth + 1));
+                }
             }
         } else if meta.is_file() {
             view.disk.workspace_bytes = view.disk.workspace_bytes.saturating_add(meta.len());
@@ -279,11 +339,11 @@ fn collect(
     });
     view.artifacts_truncated |= view.artifacts.len() > 500;
     view.artifacts.truncate(500);
-    if real_path(&workspace.runs_dir()) {
+    if let Some(runs_dir) = storage.real(&workspace.runs_dir()) {
         // Select using directory metadata, before opening any run.json. At
         // most 500 bounded metadata payloads are decoded per view request.
         let mut directories = std::collections::BinaryHeap::new();
-        if let Ok(entries) = std::fs::read_dir(workspace.runs_dir()) {
+        if let Ok(entries) = std::fs::read_dir(&runs_dir) {
             for entry in entries.filter_map(Result::ok) {
                 let Ok(meta) = std::fs::symlink_metadata(entry.path()) else {
                     continue;
@@ -306,8 +366,8 @@ fn collect(
                 continue;
             }
             let run_id = path.file_name().unwrap().to_string_lossy().to_string();
-            let data = read_json_bounded(&path.join(super::workspace::RUN_SUMMARY_FILE), 64 * 1024)
-                .or_else(|| read_json_bounded(&path.join("run.json"), 64 * 1024));
+            let data = read_json_file(&path.join(super::workspace::RUN_SUMMARY_FILE), 64 * 1024)
+                .or_else(|| read_json_file(&path.join("run.json"), 64 * 1024));
             let valid = data.as_ref().filter(|d| d["status"].is_string());
             view.runs.push(RunView {
                 status: valid
@@ -344,6 +404,9 @@ fn collect(
                 engine_changes: valid
                     .and_then(|d| d["engine_changes_total"].as_u64())
                     .filter(|n| *n > 0),
+                read_only: valid
+                    .and_then(|d| d["read_only"].as_bool())
+                    .filter(|read_only| *read_only),
                 run_id,
             });
         }
@@ -355,20 +418,20 @@ fn collect(
     });
     view.runs_truncated |= view.runs.len() > 500;
     view.runs.truncate(500);
-    collect_displays(workspace, &mut view);
+    collect_displays(workspace, &storage, &mut view);
     view
 }
 
 const WORKSPACE_DISPLAYS: usize = 8;
 const DISPLAY_FILE_LIMIT: u64 = 16 * 1024 * 1024;
 
-fn collect_displays(workspace: &PythonWorkspace, view: &mut WorkspaceView) {
+fn collect_displays(workspace: &PythonWorkspace, storage: &Storage, view: &mut WorkspaceView) {
     for run in &view.runs {
         let dir = workspace.run_dir(&run.run_id).join("displays");
-        if !real_path(&dir) {
+        let Some(real_dir) = storage.real(&dir) else {
             continue;
-        }
-        let mut files: Vec<(u32, std::path::PathBuf)> = children(&dir)
+        };
+        let mut files: Vec<(u32, std::path::PathBuf)> = children(&real_dir)
             .into_iter()
             .filter_map(|path| {
                 let index = path.file_stem()?.to_str()?.parse::<u32>().ok()?;
@@ -377,10 +440,13 @@ fn collect_displays(workspace: &PythonWorkspace, view: &mut WorkspaceView) {
             .collect();
         files.sort_by(|a, b| b.0.cmp(&a.0));
         for (index, path) in files {
-            let Some((stored, display)) = read_json_bounded(&path, DISPLAY_FILE_LIMIT)
+            let Some((stored, display)) = read_json_file(&path, DISPLAY_FILE_LIMIT)
                 .as_ref()
                 .and_then(super::display::from_file)
             else {
+                continue;
+            };
+            let Some(path) = path.file_name().map(|name| dir.join(name)) else {
                 continue;
             };
             if stored != index {

@@ -135,7 +135,7 @@ impl Tool for ToolSubagent {
                     "task": {"type": "string", "description": "Focused instructions for the background subagent."},
                     "expected_result": {"type": "string", "description": "Concrete outcome the subagent should deliver."},
                     "target_files": {"type": "array", "items": {"type": "string"}, "description": "Optional declared edit targets, used as collision hints. This is declared intent, not an enforced sandbox: it only restricts built-in mutations when the run's scope guard is strict."},
-                    "tools": {"type": "string", "description": "Optional comma-separated tool allowlist that narrows inherited authority. Omit or leave empty to inherit all parent-chat tools. Task wording such as 'read-only' does not restrict tools. For read-only research, explicitly list only required read tools (e.g. cat, tree, glob, search_pattern); omit shell and process tools when command execution is not intended. Exclude subagent and review when nested delegation is not intended. The child coordination toolset is always added."},
+                    "tools": {"type": "string", "description": "Optional comma-separated tool allowlist that narrows inherited authority. Omit or leave empty to inherit all parent-chat tools. Task wording such as 'read-only' does not restrict tools. For read-only research, explicitly list only required read tools (e.g. cat, tree, glob, search_pattern, python; python scripts can also read files outside the project, and scripts of a child without file-editing, mv, rm, shell or process_start tools can write files only under its ARTIFACTS_DIR); omit shell and process tools when command execution is not intended. Exclude subagent and review when nested delegation is not intended. The child coordination toolset is always added."},
                     "model_type": {"type": "string", "enum": MODEL_TYPES, "description": "Configured model slot. Ignored when model_name is supplied."},
                     "model_name": {"type": "string", "description": "Concrete chat model id. Takes precedence over model_type."},
                     "context_tokens_cap": {"type": "integer", "minimum": 1, "description": "Optional child context limit in tokens, at most the selected model's window. Omit to inherit the parent's raw cap, clamped to the child window for requests."},
@@ -2979,6 +2979,26 @@ mod tests {
         assert!(preview_value(&"x".repeat(300)).ends_with("[truncated]"));
         assert!(!preview_value("first\nsecond").contains('\n'));
         assert!(preview_names(&vec!["cat".into(); 21]).ends_with("[truncated] (21)"));
+    }
+
+    #[test]
+    fn the_tools_hint_says_that_python_reads_outside_the_project() {
+        let schema = ToolSubagent {
+            config_path: String::new(),
+        }
+        .tool_description()
+        .input_schema;
+        let hint = schema["properties"]["tools"]["description"]
+            .as_str()
+            .unwrap();
+        assert!(
+            hint.contains("python scripts can also read files outside the project"),
+            "{hint}"
+        );
+        assert!(
+            hint.contains("without file-editing, mv, rm, shell or process_start tools can write files only under its ARTIFACTS_DIR"),
+            "{hint}"
+        );
     }
 
     #[test]

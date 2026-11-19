@@ -522,7 +522,10 @@ export function useChatSubscription(
                 streamedBytesRef.current = 0;
                 pendingBytesRef.current = 0;
               }
-              if (envelope.type === "process_completed") {
+              if (
+                envelope.type === "process_completed" &&
+                envelope.mode !== "foreground"
+              ) {
                 dispatch(processCompleted(envelope));
               }
               dispatch(applyChatEvent(envelope));

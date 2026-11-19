@@ -108,7 +108,8 @@ async fn chats_activity_returns_the_route_rows() {
 async fn chats_read_carries_records_and_refuses_this_chat() {
     let (dir, app, _) = fixture().await;
     persist(&app, &other_chat(&dir, "zone-saved-read", "zone_secret")).await;
-    let loaded = other_chat(&dir, "zone-loaded-read", "normal");
+    let mut loaded = other_chat(&dir, "zone-loaded-read", "normal");
+    loaded.work_project_root = Some(dir.path().join("project"));
     loaded.derived_privacy_zones.write().unwrap().insert(
         dir.path().join("project/derived.txt"),
         crate::privacy::records::DerivedZone {
@@ -151,4 +152,45 @@ async fn chats_read_carries_records_and_refuses_this_chat() {
     )
     .await;
     assert_eq!(result(&failed), false);
+}
+
+#[tokio::test]
+async fn chats_read_digest_pins_the_whole_history_and_its_file() {
+    let (dir, app, _) = fixture().await;
+    let mut chat = other_chat(&dir, "zone-digest", "normal");
+    persist(&app, &chat).await;
+    let read = |app: AppState, args: &'static str| async move {
+        result(
+            &run(
+                &app,
+                &format!(
+                    "(await engine('chats.read', chat_id='zone-digest'{args}))['data']['digest']"
+                ),
+            )
+            .await,
+        )
+    };
+    let saved = read(app.clone(), "").await;
+    assert!(saved.as_str().unwrap().starts_with("h1-"), "{saved}");
+    assert_eq!(
+        read(app.clone(), ", start=1, limit=1").await,
+        saved,
+        "a page of the history pins the whole history"
+    );
+    assert_eq!(read(app.clone(), "").await, saved, "the pin is stable");
+    chat.messages[0].content =
+        crate::call_validation::ChatContent::SimpleText("read it again".into());
+    persist(&app, &chat).await;
+    let changed = read(app.clone(), "").await;
+    assert_ne!(changed, saved, "the pin follows the history");
+    chat.work_project_root = Some(dir.path().join("project"));
+    chat.messages[1]
+        .extra
+        .insert("privacy_ref".into(), json!("r"));
+    insert(&app, chat).await;
+    assert_ne!(
+        read(app.clone(), "").await,
+        changed,
+        "the pin of a loaded chat covers every field of its messages"
+    );
 }

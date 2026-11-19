@@ -45,6 +45,31 @@ pub(crate) mod tests {
         });
     }
 
+    #[test]
+    fn a_receipt_tells_the_model_the_result_comes_by_itself() {
+        let receipt = JobReceipt {
+            job_id: "job-1".into(),
+            binding: crate::tool_jobs::JobBinding {
+                scope_keys: vec![],
+                chat_id: "chat".into(),
+                tool_call_id: "call-1".into(),
+                tool_name: "python".into(),
+                model: "model".into(),
+                turn_id: "turn".into(),
+            },
+            status: JobStatus::Accepted,
+            result_url: String::new(),
+            cancel_url: String::new(),
+        };
+        let message = receipt_message(&receipt);
+        assert_eq!(
+            message.content.content_text_only(),
+            "Accepted background tool job job-1; execution is not complete. The result will arrive automatically in this chat and start your next turn, so do not poll for it and do not replay the invocation."
+        );
+        assert_eq!(message.tool_call_id, "call-1");
+        assert_eq!(message.tool_failed, None);
+    }
+
     pub(crate) async fn policy_race_fixture(
         chat_id: &str,
     ) -> (
@@ -2091,7 +2116,7 @@ async fn deliver_orphan_notice(app: &AppState, chat_id: &str, orphans: &[OrphanR
 }
 
 pub(crate) fn receipt_message(receipt: &JobReceipt) -> ChatMessage {
-    let mut message = ChatMessage::new("tool".into(), format!("Accepted background tool job {}; execution is not complete. The result will arrive automatically. Do not replay the invocation.", receipt.job_id));
+    let mut message = ChatMessage::new("tool".into(), format!("Accepted background tool job {}; execution is not complete. The result will arrive automatically in this chat and start your next turn, so do not poll for it and do not replay the invocation.", receipt.job_id));
     message.tool_call_id = receipt.binding.tool_call_id.clone();
     message.extra.insert(
         "tool_job".into(),

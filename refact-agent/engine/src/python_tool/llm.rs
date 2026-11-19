@@ -80,6 +80,39 @@ impl LlmBudget {
 pub struct RunPrivacy {
     pub taint: Vec<Value>,
     pub reads: BTreeSet<String>,
+    /// The script received output of a shell command the exec layer did not observe, so the
+    /// run may hold data of any zone; kept in the session taint as `UNOBSERVED_OUTPUT_MARK`.
+    pub unobserved_output: bool,
+}
+
+/// Key of the session taint entry that marks unobserved command output; entries without
+/// `files` never become privacy records.
+pub const UNOBSERVED_OUTPUT_MARK: &str = "unobserved_output";
+
+pub fn unobserved_output_mark() -> Value {
+    json!({ UNOBSERVED_OUTPUT_MARK: true })
+}
+
+pub fn has_unobserved_output_mark(taint: &[Value]) -> bool {
+    taint
+        .iter()
+        .any(|entry| entry[UNOBSERVED_OUTPUT_MARK] == true)
+}
+
+/// Records that make output of a shell command without privacy observation count as data of
+/// every zone of the policy.
+pub fn unobserved_output_records(
+    policy: &refact_privacy::PrivacyPolicy,
+) -> Vec<refact_privacy::FileRecord> {
+    policy
+        .zones
+        .iter()
+        .map(|zone| refact_privacy::FileRecord {
+            path: "output of a shell command that ran without privacy observation".into(),
+            zone: zone.name.clone(),
+            attribution: refact_privacy::Attribution::Heuristic,
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -91,9 +124,11 @@ pub struct LlmArgs {
     pub max_tokens: Option<usize>,
 }
 
-pub fn parse_args(kwargs: &Value, truncated: bool) -> Result<LlmArgs, String> {
-    if truncated {
-        return Err("llm() arguments too large".into());
+pub fn parse_args(kwargs: &Value, too_large: Option<&str>) -> Result<LlmArgs, String> {
+    if let Some(size) = too_large {
+        return Err(format!(
+            "llm() arguments are too large to send: {size}; pass a file path or a smaller value"
+        ));
     }
     let args = kwargs
         .as_object()
@@ -290,7 +325,7 @@ mod tests {
     fn arguments_are_checked_like_python() {
         let ok = parse_args(
             &json!({"prompt":"q","schema":{"type":"object"},"model":"light","max_tokens":5}),
-            false,
+            None,
         )
         .unwrap();
         assert_eq!(ok.model.as_deref(), Some("light"));
@@ -306,9 +341,16 @@ mod tests {
             json!({"prompt":"q","max_tokens":0}),
             json!({"prompt":"x".repeat(MAX_PROMPT_CHARS),"system":"y"}),
         ] {
-            assert!(parse_args(&bad, false).is_err(), "{bad}");
+            assert!(parse_args(&bad, None).is_err(), "{bad}");
         }
-        assert!(parse_args(&json!({"prompt":"q"}), true).is_err());
+        assert_eq!(
+            parse_args(
+                &json!({"prompt":"q"}),
+                Some("at least 9 bytes, over the 8-byte limit")
+            )
+            .unwrap_err(),
+            "llm() arguments are too large to send: at least 9 bytes, over the 8-byte limit; pass a file path or a smaller value"
+        );
     }
     #[test]
     fn fenced_answers_are_parsed_and_validated() {
@@ -344,7 +386,7 @@ impl super::dispatcher::NestedDispatcher {
         &self,
         seq: u32,
         kwargs: Value,
-        truncated: bool,
+        too_large: Option<String>,
         site: (Option<u32>, Option<u32>),
     ) -> super::dispatcher::NestedOutcome {
         use refact_chat_api::{PythonCallApproval, PythonCallRecord, PythonCallStatus};
@@ -378,7 +420,7 @@ impl super::dispatcher::NestedDispatcher {
         let outcome = tokio::select! {
             biased;
             _ = c.cancel.cancelled() => Err(Failure::Raise("RuntimeError", "python run cancelled".into(), true)),
-            result = self.llm_inner(kwargs, truncated, &mut record, &mut log, &inflight) => result,
+            result = self.llm_inner(kwargs, too_large.as_deref(), &mut record, &mut log, &inflight) => result,
         };
         let (input, output) = take_partial(&inflight);
         if input + output > 0 {
@@ -448,7 +490,7 @@ impl super::dispatcher::NestedDispatcher {
     async fn llm_inner(
         &self,
         kwargs: Value,
-        truncated: bool,
+        too_large: Option<&str>,
         record: &mut refact_chat_api::PythonCallRecord,
         log: &mut Value,
         inflight: &UsageSink,
@@ -462,7 +504,7 @@ impl super::dispatcher::NestedDispatcher {
             )
         })?;
         let args =
-            parse_args(&kwargs, truncated).map_err(|e| Failure::Raise("TypeError", e, false))?;
+            parse_args(&kwargs, too_large).map_err(|e| Failure::Raise("TypeError", e, false))?;
         log["prompt"] = json!(args.prompt);
         log["system"] = json!(args.system);
         log["schema"] = json!(args.schema);
@@ -678,6 +720,7 @@ impl super::dispatcher::NestedDispatcher {
             candidates.push(chat_model.clone());
         }
         let carrier = self.llm_privacy_carrier().await?;
+        let unobserved = c.run_privacy.lock().unwrap().unobserved_output;
         let mut refusal = None;
         for id in candidates {
             let model = crate::caps::resolve_chat_model(caps.clone(), &id).map_err(|e| {
@@ -698,16 +741,24 @@ impl super::dispatcher::NestedDispatcher {
         }
         Err(Failure::Raise(
             "PermissionError",
-            format!("llm(): {}", refusal.unwrap_or_default()),
+            format!(
+                "llm(): {}{}",
+                refusal.unwrap_or_default(),
+                if unobserved {
+                    "\nThis run read unchecked command output (a shell command ran without privacy observation), so llm() treats it as data of every zone of the privacy policy."
+                } else {
+                    ""
+                }
+            ),
             false,
         ))
     }
 
     async fn llm_privacy_carrier(&self) -> Result<ChatMessage, Failure> {
         let c = &self.config;
-        let (taint, reads) = {
+        let (taint, reads, unobserved) = {
             let run = c.run_privacy.lock().unwrap();
-            (run.taint.clone(), run.reads.clone())
+            (run.taint.clone(), run.reads.clone(), run.unobserved_output)
         };
         let refuse = |e: String| {
             Failure::Raise(
@@ -735,6 +786,13 @@ impl super::dispatcher::NestedDispatcher {
         )
         .map_err(refuse)?;
         crate::privacy::records::merge_records(&mut carrier, direct);
+        if unobserved {
+            let policy = c.app.gcx.privacy_policy_load.read().unwrap().policy.clone();
+            crate::privacy::records::merge_records(
+                &mut carrier,
+                unobserved_output_records(&policy),
+            );
+        }
         Ok(carrier)
     }
 

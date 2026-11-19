@@ -435,6 +435,28 @@ export function sessionSummary(extra: PythonRunExtra): string {
   return parts.join(" · ");
 }
 
+/**
+ * The state area of a finished run as sentences: the warning that the state
+ * was not saved (the engine's clause starts with "not saved"), then each
+ * engine note; a limit sentence already says the note of a limit run.
+ */
+export function stateLines(extra: Pick<PythonRunExtra, "status" | "state">): {
+  notSaved?: string;
+  notes: string[];
+} {
+  const { not_saved, note, notes } = extra.state;
+  const lines = [
+    ...(extra.status === "limit_exceeded" ? [] : [note]),
+    ...(notes ?? []),
+  ].flatMap((text) => (text?.trim() ? [sentence(text)] : []));
+  const reason = not_saved?.trim();
+  if (!reason) return { notes: lines };
+  const rest = /^not saved\b/i.test(reason)
+    ? reason.replace(/^not saved/i, "")
+    : `: ${reason}`;
+  return { notSaved: sentence(`State not saved${rest}`), notes: lines };
+}
+
 /** One presentation of a script run status for the card, call rows and the panel. */
 export type ScriptStatusTone =
   | "accent"
