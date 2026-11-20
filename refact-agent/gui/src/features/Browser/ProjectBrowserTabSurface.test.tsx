@@ -1,5 +1,13 @@
 import { http, HttpResponse } from "msw";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { QueryStatus } from "@reduxjs/toolkit/query";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  frameStreamRecord,
+  frameRecord,
+  frameStreamResponse,
+  mockFrameDecoder,
+} from "./frameStreamTestUtils";
+import { FRAME_STREAM_MIME } from "../../services/refact/projectBrowserStream";
 import { server } from "../../utils/mockServer";
 import {
   createDefaultChatState,
@@ -19,7 +27,10 @@ import {
 import { framePosition } from "./projectBrowserFrame";
 import { PaneSurfaceActivityProvider } from "../Workspace/PaneHeaderContext";
 import { ProjectBrowserTabSurface } from "./ProjectBrowserTabSurface";
-import { selectBrowserTabAwaitingStatus } from "./browserViews";
+import {
+  selectBrowserTabAwaitingStatus,
+  selectProjectBrowserStatus,
+} from "./browserViews";
 import { BrowserToggleButton } from "../../components/Buttons/BrowserToggleButton";
 
 const tab = (tabId: string, url: string, title: string) => ({
@@ -57,11 +68,26 @@ const liveStatus = {
   ],
 };
 
+const originalVisibility = Object.getOwnPropertyDescriptor(
+  document,
+  "visibilityState",
+);
+let decoder: ReturnType<typeof mockFrameDecoder>;
 let migrationRequests = 0;
+let legacyFrameRequests = 0;
 
 beforeEach(() => {
+  decoder = mockFrameDecoder();
   migrationRequests = 0;
+  legacyFrameRequests = 0;
   server.use(
+    http.post("*/v1/browser/project/frame", () => {
+      legacyFrameRequests += 1;
+      return HttpResponse.json(
+        { detail: "unexpected legacy polling" },
+        { status: 500 },
+      );
+    }),
     http.post("*/v1/browser/project/migration/*", () => {
       migrationRequests += 1;
       return HttpResponse.json({});
@@ -78,8 +104,13 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  expect(legacyFrameRequests).toBe(0);
   Reflect.deleteProperty(HTMLElement.prototype, "clientWidth");
   Reflect.deleteProperty(HTMLElement.prototype, "clientHeight");
+  if (originalVisibility)
+    Object.defineProperty(document, "visibilityState", originalVisibility);
+  else Reflect.deleteProperty(document, "visibilityState");
+  vi.restoreAllMocks();
 });
 
 describe("Project browser tab surface", () => {
@@ -96,10 +127,13 @@ describe("Project browser tab surface", () => {
       http.post("*/v1/browser/project/status", () =>
         HttpResponse.json(liveStatus),
       ),
-      http.post("*/v1/browser/project/frame", async ({ request }) => {
-        frames.push(await request.json());
-        return HttpResponse.json(frame);
-      }),
+      http.post(
+        "*/v1/browser/project/frames/subscribe",
+        async ({ request }) => {
+          frames.push(await request.json());
+          return frameStreamResponse();
+        },
+      ),
       http.post("*/v1/browser/project/resize", async ({ request }) => {
         resizes.push(await request.json());
         return HttpResponse.json({ applied: true });
@@ -107,7 +141,7 @@ describe("Project browser tab surface", () => {
     );
     render(<ProjectBrowserTabSurface tabId="tab-b" />);
     await screen.findByRole("img", { name: "Browser page" });
-    expect(frames[0]).toEqual({ tab_id: "tab-b" });
+    expect(frames).toEqual([{ runtime_id: "runtime-a", tab_id: "tab-b" }]);
     expect(resizes[0]).toEqual({ width: 800, height: 400, tab_id: "tab-b" });
     expect(screen.getByRole("textbox", { name: "Address" })).toHaveValue(
       frame.url,
@@ -120,7 +154,9 @@ describe("Project browser tab surface", () => {
       http.post("*/v1/browser/project/status", () =>
         HttpResponse.json(liveStatus),
       ),
-      http.post("*/v1/browser/project/frame", () => HttpResponse.json(frame)),
+      http.post("*/v1/browser/project/frames/subscribe", () =>
+        frameStreamResponse(),
+      ),
       http.post("*/v1/browser/project/resize", () =>
         HttpResponse.json({ applied: true }),
       ),
@@ -158,7 +194,9 @@ describe("Project browser tab surface", () => {
       http.post("*/v1/browser/project/status", () =>
         HttpResponse.json(liveStatus),
       ),
-      http.post("*/v1/browser/project/frame", () => HttpResponse.json(frame)),
+      http.post("*/v1/browser/project/frames/subscribe", () =>
+        frameStreamResponse(),
+      ),
       http.post("*/v1/browser/project/resize", () =>
         HttpResponse.json({ applied: true }),
       ),
@@ -200,7 +238,7 @@ describe("Project browser tab surface", () => {
       http.post("*/v1/browser/project/resize", () =>
         HttpResponse.json({ applied: true }),
       ),
-      http.post("*/v1/browser/project/frame", () =>
+      http.post("*/v1/browser/project/frames/subscribe", () =>
         HttpResponse.json({ detail: "unknown tab" }, { status: 410 }),
       ),
     );
@@ -255,10 +293,12 @@ describe("Project browser tab surface", () => {
       http.post("*/v1/browser/project/resize", () =>
         HttpResponse.json({ applied: true }),
       ),
-      http.post("*/v1/browser/project/frame", () => {
+      http.post("*/v1/browser/project/frames/subscribe", () => {
         frames += 1;
         return frames === 1
-          ? HttpResponse.json(frame)
+          ? new HttpResponse(frameRecord().buffer, {
+              headers: { "Content-Type": FRAME_STREAM_MIME },
+            })
           : HttpResponse.json(
               {
                 detail:
@@ -270,7 +310,9 @@ describe("Project browser tab surface", () => {
     );
     render(<ProjectBrowserTabSurface tabId="tab-b" />);
     await screen.findByRole("img", { name: "Browser page" });
-    await waitFor(() => expect(frames).toBeGreaterThanOrEqual(3));
+    await waitFor(() => expect(frames).toBeGreaterThanOrEqual(3), {
+      timeout: 4000,
+    });
     expect(screen.getByRole("img", { name: "Browser page" })).toBeVisible();
     expect(
       screen.queryByRole("heading", { name: "This browser tab is closed" }),
@@ -296,7 +338,7 @@ describe("Project browser tab surface", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("does not poll frames while its pane surface is inactive", async () => {
+  it("only subscribes for active panes", async () => {
     const requested: string[] = [];
     server.use(
       http.post("*/v1/browser/project/status", () =>
@@ -305,11 +347,14 @@ describe("Project browser tab surface", () => {
       http.post("*/v1/browser/project/resize", () =>
         HttpResponse.json({ applied: true }),
       ),
-      http.post("*/v1/browser/project/frame", async ({ request }) => {
-        const body = (await request.json()) as { tab_id: string };
-        requested.push(body.tab_id);
-        return HttpResponse.json({ ...frame, tab_id: body.tab_id });
-      }),
+      http.post(
+        "*/v1/browser/project/frames/subscribe",
+        async ({ request }) => {
+          const body = (await request.json()) as { tab_id: string };
+          requested.push(body.tab_id);
+          return frameStreamResponse({ tab_id: body.tab_id });
+        },
+      ),
     );
     render(
       <>
@@ -321,14 +366,277 @@ describe("Project browser tab surface", () => {
         </PaneSurfaceActivityProvider>
       </>,
     );
-    await waitFor(
-      () =>
-        expect(
-          requested.filter((id) => id === "tab-a").length,
-        ).toBeGreaterThanOrEqual(3),
-      { timeout: 3000 },
-    );
+    await screen.findByRole("img", { name: "Browser page" });
+    expect(requested).toEqual(["tab-a"]);
     expect(requested).not.toContain("tab-b");
+  });
+});
+
+function controlledStreams() {
+  let runtimeId = "runtime-a";
+  const subscriptions: {
+    signal: AbortSignal;
+    write: (record: Uint8Array) => void;
+    runtimeId: string;
+  }[] = [];
+  const resizes: unknown[] = [];
+  server.use(
+    http.post("*/v1/browser/project/status", () =>
+      HttpResponse.json({ ...liveStatus, runtime_id: runtimeId }),
+    ),
+    http.post("*/v1/browser/project/resize", async ({ request }) => {
+      resizes.push(await request.json());
+      return HttpResponse.json({ applied: true });
+    }),
+    http.post("*/v1/browser/project/frames/subscribe", async ({ request }) => {
+      const body = (await request.json()) as { runtime_id: string };
+      return new HttpResponse(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            subscriptions.push({
+              signal: request.signal,
+              runtimeId: body.runtime_id,
+              write: (record) => controller.enqueue(record),
+            });
+          },
+        }),
+        { headers: { "Content-Type": FRAME_STREAM_MIME } },
+      );
+    }),
+  );
+  return {
+    subscriptions,
+    resizes,
+    restart: () => {
+      runtimeId = "runtime-b";
+    },
+  };
+}
+
+describe("Project browser live frame lifetime", () => {
+  it("keeps the visible tab subscribed through navigation and a busy status", async () => {
+    const { subscriptions, resizes } = controlledStreams();
+    let releaseNavigate: () => void = () => undefined;
+    const navigationGate = new Promise<void>((resolve) => {
+      releaseNavigate = resolve;
+    });
+    let releaseStatus: () => void = () => undefined;
+    let statusGate = Promise.resolve();
+    let navigations = 0;
+    server.use(
+      http.post("*/v1/browser/project/status", async () => {
+        await statusGate;
+        return HttpResponse.json(liveStatus);
+      }),
+      http.post("*/v1/browser/project/navigate", async () => {
+        navigations += 1;
+        await navigationGate;
+        return HttpResponse.json({ ...liveStatus, busy: true, tabs: [] });
+      }),
+    );
+    const { store } = render(<ProjectBrowserTabSurface tabId="tab-b" />);
+    await waitFor(() => expect(subscriptions).toHaveLength(1));
+    subscriptions[0].write(frameRecord());
+    const frame = await screen.findByRole("img", { name: "Browser page" });
+    await waitFor(() => expect(resizes).toHaveLength(1));
+
+    const reload = screen.getByRole("button", { name: "Reload" });
+    statusGate = new Promise<void>((resolve) => {
+      releaseStatus = resolve;
+    });
+    fireEvent.click(reload);
+    await waitFor(() => expect(reload).toBeDisabled());
+    await waitFor(() => expect(navigations).toBe(1));
+    expect(frame).toBeInTheDocument();
+    expect(subscriptions).toHaveLength(1);
+    expect(subscriptions[0].signal.aborted).toBe(false);
+
+    releaseNavigate();
+    await waitFor(() =>
+      expect(selectProjectBrowserStatus(store.getState())?.busy).toBe(true),
+    );
+    await waitFor(() =>
+      expect(
+        Object.values(store.getState().browserApi.mutations).some(
+          (mutation) =>
+            mutation?.endpointName === "projectBrowserNavigate" &&
+            mutation.status === QueryStatus.fulfilled,
+        ),
+      ).toBe(true),
+    );
+    expect(reload).toBeDisabled();
+    expect(frame).toBeInTheDocument();
+    expect(subscriptions).toHaveLength(1);
+    expect(subscriptions[0].signal.aborted).toBe(false);
+    const refresh = store.dispatch(
+      browserApi.endpoints.projectBrowserStatus.initiate(undefined, {
+        forceRefetch: true,
+        subscribe: false,
+      }),
+    );
+    releaseStatus();
+    await refresh;
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Reload" })).toBeEnabled(),
+    );
+    expect(subscriptions).toHaveLength(1);
+    expect(subscriptions[0].signal.aborted).toBe(false);
+    expect(resizes).toHaveLength(1);
+  });
+
+  it("cancels the open stream on document hide, pane deactivation and unmount", async () => {
+    const { subscriptions } = controlledStreams();
+    const pane = (active: boolean) => (
+      <PaneSurfaceActivityProvider active={active}>
+        <ProjectBrowserTabSurface tabId="tab-b" />
+      </PaneSurfaceActivityProvider>
+    );
+    const { rerender, unmount } = render(pane(true));
+    await waitFor(() => expect(subscriptions).toHaveLength(1));
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      value: "hidden",
+    });
+    fireEvent(document, new Event("visibilitychange"));
+    await waitFor(() => expect(subscriptions[0].signal.aborted).toBe(true));
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      value: "visible",
+    });
+    fireEvent(document, new Event("visibilitychange"));
+    await waitFor(() => expect(subscriptions).toHaveLength(2));
+    rerender(pane(false));
+    await waitFor(() => expect(subscriptions[1].signal.aborted).toBe(true));
+    rerender(pane(true));
+    await waitFor(() => expect(subscriptions).toHaveLength(3));
+    unmount();
+    expect(subscriptions[2].signal.aborted).toBe(true);
+    expect(subscriptions).toHaveLength(3);
+  });
+
+  it("drops the old runtime's decoded frame and cannot revive a terminally closed tab", async () => {
+    const { subscriptions, restart } = controlledStreams();
+    const { store } = render(<ProjectBrowserTabSurface tabId="tab-b" />);
+    await waitFor(() => expect(subscriptions).toHaveLength(1));
+    subscriptions[0].write(frameRecord());
+    const src = (
+      await screen.findByRole("img", { name: "Browser page" })
+    ).getAttribute("src");
+    restart();
+    await store.dispatch(
+      browserApi.endpoints.projectBrowserStatus.initiate(undefined, {
+        forceRefetch: true,
+        subscribe: false,
+      }),
+    );
+    await waitFor(() => expect(subscriptions).toHaveLength(2));
+    expect(subscriptions[0].signal.aborted).toBe(true);
+    expect(subscriptions[1].runtimeId).toBe("runtime-b");
+    expect(decoder.revoke).toHaveBeenCalledWith(src);
+    expect(screen.queryByRole("img")).not.toBeInTheDocument();
+    subscriptions[1].write(frameRecord({ runtime_id: "runtime-b" }));
+    await screen.findByRole("img", { name: "Browser page" });
+    subscriptions[1].write(
+      frameStreamRecord({ type: "error", status: 410, detail: "tab gone" }),
+    );
+    await screen.findByRole("heading", { name: "This browser tab is closed" });
+    expect(screen.queryByRole("img")).not.toBeInTheDocument();
+    expect(subscriptions[1].signal.aborted).toBe(true);
+    expect(decoder.revoke).toHaveBeenCalledTimes(2);
+  });
+
+  it("resizes on mount and observation without waiting for any stream frame", async () => {
+    const { subscriptions, resizes } = controlledStreams();
+    let notify: (w: number, h: number) => void = () => {
+      throw new Error("not observing");
+    };
+    const observer = vi
+      .spyOn(globalThis, "ResizeObserver")
+      .mockImplementation((cb) => {
+        const instance = {
+          observe: vi.fn(),
+          disconnect: vi.fn(),
+          unobserve: vi.fn(),
+        };
+        notify = (w, h) =>
+          cb(
+            [{ contentRect: { width: w, height: h } } as ResizeObserverEntry],
+            instance,
+          );
+        return instance;
+      });
+    render(<ProjectBrowserTabSurface tabId="tab-b" />);
+    await waitFor(() =>
+      expect(resizes).toEqual([{ width: 800, height: 400, tab_id: "tab-b" }]),
+    );
+    expect(observer).toHaveBeenCalled();
+    notify(601, 317);
+    notify(777, 355);
+    await waitFor(() =>
+      expect(resizes[resizes.length - 1]).toEqual({
+        width: 777,
+        height: 355,
+        tab_id: "tab-b",
+      }),
+    );
+    expect(subscriptions).toHaveLength(1);
+  });
+
+  it("decodes one frame at a time, drops superseded frames and keeps only good pixels", async () => {
+    const { subscriptions } = controlledStreams();
+    let release: () => void = () => {
+      throw new Error("not decoding");
+    };
+    const { decode } = decoder;
+    decode.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+        }),
+    );
+    const { unmount } = render(<ProjectBrowserTabSurface tabId="tab-b" />);
+    await waitFor(() => expect(subscriptions).toHaveLength(1));
+    const { write } = subscriptions[0];
+    write(frameRecord({ url: "https://example.test/first" }));
+    await waitFor(() => expect(decode).toHaveBeenCalledTimes(1));
+    for (let i = 0; i < 12; i++)
+      write(frameRecord({ url: `https://example.test/frame-${i}` }));
+    // A terminal record acts as a read barrier: all twelve records arrived while decode is pending.
+    write(
+      frameStreamRecord({
+        type: "error",
+        status: 503,
+        detail: "stream interrupted",
+      }),
+    );
+    await screen.findByText("stream interrupted");
+    expect(decode).toHaveBeenCalledTimes(1);
+    release();
+    await waitFor(() =>
+      expect(screen.getByRole("textbox", { name: "Address" })).toHaveValue(
+        "https://example.test/frame-11",
+      ),
+    );
+    expect(decode).toHaveBeenCalledTimes(2);
+    expect(decoder.create).toHaveBeenCalledTimes(2);
+    expect(decoder.revoke).toHaveBeenCalledTimes(1);
+    const goodSrc = screen
+      .getByRole("img", { name: "Browser page" })
+      .getAttribute("src");
+    await waitFor(() => expect(subscriptions).toHaveLength(2));
+    decode.mockRejectedValueOnce(new Error("bad JPEG"));
+    subscriptions[1].write(
+      frameRecord({ url: "https://example.test/corrupt" }),
+    );
+    await screen.findByText("Could not decode browser frame");
+    expect(screen.getByRole("img", { name: "Browser page" })).toHaveAttribute(
+      "src",
+      goodSrc,
+    );
+    expect(decoder.revoke).toHaveBeenCalledTimes(2);
+    unmount();
+    expect(decoder.revoke).toHaveBeenCalledWith(goodSrc);
+    expect(decoder.revoke).toHaveBeenCalledTimes(3);
   });
 });
 
@@ -357,7 +665,9 @@ describe("Project browser tab surface after a restart or a hint", () => {
       http.post("*/v1/browser/project/resize", () =>
         HttpResponse.json({ applied: true }),
       ),
-      http.post("*/v1/browser/project/frame", () => HttpResponse.json(frame)),
+      http.post("*/v1/browser/project/frames/subscribe", () =>
+        frameStreamResponse(),
+      ),
     );
     const chat = createDefaultChatState();
     const chatId = chat.current_thread_id;
@@ -418,7 +728,9 @@ describe("Project browser tab surface after a restart or a hint", () => {
       http.post("*/v1/browser/project/resize", () =>
         HttpResponse.json({ applied: true }),
       ),
-      http.post("*/v1/browser/project/frame", () => HttpResponse.json(frame)),
+      http.post("*/v1/browser/project/frames/subscribe", () =>
+        frameStreamResponse(),
+      ),
     );
     const chat = createDefaultChatState();
     const { store } = render(<HintSubscriber />, {
@@ -606,7 +918,9 @@ describe("Project browser tab surface: review round 4", () => {
       http.post("*/v1/browser/project/resize", () =>
         HttpResponse.json({ applied: true }),
       ),
-      http.post("*/v1/browser/project/frame", () => HttpResponse.json(frame)),
+      http.post("*/v1/browser/project/frames/subscribe", () =>
+        frameStreamResponse(),
+      ),
     );
     const chat = createDefaultChatState();
     const chatId = chat.current_thread_id;

@@ -891,6 +891,7 @@ pub async fn block_until_signal(
         },
         _ = sigusr1 => {
             info!("SIGUSR1 signal received");
+            shutdown_flag_clone.store(true, Ordering::SeqCst);
         },
         _ = tokio::task::spawn_blocking(move || {
             let _ = ask_shutdown_receiver.recv();

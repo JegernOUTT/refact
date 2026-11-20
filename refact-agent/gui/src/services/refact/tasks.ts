@@ -525,7 +525,7 @@ export interface TrajectoryInfo {
   waiting_for_card_ids?: string[];
 }
 
-interface CreatePlannerChatResult {
+export interface CreatePlannerChatResult {
   chat_id: string;
   mode?: string;
   task_role?: string;

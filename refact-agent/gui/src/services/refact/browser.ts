@@ -663,6 +663,8 @@ export const BROWSER_PROJECT_NAVIGATE = "/v1/browser/project/navigate";
 export const BROWSER_PROJECT_INPUT = "/v1/browser/project/input";
 export const BROWSER_PROJECT_RESIZE = "/v1/browser/project/resize";
 export const BROWSER_PROJECT_FRAME = "/v1/browser/project/frame";
+export const BROWSER_PROJECT_FRAMES_SUBSCRIBE =
+  "/v1/browser/project/frames/subscribe";
 
 export type ProjectBrowserTab = {
   tab_id: string;
@@ -930,20 +932,21 @@ async function publishProjectBrowserStatus(
   }
 }
 
+export function prepareBrowserHeaders(headers: Headers, token?: string | null) {
+  headers.set("credentials", "same-origin");
+  if (token) headers.set("Authorization", `Bearer ${token}`);
+  return headers;
+}
+
 export const browserApi = createApi({
   reducerPath: "browserApi",
   tagTypes: ["BROWSER"],
   baseQuery: fetchBaseQuery({
-    prepareHeaders: (headers, api) => {
-      const getState = api.getState as () => RootState;
-      const state = getState();
-      const token = state.config.apiKey;
-      headers.set("credentials", "same-origin");
-      if (token) {
-        headers.set("Authorization", `Bearer ${token}`);
-      }
-      return headers;
-    },
+    prepareHeaders: (headers, api): Headers =>
+      prepareBrowserHeaders(
+        headers,
+        (api.getState() as RootState).config.apiKey,
+      ),
   }),
   endpoints: (builder) => ({
     browserStart: builder.mutation<BrowserStartResponse, BrowserStartRequest>({

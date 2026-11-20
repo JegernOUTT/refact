@@ -1,12 +1,12 @@
-import { useEffect, useRef } from "react";
+import { useLayoutEffect, useRef } from "react";
 import type { ClipboardEvent, KeyboardEvent, MouseEvent } from "react";
 import type {
-  ProjectBrowserFrame,
   ProjectBrowserInputFence,
   ProjectBrowserInputRequest,
   ProjectBrowserModifier,
 } from "../../services/refact/browser";
 import { framePosition } from "./projectBrowserFrame";
+import type { DisplayedBrowserFrame } from "./useBrowserFrameStream";
 import styles from "./ProjectBrowserTabSurface.module.css";
 
 const IGNORED_KEYS = [
@@ -23,16 +23,22 @@ export function BrowserTabFrame({
   disabled,
   onInput,
 }: {
-  frame: ProjectBrowserFrame;
+  frame: DisplayedBrowserFrame;
   disabled: boolean;
   onInput: (request: ProjectBrowserInputRequest) => void;
 }) {
   const image = useRef<HTMLImageElement>(null);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const element = image.current;
     const wheel = (event: WheelEvent) => {
-      if (!element || disabled || event.ctrlKey || event.metaKey) return;
+      if (
+        element?.currentSrc !== frame.src ||
+        disabled ||
+        event.ctrlKey ||
+        event.metaKey
+      )
+        return;
       const bounds = element.getBoundingClientRect();
       const point = framePosition(frame, bounds, event.clientX, event.clientY);
       if (!point) return;
@@ -63,7 +69,7 @@ export function BrowserTabFrame({
     tab_id: frame.tab_id,
   };
   const click = (event: MouseEvent<HTMLImageElement>) => {
-    if (disabled) return;
+    if (disabled || event.currentTarget.currentSrc !== frame.src) return;
     const point = framePosition(
       frame,
       event.currentTarget.getBoundingClientRect(),
@@ -122,7 +128,7 @@ export function BrowserTabFrame({
     <img
       ref={image}
       className={styles.frame}
-      src={`data:${frame.mime};base64,${frame.data}`}
+      src={frame.src}
       alt="Browser page"
       tabIndex={disabled ? -1 : 0}
       draggable={false}

@@ -1,8 +1,9 @@
-use std::path::PathBuf;
 use crate::artifact_store::ArtifactStore;
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -238,8 +239,75 @@ struct ScreencastFrameMessage {
     received: Instant,
 }
 
-type ScreencastListener =
+pub(crate) type ScreencastListener =
     std::sync::Weak<dyn headless_chrome::browser::tab::EventListener<Event> + Send + Sync>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ScreencastUse {
+    ProjectView,
+    Tool,
+}
+
+type SessionMap = HashMap<String, (ScreencastUse, Arc<AtomicBool>)>;
+
+fn sessions() -> &'static Mutex<SessionMap> {
+    static SESSIONS: OnceLock<Mutex<SessionMap>> = OnceLock::new();
+    SESSIONS.get_or_init(Mutex::default)
+}
+
+pub(crate) struct ScreencastLease {
+    id: String,
+    pub(crate) retired: Arc<AtomicBool>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScreencastBusy {
+    ProjectView,
+    Tool,
+}
+
+impl std::fmt::Display for ScreencastBusy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::ProjectView => "The Browser pane is streaming this tab; hide the pane and retry",
+            Self::Tool => "A tool has a screencast on this tab; stop it and retry",
+        })
+    }
+}
+
+impl ScreencastLease {
+    pub(crate) fn acquire(id: &str, owner: ScreencastUse) -> Result<Self, ScreencastBusy> {
+        let mut sessions = sessions().lock().unwrap_or_else(|error| error.into_inner());
+        if let Some((held, _)) = sessions.get(id) {
+            return Err(match held {
+                ScreencastUse::ProjectView => ScreencastBusy::ProjectView,
+                ScreencastUse::Tool => ScreencastBusy::Tool,
+            });
+        }
+        let retired = Arc::new(AtomicBool::new(false));
+        sessions.insert(id.into(), (owner, retired.clone()));
+        Ok(Self {
+            id: id.into(),
+            retired,
+        })
+    }
+}
+
+impl Drop for ScreencastLease {
+    fn drop(&mut self) {
+        sessions()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&self.id);
+    }
+}
+
+pub(crate) fn retire_project_screencast(id: &str) {
+    let sessions = sessions().lock().unwrap_or_else(|error| error.into_inner());
+    if let Some((ScreencastUse::ProjectView, retired)) = sessions.get(id) {
+        retired.store(true, Ordering::Release);
+    }
+}
 
 fn install_screencast_listener(
     tab: &Tab,
@@ -257,7 +325,7 @@ fn install_screencast_listener(
     .map_err(|error| format!("Failed to listen for browser screencast frames: {error}"))
 }
 
-fn start_screencast(
+pub(crate) fn start_screencast(
     tab: &Tab,
     quality: u32,
     max_width: Option<u32>,
@@ -274,7 +342,7 @@ fn start_screencast(
     .map_err(|error| format!("Failed to start browser screencast: {error}"))
 }
 
-fn stop_screencast(tab: &Tab) -> Result<(), String> {
+pub(crate) fn stop_screencast(tab: &Tab) -> Result<(), String> {
     tab.call_method(Page::StopScreencast(None))
         .map(|_| ())
         .map_err(|error| format!("Failed to stop browser screencast: {error}"))
@@ -291,6 +359,11 @@ pub fn capture_screencast_burst(
     plan: &FrameBurstPlan,
     quality: u32,
 ) -> Result<Vec<CapturedFrame>, String> {
+    let _lease = match ScreencastLease::acquire(tab.get_target_id(), ScreencastUse::Tool) {
+        Ok(lease) => lease,
+        Err(ScreencastBusy::ProjectView) => return Ok(Vec::new()),
+        Err(busy) => return Err(busy.to_string()),
+    };
     let (sender, receiver) = mpsc::channel();
     let listener = install_screencast_listener(tab, sender)?;
     let started = Instant::now();
@@ -345,6 +418,7 @@ impl Default for ScreencastSessionOptions {
 }
 
 struct ActiveScreencast {
+    _lease: ScreencastLease,
     target_id: String,
     started: Instant,
     frames: Arc<Mutex<Vec<CapturedFrame>>>,
@@ -382,11 +456,14 @@ impl ScreencastManager {
         if active.is_some() {
             return Err("A screencast session is already running".to_string());
         }
+        let lease = ScreencastLease::acquire(tab.get_target_id(), ScreencastUse::Tool)
+            .map_err(|busy| busy.to_string())?;
         let (sender, receiver) = mpsc::channel();
         let listener = install_screencast_listener(tab, sender)?;
         if let Err(error) =
             start_screencast(tab, options.quality, options.max_width, options.max_height)
         {
+            let _ = stop_screencast(tab);
             let _ = tab.remove_event_listener(&listener);
             return Err(error);
         }
@@ -403,6 +480,7 @@ impl ScreencastManager {
             finished.clone(),
         );
         *active = Some(ActiveScreencast {
+            _lease: lease,
             target_id: tab.get_target_id().to_string(),
             started,
             frames,
@@ -854,6 +932,24 @@ fn write_image_artifact(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn screencast_ownership_is_per_tab_and_retirement_waits_for_the_lease() {
+        let a = "lease-test-a";
+        let b = "lease-test-b";
+        let view = ScreencastLease::acquire(a, ScreencastUse::ProjectView).unwrap();
+        let tool = ScreencastLease::acquire(b, ScreencastUse::Tool).unwrap();
+        assert!(ScreencastLease::acquire(a, ScreencastUse::Tool).is_err());
+        assert!(ScreencastLease::acquire(b, ScreencastUse::ProjectView).is_err());
+        retire_project_screencast(a);
+        retire_project_screencast(b);
+        assert!(view.retired.load(Ordering::Acquire));
+        assert!(!tool.retired.load(Ordering::Acquire));
+        assert!(ScreencastLease::acquire(a, ScreencastUse::ProjectView).is_err());
+        drop((view, tool));
+        assert!(ScreencastLease::acquire(a, ScreencastUse::Tool).is_ok());
+        assert!(ScreencastLease::acquire(b, ScreencastUse::ProjectView).is_ok());
+    }
 
     #[test]
     fn filmstrip_artifacts_use_shared_store_and_keep_encoded_dimensions() {

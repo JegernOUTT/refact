@@ -34,6 +34,8 @@ use refact_browser::{
     MouseEventPayload, MouseEventType,
 };
 
+mod frames;
+
 const MAX_BODY_BYTES: usize = 64 * 1024;
 const MAX_TEXT_CHARS: usize = 8192;
 const MAX_URL_CHARS: usize = 8192;
@@ -64,6 +66,7 @@ pub fn router() -> Router<AppState> {
         .route("/browser/project/input", post(handle_input))
         .route("/browser/project/resize", post(handle_resize))
         .route("/browser/project/frame", post(handle_frame))
+        .route("/browser/project/frames/subscribe", post(frames::subscribe))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .route_layer(middleware::map_response(no_store))
 }
@@ -2173,6 +2176,10 @@ mod tests {
             ("frame", serde_json::json!({})),
             ("frame", serde_json::json!({"tab_id": "t"})),
             (
+                "frames/subscribe",
+                serde_json::json!({"runtime_id":"r", "tab_id":"t"}),
+            ),
+            (
                 "resize",
                 serde_json::json!({"width": 800, "height": 600, "tab_id": "t"}),
             ),
@@ -2220,6 +2227,12 @@ mod tests {
                 serde_json::json!({"op": "close", "tab_id": "t", "chat_id": "chat-a"}),
             ),
             ("frame", serde_json::json!({"tab": "t"})),
+            ("frames/subscribe", serde_json::json!({"tab_id":"t"})),
+            ("frames/subscribe", serde_json::json!({"runtime_id":"r"})),
+            (
+                "frames/subscribe",
+                serde_json::json!({"runtime_id":"r", "tab_id":"t", "project_id":"foreign"}),
+            ),
             (
                 "resize",
                 serde_json::json!({"width": 800, "height": 600, "tab": "t"}),
@@ -2679,6 +2692,259 @@ mod tests {
                 .await
             );
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+    async fn live_frame_subscription_fences_closes_and_maps_resizes_with_real_chrome() {
+        use hyper::body::HttpBody;
+        assert_eq!(std::env::var("REFACT_BROWSER_E2E").as_deref(), Ok("1"));
+        let live = LiveProject::start().await;
+        let rt = &live.ensured.runtime;
+        let runtime = &live.ensured.runtime_id;
+        let title_prefix = format!("🎞{}", "x".repeat(509));
+        let (tab, world) = {
+            let mut rt = rt.lock().await;
+            blocking(|| {
+                let tab = crate::integrations::browser_runtime::project_browser::open_project_tab(
+                    &mut rt, None,
+                )
+                .unwrap();
+                let url = format!(
+                    concat!(
+                        "data:text/html;charset=utf-8,<!doctype html><title>{}🎞Static frame</title>",
+                        "<style>html::-webkit-scrollbar{{width:80px}}body{{height:2000px}}</style>",
+                        "<h1>Static</h1><!--{}-->"
+                    ),
+                    title_prefix,
+                    "x".repeat(9000),
+                );
+                tab.navigate_to(&url)
+                    .unwrap()
+                    .wait_until_navigated()
+                    .unwrap();
+                (tab, rt.world_manager.clone())
+            })
+        };
+        let tab_id = tab.get_target_id().as_str();
+        let subscribe = |runtime: &str, tab: &str| {
+            live.router.clone().oneshot(request(
+                "frames/subscribe",
+                Body::from(
+                    serde_json::json!({"runtime_id":runtime,"tab_id":tab,"max_side":400})
+                        .to_string(),
+                ),
+            ))
+        };
+        assert_eq!(
+            subscribe("retired", tab_id).await.unwrap().status(),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            subscribe(runtime, "absent").await.unwrap().status(),
+            StatusCode::GONE
+        );
+        let resize = |width, height| {
+            post(
+                &live.router,
+                "resize",
+                serde_json::json!({"width":width,"height":height,"tab_id":tab_id}),
+            )
+        };
+        assert_eq!(resize(640, 480).await.0, StatusCode::OK);
+        assert_eq!(
+            blocking(|| eval_string(
+                &tab,
+                "String(innerWidth - document.documentElement.clientWidth)"
+            )),
+            "80",
+            "the fixture must use a wider-than-default painted scrollbar"
+        );
+
+        let response = subscribe(runtime, tab_id).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[header::CONTENT_TYPE],
+            "application/x-refact-browser-frames"
+        );
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        let mut body = response.into_body();
+        async fn record(body: &mut axum::body::BoxBody) -> (serde_json::Value, hyper::body::Bytes) {
+            let chunk = tokio::time::timeout(Duration::from_secs(12), body.data())
+                .await
+                .expect("browser produced a whole frame record within the bounded wait")
+                .expect("stream ended before an expected record")
+                .expect("read record");
+            let header = u32::from_be_bytes(chunk[..4].try_into().unwrap()) as usize;
+            let payload = u32::from_be_bytes(chunk[4..8].try_into().unwrap()) as usize;
+            assert_eq!(chunk.len(), 8 + header + payload);
+            (
+                serde_json::from_slice(&chunk[8..8 + header]).unwrap(),
+                chunk.slice(8 + header..),
+            )
+        }
+        let (frame, jpeg) = record(&mut body).await;
+        assert_eq!(frame["type"], "frame", "{frame}");
+        assert_eq!(frame["runtime_id"], runtime.as_str());
+        assert_eq!(frame["tab_id"], tab_id);
+        assert_eq!(
+            frame["title"],
+            format!("{title_prefix}\u{fffd}…"),
+            "the sampler preserves intact Unicode and replaces a split surrogate before adding the ellipsis"
+        );
+        assert_eq!(
+            frame["url"], "",
+            "the sampler omits an oversized source URL whole"
+        );
+        assert_eq!(frame["viewport"]["width"], 640.0);
+        let decoded = image::load_from_memory(&jpeg).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (400, 300));
+        assert_eq!(
+            (frame["width"].as_u64(), frame["height"].as_u64()),
+            (Some(400), Some(300))
+        );
+        assert_eq!(
+            subscribe(runtime, tab_id).await.unwrap().status(),
+            StatusCode::CONFLICT
+        );
+        let report = tool_batch(
+            rt,
+            tab_id,
+            serde_json::json!([
+                {"action":"capture_frames","frame_count":2,"duration_ms":100},
+                {"action":"screencast_start"}
+            ]),
+        )
+        .await
+        .await
+        .unwrap();
+        assert!(report.steps[0].ok, "{report:?}");
+        let warnings = &report.steps[0].data.as_ref().unwrap()["warnings"];
+        assert!(
+            warnings.as_array().unwrap().iter().any(|warning| warning
+                .as_str()
+                .unwrap()
+                .contains("captured with timed screenshots")),
+            "{warnings}"
+        );
+        assert!(
+            report.steps[1]
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("hide the pane")),
+            "{report:?}"
+        );
+        assert_eq!(resize(500, 600).await.0, StatusCode::OK);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let (frame, _) = record(&mut body).await;
+                assert_ne!(frame["type"], "error", "{frame}");
+                if frame["viewport"]["width"] == 500.0 {
+                    assert_eq!(frame["viewport"]["height"], 600.0, "{frame}");
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("resize was reflected in stream metadata on a static page");
+
+        let main_context = || {
+            let tree = world.frame_tree(tab_id)?;
+            tree.frame(tree.main_frame_id()?)?.utility_context.clone()
+        };
+        let initial_context = main_context().expect("the sampler evaluated in the isolated world");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let destination = format!("http://{}/destination", listener.local_addr().unwrap());
+        let server = tokio::spawn(
+            axum::Server::from_tcp(listener).unwrap().serve(
+                Router::new()
+                    .route(
+                        "/destination",
+                        axum::routing::get(|| async {
+                            axum::response::Html(
+                                "<!doctype html><title>Destination</title><h1 id=details>Details</h1>",
+                            )
+                        }),
+                    )
+                    .into_make_service(),
+            ),
+        );
+        blocking(|| {
+            tab.navigate_to(&destination)
+                .unwrap()
+                .wait_until_navigated()
+                .unwrap();
+        });
+        let mut destination_context = None;
+        for suffix in ["", "#details"] {
+            if !suffix.is_empty() {
+                blocking(|| tab.evaluate("location.hash = 'details'", false).unwrap());
+            }
+            let url = format!("{destination}{suffix}");
+            tokio::time::timeout(Duration::from_secs(6), async {
+                loop {
+                    let (frame, _) = record(&mut body).await;
+                    assert_ne!(frame["type"], "error", "{frame}");
+                    if frame["url"] == url {
+                        assert_eq!(frame["title"], "Destination");
+                        assert_eq!(frame["viewport"]["width"], 500.0);
+                        break;
+                    }
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("the same subscription must report {url}"));
+            let context = main_context().expect("the sampler evaluated in the isolated world");
+            if let Some(previous) = &destination_context {
+                assert_eq!(&context, previous, "a fragment change keeps its world");
+            } else {
+                assert_ne!(context, initial_context, "a new document gets a new world");
+                destination_context = Some(context);
+            }
+        }
+
+        drop(body);
+        let (response, (resize_status, resized)) =
+            tokio::time::timeout(Duration::from_secs(8), async {
+                tokio::join!(subscribe(runtime, tab_id), resize(520, 610))
+            })
+            .await
+            .expect("a reconnect and resize complete while the aborted stream releases its lease");
+        let response = response.unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "first reconnect must succeed"
+        );
+        assert_eq!(resize_status, StatusCode::OK, "{resized}");
+        let mut body = response.into_body();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let (frame, _) = record(&mut body).await;
+                assert_ne!(frame["type"], "error", "{frame}");
+                if frame["viewport"]["width"] == 520.0 {
+                    assert_eq!(frame["viewport"]["height"], 610.0, "{frame}");
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("the replacement stream delivers the resized viewport");
+        let (status, closed) = post(
+            &live.router,
+            "tab",
+            serde_json::json!({"op":"close","tab_id":tab_id}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{closed}");
+        let (error, payload) = record(&mut body).await;
+        assert_eq!(error["status"], 410, "{error}");
+        assert!(payload.is_empty());
+        assert!(body.data().await.is_none());
+        drop((tab, body));
+        server.abort();
+        live.stop().await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

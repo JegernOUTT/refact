@@ -79,6 +79,7 @@ struct TabWorldState {
     frame_contexts: HashMap<Page::FrameId, Runtime::ExecutionContextId>,
     context_frames: HashMap<Runtime::ExecutionContextId, Page::FrameId>,
     utility_contexts: HashSet<Runtime::ExecutionContextId>,
+    utility_context_unique_ids: HashMap<Runtime::ExecutionContextId, String>,
     initialized_contexts: HashSet<Runtime::ExecutionContextId>,
 }
 
@@ -179,10 +180,19 @@ impl WorldManager {
         tab: &Tab,
         frame_id: &str,
     ) -> Result<Runtime::ExecutionContextId, String> {
+        let context_id = self.utility_world_for_frame(tab, frame_id)?;
+        self.ensure_bootstrap(tab, context_id)?;
+        Ok(context_id)
+    }
+
+    fn utility_world_for_frame(
+        &self,
+        tab: &Tab,
+        frame_id: &str,
+    ) -> Result<Runtime::ExecutionContextId, String> {
         self.install_for_tab(tab)?;
         if let Some(context_id) = self.context_for_frame(tab.get_target_id(), &frame_id.to_string())
         {
-            self.ensure_bootstrap(tab, context_id)?;
             return Ok(context_id);
         }
         let context_id = tab
@@ -196,7 +206,6 @@ impl WorldManager {
             })?
             .execution_context_id;
         self.record_context(tab.get_target_id(), frame_id.to_string(), context_id);
-        self.ensure_bootstrap(tab, context_id)?;
         Ok(context_id)
     }
 
@@ -309,6 +318,38 @@ impl WorldManager {
             ));
         }
         Ok(result.result.value.unwrap_or(Value::Null))
+    }
+
+    pub(crate) fn eval_project_stream_metadata(
+        &self,
+        tab: &Tab,
+        frame_id: &str,
+        expression: &str,
+    ) -> Option<Value> {
+        let context_id = self.utility_world_for_frame(tab, frame_id).ok()?;
+        let unique_id =
+            self.utility_context_unique_id(tab.get_target_id(), frame_id, context_id)?;
+        let result = tab
+            .call_method(Runtime::CallFunctionOn {
+                function_declaration: format!("function() {{ return {expression}; }}"),
+                object_id: None,
+                arguments: None,
+                silent: Some(true),
+                return_by_value: Some(true),
+                generate_preview: None,
+                user_gesture: None,
+                await_promise: Some(false),
+                execution_context_id: None,
+                object_group: None,
+                throw_on_side_effect: None,
+                unique_context_id: Some(unique_id),
+                serialization_options: None,
+            })
+            .ok()?;
+        if result.exception_details.is_some() {
+            return None;
+        }
+        result.result.value
     }
 
     pub fn call_injected(&self, tab: &Tab, method: &str, args: Value) -> Result<Value, String> {
@@ -842,8 +883,14 @@ impl WorldManager {
                 target_id,
                 event.params.context.id,
                 &event.params.context.name,
+                &event.params.context.unique_id,
             ),
             Event::RuntimeExecutionContextDestroyed(event) => {
+                self.forget_utility_context_unique_id(
+                    target_id,
+                    event.params.execution_context_id,
+                    &event.params.execution_context_unique_id,
+                );
                 self.context_destroyed(target_id, event.params.execution_context_id)
             }
             Event::RuntimeExecutionContextsCleared(_) => self.contexts_cleared(target_id),
@@ -1002,16 +1049,54 @@ impl WorldManager {
         target_id: &str,
         context_id: Runtime::ExecutionContextId,
         context_name: &str,
+        unique_id: &str,
     ) {
+        let mut state = self.state.lock().unwrap();
         if context_name == UTILITY_WORLD_NAME {
-            self.state
-                .lock()
-                .unwrap()
-                .tabs
-                .entry(target_id.to_string())
-                .or_default()
-                .utility_contexts
-                .insert(context_id);
+            let tab = state.tabs.entry(target_id.to_string()).or_default();
+            tab.utility_contexts.insert(context_id);
+            if !unique_id.is_empty() {
+                tab.utility_context_unique_ids
+                    .insert(context_id, unique_id.to_string());
+            } else {
+                tab.utility_context_unique_ids.remove(&context_id);
+            }
+        } else if let Some(tab) = state.tabs.get_mut(target_id) {
+            tab.utility_context_unique_ids.remove(&context_id);
+        }
+    }
+
+    fn utility_context_unique_id(
+        &self,
+        target_id: &str,
+        frame_id: &str,
+        context_id: Runtime::ExecutionContextId,
+    ) -> Option<String> {
+        let state = self.state.lock().unwrap();
+        let tab = state.tabs.get(target_id)?;
+        if tab.frame_contexts.get(frame_id) != Some(&context_id) {
+            return None;
+        }
+        tab.utility_context_unique_ids.get(&context_id).cloned()
+    }
+
+    fn forget_utility_context_unique_id(
+        &self,
+        target_id: &str,
+        context_id: Runtime::ExecutionContextId,
+        unique_id: &str,
+    ) {
+        let mut state = self.state.lock().unwrap();
+        if let Some(tab) = state.tabs.get_mut(target_id) {
+            if unique_id.is_empty()
+                || tab
+                    .utility_context_unique_ids
+                    .get(&context_id)
+                    .map(String::as_str)
+                    == Some(unique_id)
+            {
+                tab.utility_context_unique_ids.remove(&context_id);
+            }
         }
     }
 
@@ -1081,6 +1166,7 @@ impl WorldManager {
         tab.frame_contexts.clear();
         tab.context_frames.clear();
         tab.utility_contexts.clear();
+        tab.utility_context_unique_ids.clear();
         tab.initialized_contexts.clear();
     }
 
@@ -1311,7 +1397,7 @@ mod tests {
     #[test]
     fn closing_a_tab_forgets_its_world_and_ref_state() {
         let manager = WorldManager::default();
-        manager.context_created(TAB, 7, UTILITY_WORLD_NAME);
+        manager.context_created(TAB, 7, UTILITY_WORLD_NAME, "world-seven");
         manager.record_context(TAB, FRAME.to_string(), 7);
         manager.refs.top_level_navigation(TAB);
         assert_eq!(manager.refs.ref_prefix(TAB).as_deref(), Some("f1"));
@@ -1319,6 +1405,28 @@ mod tests {
         assert_eq!(manager.context_for_frame(TAB, &FRAME.to_string()), None);
         assert!(manager.frame_tree(TAB).is_none());
         assert_eq!(manager.refs.ref_prefix(TAB), None);
+    }
+
+    #[test]
+    fn stream_context_identity_requires_a_live_named_utility_world_for_the_frame() {
+        let manager = WorldManager::default();
+        let identity = || manager.utility_context_unique_id(TAB, FRAME, 7);
+        manager.context_created(TAB, 7, UTILITY_WORLD_NAME, "world-seven");
+        assert_eq!(identity(), None);
+        manager.record_context(TAB, FRAME.to_string(), 7);
+        assert_eq!(identity().as_deref(), Some("world-seven"));
+        manager.forget_utility_context_unique_id(TAB, 7, "world-seven");
+        assert_eq!(identity(), None);
+        manager.context_created(TAB, 7, "", "main-world");
+        assert_eq!(identity(), None);
+        manager.context_created(TAB, 7, UTILITY_WORLD_NAME, "");
+        assert_eq!(identity(), None);
+        manager.context_created(TAB, 7, UTILITY_WORLD_NAME, "replacement-world");
+        manager.forget_utility_context_unique_id(TAB, 7, "world-seven");
+        assert_eq!(identity().as_deref(), Some("replacement-world"));
+        manager.contexts_cleared(TAB);
+        manager.record_context(TAB, FRAME.to_string(), 7);
+        assert_eq!(identity(), None);
     }
 
     #[test]
@@ -1402,7 +1510,7 @@ mod tests {
     #[test]
     fn detaching_a_frame_drops_its_utility_world_context() {
         let manager = WorldManager::default();
-        manager.context_created(TAB, 7, UTILITY_WORLD_NAME);
+        manager.context_created(TAB, 7, UTILITY_WORLD_NAME, "world-seven");
         manager.record_context(TAB, FRAME.to_string(), 7);
 
         manager.frame_detached(TAB, FRAME);
@@ -1419,7 +1527,7 @@ mod tests {
             "record",
             Arc::new(move |call| callback_calls.lock().unwrap().push(call)),
         );
-        manager.context_created(TAB, 9, UTILITY_WORLD_NAME);
+        manager.context_created(TAB, 9, UTILITY_WORLD_NAME, "world-nine");
         manager.dispatch_binding(TAB, 9, r#"{"name":"record","payload":{"ok":true}}"#);
         let calls = calls.lock().unwrap();
         assert_eq!(calls.len(), 1);

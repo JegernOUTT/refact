@@ -3,6 +3,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { setUpStore } from "../app/store";
 import { InnerApp } from "../features/App";
+import {
+  frameStreamResponse,
+  mockFrameDecoder,
+} from "../features/Browser/frameStreamTestUtils";
 import { applyChatEvent, createChatWithId } from "../features/Chat/Thread";
 import { setBackendStatus } from "../features/Connection";
 import { push } from "../features/Pages/pagesSlice";
@@ -156,15 +160,10 @@ const browserHandlers = [
   http.post("*/v1/browser/project/resize", () =>
     HttpResponse.json({ applied: true }),
   ),
-  http.post("*/v1/browser/project/frame", () =>
-    HttpResponse.json({
+  http.post("*/v1/browser/project/frames/subscribe", () =>
+    frameStreamResponse({
       runtime_id: "runtime-a",
       tab_id: "tab-1",
-      mime: "image/png",
-      data: "iVBORw0KGgo=",
-      width: 600,
-      height: 300,
-      viewport: { width: 1200, height: 600 },
       url: "https://example.test/",
       title: "Example",
     }),
@@ -172,6 +171,7 @@ const browserHandlers = [
 ];
 
 afterEach(() => {
+  vi.restoreAllMocks();
   localStorage.clear();
   sessionStorage.clear();
   setProjectStorageNamespace(undefined);
@@ -179,6 +179,7 @@ afterEach(() => {
 
 describe("App project browser auto-open", () => {
   it("opens a chat's browser view while another page is shown, without changing the page", async () => {
+    mockFrameDecoder();
     server.use(...appHandlers, ...browserHandlers);
     setProjectStorageNamespaceFromProjectInfo({
       workspaceRoots: ["/tmp/refact-test"],

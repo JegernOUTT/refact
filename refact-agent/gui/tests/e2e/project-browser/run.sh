@@ -23,6 +23,7 @@ env -i PATH=/usr/bin:/bin:/usr/sbin HOME="$scratch/home" \
   XDG_DATA_HOME="$scratch/data" XDG_RUNTIME_DIR="$scratch/runtime" TMPDIR="$scratch/tmp" \
   REFACT_PROJECT_BROWSER_SCRATCH="$scratch" REFACT_PROJECT_BROWSER_HOST_NET="$host_net" \
   REFACT_PROJECT_BROWSER_ENGINE="$engine" REFACT_PROJECT_BROWSER_CHROME="$chrome" \
+  REFACT_PROJECT_BROWSER_BASELINE="${REFACT_PROJECT_BROWSER_BASELINE:-0}" \
   unshare --user --map-root-user --net --ipc --fork --pid --mount-proc --kill-child sh -ec '
     ip link set lo up
     ip link add fixture0 type dummy

@@ -1,7 +1,7 @@
 import type { ProjectBrowserFrame } from "../../services/refact/browser";
 
 export function framePosition(
-  frame: ProjectBrowserFrame,
+  frame: Pick<ProjectBrowserFrame, "width" | "height" | "viewport">,
   bounds: Pick<DOMRect, "left" | "top" | "width" | "height">,
   clientX: number,
   clientY: number,

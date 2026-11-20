@@ -41,10 +41,10 @@ export function ProjectBrowserTabSurface({ tabId }: { tabId: string }) {
     ownerChatId ? selectBrowserShowInProgress(state, ownerChatId) : false,
   );
   const actions = useProjectBrowserTabActions();
-  const view = useBrowserTabFrame(tabId, status, active, awaitingStatus);
   const [navigate] = browserApi.useProjectBrowserNavigateMutation();
   const [address, setAddress] = useState<string>();
   const [busy, setBusy] = useState(false);
+  const view = useBrowserTabFrame(tabId, status, active, awaitingStatus, busy);
   const [commandError, setCommandError] = useState<string>();
   const tab = status?.tabs.find((item) => item.tab_id === tabId);
   const live = status?.connected === true && Boolean(tab) && !view.closed;

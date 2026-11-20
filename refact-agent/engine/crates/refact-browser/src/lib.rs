@@ -26,6 +26,7 @@ mod locators;
 mod mouse;
 mod network;
 pub mod profiling;
+pub mod project_frame_stream;
 mod refs;
 mod routing;
 pub mod screencast;
@@ -790,6 +791,17 @@ impl RuntimeOwnership {
 
     pub fn is_connection_epoch(&self, epoch: u64) -> bool {
         self.is_current_generation() && self.connection_epoch() == epoch
+    }
+
+    pub(crate) fn has_stream_tab(&self, expected: &Arc<headless_chrome::Tab>) -> bool {
+        let browser = self
+            .connection
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        browser
+            .get_tabs()
+            .lock()
+            .is_ok_and(|tabs| tabs.iter().any(|tab| Arc::ptr_eq(tab, expected)))
     }
 
     pub fn process_id(&self) -> Option<u32> {
@@ -1762,6 +1774,7 @@ impl BrowserRuntime {
     }
 
     pub fn remove_tab_metadata(&mut self, target_id: &str) {
+        screencast::retire_project_screencast(target_id);
         self.adopted_tab_target_ids
             .retain(|adopted| adopted != target_id);
         self.tab_openers.remove(target_id);

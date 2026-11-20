@@ -31,6 +31,7 @@ test.skip(
 );
 
 const browserEndpoint = "/v1/browser/project/";
+const baseline = process.env.REFACT_PROJECT_BROWSER_BASELINE === "1";
 
 type BrowserFrame = {
   runtime_id: string;
@@ -86,6 +87,7 @@ const logClock = (at: number) => {
 type BrowserRequest = {
   route: string;
   tab_id: string | null;
+  runtime_id: string | null;
   kind: string | null;
   started: string;
   ended: string | null;
@@ -93,15 +95,135 @@ type BrowserRequest = {
   endAt: number | null;
   ms: number | null;
   status: number | null;
+  responseAt: number | null;
   failure: string | null;
 };
 
-function observe(page: Page) {
+async function observe(page: Page) {
   const frames = new Map<string, BrowserFrame>();
   const frameLog: { tab_id: string; url: string; title: string; at: number }[] =
     [];
+  const streamErrors: {
+    tab_id: string;
+    status: number | null;
+    detail: string;
+  }[] = [];
+  await page.exposeBinding(
+    "__projectBrowserRecord",
+    (
+      _source,
+      record: {
+        type: string;
+        frame?: BrowserFrame;
+        error?: { tab_id: string; status: number | null; detail: string };
+      },
+    ) => {
+      if (record.error) streamErrors.push(record.error);
+      if (record.type === "frame" && record.frame) {
+        const frame = record.frame;
+        frames.set(frame.tab_id, frame);
+        if (frameLog.length === 128) frameLog.shift();
+        frameLog.push({
+          tab_id: frame.tab_id,
+          url: frame.url,
+          title: frame.title,
+          at: Date.now(),
+        });
+      }
+    },
+  );
+  await page.addInitScript(() => {
+    const nativeFetch = window.fetch;
+    window.fetch = async (...args) => {
+      const response = await nativeFetch(...args);
+      const signal =
+        args[1]?.signal ??
+        (args[0] instanceof Request ? args[0].signal : undefined);
+      if (
+        !response.url.includes("/v1/browser/project/frames/subscribe") ||
+        !response.ok ||
+        !response.body
+      )
+        return response;
+      const reader = response.clone().body!.getReader();
+      const body =
+        typeof args[1]?.body === "string"
+          ? (JSON.parse(args[1].body) as { tab_id?: string })
+          : {};
+      const tabId = body.tab_id ?? "";
+      signal?.addEventListener(
+        "abort",
+        () => {
+          void reader.cancel();
+        },
+        { once: true },
+      );
+      const report = (record: unknown) =>
+        (
+          window as unknown as {
+            __projectBrowserRecord: (record: unknown) => Promise<void>;
+          }
+        ).__projectBrowserRecord(record);
+      void (async () => {
+        let buffer = new Uint8Array(0);
+        try {
+          for (;;) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            const next = new Uint8Array(buffer.length + value.length);
+            next.set(buffer);
+            next.set(value, buffer.length);
+            buffer = next;
+            while (buffer.length >= 8) {
+              const view = new DataView(
+                buffer.buffer,
+                buffer.byteOffset,
+                buffer.byteLength,
+              );
+              const header = view.getUint32(0);
+              const payload = view.getUint32(4);
+              if (header > 65536 || payload > 16 * 1024 * 1024)
+                throw new Error("oversized stream record");
+              const length = 8 + header + payload;
+              if (buffer.length < length) break;
+              const parsed = JSON.parse(
+                new TextDecoder().decode(buffer.subarray(8, 8 + header)),
+              ) as { type: string };
+              if (parsed.type === "frame") {
+                if (!payload) throw new Error("empty stream frame");
+                await report({ type: "frame", frame: parsed });
+              } else if (parsed.type === "error") {
+                await report({
+                  type: "error",
+                  error: {
+                    tab_id: tabId,
+                    status: (parsed as { status?: number }).status ?? null,
+                    detail: JSON.stringify(parsed),
+                  },
+                });
+              } else if (parsed.type !== "heartbeat" || payload !== 0)
+                throw new Error("invalid stream record");
+              buffer = buffer.slice(length);
+            }
+          }
+          if (buffer.length && !signal?.aborted)
+            throw new Error("truncated stream record");
+        } catch (error) {
+          if (!signal?.aborted)
+            await report({
+              type: "observer-error",
+              error: { tab_id: tabId, status: null, detail: String(error) },
+            });
+        } finally {
+          reader.releaseLock();
+        }
+      })();
+      return response;
+    };
+  });
   const requests: BrowserRequest[] = [];
   const pending = new Map<object, { entry: BrowserRequest; at: number }>();
+  const byRequest = new Map<object, BrowserRequest>();
   const finish = (
     request: object,
     status: number | null,
@@ -114,7 +236,7 @@ function observe(page: Page) {
     open.entry.ended = logClock(at);
     open.entry.endAt = at;
     open.entry.ms = at - open.at;
-    open.entry.status = status;
+    if (status !== null) open.entry.status = status;
     open.entry.failure = failure;
   };
   page.on("request", (request) => {
@@ -122,6 +244,7 @@ function observe(page: Page) {
     if (!url.pathname.includes(browserEndpoint)) return;
     const body = JSON.parse(request.postData() || "{}") as {
       tab_id?: string;
+      runtime_id?: string;
       kind?: string;
       op?: string;
     };
@@ -131,6 +254,7 @@ function observe(page: Page) {
         url.pathname.indexOf(browserEndpoint) + browserEndpoint.length,
       ),
       tab_id: body.tab_id ?? null,
+      runtime_id: body.runtime_id ?? null,
       kind: body.kind ?? body.op ?? null,
       started: logClock(at),
       ended: null,
@@ -138,9 +262,11 @@ function observe(page: Page) {
       endAt: null,
       ms: null,
       status: null,
+      responseAt: null,
       failure: null,
     };
     requests.push(entry);
+    byRequest.set(request, entry);
     pending.set(request, { entry, at });
   });
   page.on("requestfinished", (request) => {
@@ -162,6 +288,27 @@ function observe(page: Page) {
   page.on("response", (response) => {
     const url = new URL(response.url());
     responses.push({ path: url.pathname, status: response.status() });
+    const entry = byRequest.get(response.request());
+    if (entry) {
+      entry.status = response.status();
+      entry.responseAt = Date.now();
+    }
+    if (
+      baseline &&
+      response.ok() &&
+      url.pathname.endsWith(`${browserEndpoint}frame`)
+    ) {
+      void response.json().then((frame: BrowserFrame) => {
+        frames.set(frame.tab_id, frame);
+        if (frameLog.length === 128) frameLog.shift();
+        frameLog.push({
+          tab_id: frame.tab_id,
+          url: frame.url,
+          title: frame.title,
+          at: Date.now(),
+        });
+      });
+    }
     if (url.pathname.includes(browserEndpoint) && response.status() >= 400) {
       void response
         .text()
@@ -176,25 +323,11 @@ function observe(page: Page) {
           }),
         );
     }
-    if (response.ok() && url.pathname.endsWith(`${browserEndpoint}frame`)) {
-      void response
-        .json()
-        .then((body: BrowserFrame) => {
-          frames.set(body.tab_id, body);
-          if (frameLog.length === 128) frameLog.shift();
-          frameLog.push({
-            tab_id: body.tab_id,
-            url: body.url,
-            title: body.title,
-            at: Date.now(),
-          });
-        })
-        .catch(() => undefined);
-    }
   });
   return {
     frame: (tabId: string) => frames.get(tabId),
     frameLog,
+    streamErrors,
     responses,
     failures,
     requests,
@@ -210,7 +343,93 @@ function observe(page: Page) {
       ),
   };
 }
-type Observer = ReturnType<typeof observe>;
+type Observer = Awaited<ReturnType<typeof observe>>;
+
+function invalidSubscribeAttempts(
+  requests: BrowserRequest[],
+  closedAt: Map<string, number> = new Map(),
+  restart?: { at: number; ready: number; identities: Set<string> },
+) {
+  return requests.filter((request) => {
+    if (request.route !== "frames/subscribe") return false;
+    const refusedDuringRestart =
+      restart &&
+      request.failure === "net::ERR_CONNECTION_REFUSED" &&
+      request.startAt >= restart.at &&
+      request.endAt !== null &&
+      request.endAt <= restart.ready &&
+      restart.identities.has(`${request.runtime_id}:${request.tab_id}`);
+    if (request.status === 200)
+      return request.failure !== null && request.failure !== "net::ERR_ABORTED";
+    if (request.status === null) {
+      if (request.failure === "net::ERR_ABORTED") return false;
+      return !refusedDuringRestart;
+    }
+    const closed = closedAt.get(request.tab_id ?? "");
+    const afterClose =
+      closed !== undefined && (request.responseAt ?? 0) >= closed;
+    const afterRestart =
+      restart !== undefined &&
+      restart.identities.has(`${request.runtime_id}:${request.tab_id}`) &&
+      (request.responseAt ?? 0) >= restart.at;
+    return !(
+      (request.status === 410 && afterClose) ||
+      ([404, 410].includes(request.status) && afterRestart)
+    );
+  });
+}
+
+test("subscription audit checks each attempt and lifecycle boundaries", () => {
+  const attempt = (
+    status: number | null,
+    failure: string | null = null,
+  ): BrowserRequest => ({
+    route: "frames/subscribe",
+    tab_id: "tab",
+    runtime_id: "runtime",
+    kind: null,
+    started: "",
+    ended: "",
+    startAt: 10,
+    endAt: 12,
+    ms: 2,
+    status,
+    responseAt: status === null ? null : 11,
+    failure,
+  });
+  const ok = attempt(200);
+  for (const status of [201, 204, 409, 500]) {
+    const bad = attempt(status, "net::ERR_ABORTED");
+    expect(invalidSubscribeAttempts([bad, ok])).toEqual([bad]);
+  }
+  expect(
+    invalidSubscribeAttempts([attempt(null, "net::ERR_ABORTED"), ok]),
+  ).toEqual([]);
+  expect(invalidSubscribeAttempts([attempt(null), ok])).toHaveLength(1);
+  const brokenStream = attempt(200, "net::ERR_CONNECTION_RESET");
+  expect(invalidSubscribeAttempts([brokenStream, ok])).toEqual([brokenStream]);
+  const refused = attempt(null, "net::ERR_CONNECTION_REFUSED");
+  const restart = { at: 10, ready: 12, identities: new Set(["runtime:tab"]) };
+  expect(invalidSubscribeAttempts([refused], new Map(), restart)).toEqual([]);
+  expect(
+    invalidSubscribeAttempts([refused], new Map(), { ...restart, ready: 11 }),
+  ).toEqual([refused]);
+  expect(
+    invalidSubscribeAttempts([refused], new Map(), {
+      ...restart,
+      identities: new Set(["other:tab"]),
+    }),
+  ).toEqual([refused]);
+  const gone = attempt(410);
+  expect(invalidSubscribeAttempts([gone], new Map([["tab", 12]]))).toEqual([
+    gone,
+  ]);
+  expect(invalidSubscribeAttempts([gone], new Map([["tab", 11]]))).toEqual([]);
+  expect(
+    invalidSubscribeAttempts([gone], new Map(), { ...restart, at: 12 }),
+  ).toEqual([gone]);
+  expect(invalidSubscribeAttempts([gone], new Map(), restart)).toEqual([]);
+});
 
 const timeline: { name: string; at: number; local: string }[] = [];
 
@@ -228,7 +447,7 @@ async function newGuiPage(browser: Browser) {
     serviceWorkers: "block",
   });
   const page = await context.newPage();
-  return { context, page, net: observe(page) };
+  return { context, page, net: await observe(page) };
 }
 
 async function sendMessage(page: Page, text: string) {
@@ -405,6 +624,7 @@ async function writeRouteEvidence(info: TestInfo, observers: Observer[]) {
       {
         timeline,
         recentFrames: observers.map((net) => net.frameLog),
+        streamErrors: observers.flatMap((net) => net.streamErrors),
         failures: observers.flatMap((net) =>
           net.failures.map((failure) => ({
             ...failure,
@@ -632,7 +852,11 @@ test("standalone worker on 0.0.0.0 via a non-loopback host: chat-driven Browser 
   const observers: Observer[] = [];
   let tabA = "";
   const closedTabs = new Set<string>();
+  const closedAt = new Map<string, number>();
   const beforeRestart = new Set<string>();
+  const restartIdentities = new Set<string>();
+  let restartAt = 0;
+  let restartReady = 0;
   let tabB = "";
 
   try {
@@ -738,8 +962,10 @@ test("standalone worker on 0.0.0.0 via a non-loopback host: chat-driven Browser 
       const window = () =>
         net.requests.filter(
           (request) =>
-            request.startAt >= startedAt &&
-            ["input", "frame"].includes(request.route),
+            (request.startAt >= startedAt || request.endAt === null) &&
+            ["input", baseline ? "frame" : "frames/subscribe"].includes(
+              request.route,
+            ),
         );
       await expect
         .poll(() =>
@@ -749,7 +975,10 @@ test("standalone worker on 0.0.0.0 via a non-loopback host: chat-driven Browser 
         )
         .toBe(true);
       const inputs = window().filter((request) => request.route === "input");
-      const frames = window().filter((request) => request.route === "frame");
+      const frames = window().filter(
+        (request) =>
+          request.route === (baseline ? "frame" : "frames/subscribe"),
+      );
       const overlapping = inputs.map((input) => ({
         input,
         frames: frames.filter(
@@ -783,22 +1012,238 @@ test("standalone worker on 0.0.0.0 via a non-loopback host: chat-driven Browser 
         inputs.filter((input) => (input.ms ?? Infinity) >= 3_000),
         "no input reaches the 3 s input deadline",
       ).toEqual([]);
+      if (!baseline)
+        expect(
+          overlapping.some(({ frames: inFlight }) => inFlight.length > 0),
+          "an input must overlap the active stream",
+        ).toBe(true);
       expect(
         overlapping.filter(
           ({ input, frames: inFlight }) =>
             inFlight.length > 0 && (input.ms ?? Infinity) > 1_500,
         ),
-        "an input sent while a frame of its tab was being captured must not wait for that capture",
+        "an input sent while the frame stream was open must not wait for the stream",
       ).toEqual([]);
       await picture(page!, info, "A03-signed-in-inside-frame");
     });
 
+    await test.step("controlled pane animation and wheel show timely distinct painted frames", async () => {
+      const address = browserView(page!).getByRole("textbox", {
+        name: "Address",
+      });
+      await address.fill(`${site.origin}/cadence`);
+      await address.press("Enter");
+      await expect
+        .poll(() => net.frame(tabA)?.url, { timeout: 30_000 })
+        .toBe(`${site.origin}/cadence`);
+      const state = net.frame(tabA);
+      if (!state) throw new Error("No cadence frame");
+      await expect(frameImage(page!)).toHaveAttribute(
+        "src",
+        baseline ? /^data:image\// : /^blob:/,
+      );
+      await page!.evaluate(
+        ({ viewport }) => {
+          const image = document.querySelector<HTMLImageElement>(
+            'section[aria-label="Browser tab"] img[alt="Browser page"]',
+          );
+          if (!image) throw new Error("No displayed pane image");
+          const canvas = document.createElement("canvas");
+          canvas.width = 96;
+          canvas.height = 64;
+          const context = canvas.getContext("2d", { willReadFrequently: true });
+          if (!context) throw new Error("No canvas context");
+          const samples: {
+            at: number;
+            hash: number;
+            button: number[];
+            stripe: number[];
+          }[] = [];
+          const start = performance.now();
+          const result = { samples, inputAt: 0, start, end: 0 };
+          (window as unknown as { __cadence: typeof result }).__cadence =
+            result;
+          image.addEventListener(
+            "mousedown",
+            () => {
+              result.inputAt = performance.now();
+            },
+            { once: true, capture: true },
+          );
+          const sample = () => {
+            if (result.inputAt && performance.now() - result.inputAt >= 4500) {
+              result.end = performance.now();
+              return;
+            }
+            if (image.complete && image.naturalWidth > 0) {
+              context.drawImage(image, 0, 0, 96, 64);
+              const pixels = context.getImageData(0, 0, 96, 64).data;
+              let hash = 2166136261;
+              for (let i = 0; i < pixels.length; i += 4)
+                hash = Math.imul(
+                  hash ^
+                    pixels[i] ^
+                    (pixels[i + 1] << 8) ^
+                    (pixels[i + 2] << 16),
+                  16777619,
+                );
+              const x = Math.floor((40 / viewport.width) * 96);
+              const y = Math.floor((40 / viewport.height) * 64);
+              const offset = (y * 96 + x) * 4;
+              samples.push({
+                at: performance.now(),
+                hash: hash >>> 0,
+                button: Array.from(pixels.slice(offset, offset + 3)),
+                stripe: Array.from(
+                  pixels.slice(
+                    (Math.floor((350 / viewport.height) * 64) * 96 +
+                      Math.floor(
+                        ((viewport.width - 30) / viewport.width) * 96,
+                      )) *
+                      4,
+                    (Math.floor((350 / viewport.height) * 64) * 96 +
+                      Math.floor(
+                        ((viewport.width - 30) / viewport.width) * 96,
+                      )) *
+                      4 +
+                      3,
+                  ),
+                ),
+              });
+            }
+            requestAnimationFrame(sample);
+          };
+          requestAnimationFrame(sample);
+        },
+        { viewport: state.viewport },
+      );
+      await page!.waitForFunction(
+        () =>
+          (
+            window as unknown as {
+              __cadence?: { samples: { button: number[] }[] };
+            }
+          ).__cadence?.samples.some(
+            (sample) => sample.button[0] > sample.button[1] * 1.5,
+          ) ?? false,
+      );
+      const button = await framePoint(frameImage(page!), state, 60, 50);
+      await page!.mouse.click(button.x, button.y);
+      const middle = await framePoint(frameImage(page!), state, 300, 350);
+      await page!.mouse.move(middle.x, middle.y);
+      const visits = site.visits.length;
+      await page!.mouse.wheel(0, 500);
+      await expect
+        .poll(() => site.lastVisit("/cadence-scrolled", visits), {
+          timeout: 10_000,
+        })
+        .toBeDefined();
+      await page!.waitForFunction(
+        () =>
+          Boolean(
+            (window as unknown as { __cadence?: { end: number } }).__cadence
+              ?.end,
+          ),
+        null,
+        { timeout: 10_000 },
+      );
+      const metric = await page!.evaluate(
+        () =>
+          (
+            window as unknown as {
+              __cadence: {
+                inputAt: number;
+                start: number;
+                end: number;
+                samples: {
+                  at: number;
+                  hash: number;
+                  button: number[];
+                  stripe: number[];
+                }[];
+              };
+            }
+          ).__cadence,
+      );
+      const before = metric.samples
+        .filter((sample) => sample.at < metric.inputAt)
+        .at(-1);
+      const changed = metric.samples.find(
+        (sample) =>
+          sample.at > metric.inputAt &&
+          sample.button[1] > sample.button[0] * 1.5,
+      );
+      const changes = metric.samples
+        .filter(
+          (sample, index, samples) =>
+            index > 0 &&
+            sample.at > metric.inputAt &&
+            sample.hash !== samples[index - 1].hash,
+        )
+        .map((sample) => sample.at - metric.inputAt);
+      const distinct = new Set(
+        metric.samples
+          .filter((sample) => sample.at > metric.inputAt)
+          .map((sample) => sample.hash),
+      ).size;
+      const evidence = {
+        definition:
+          "inputAt is GUI image mousedown capture; first green button pixel is sampled from the displayed decoded img on animation frames; distinct hashes are downsampled displayed image pixels sampled until 4.5s, including wheel and animation",
+        viewport: state.viewport,
+        image: { width: state.width, height: state.height },
+        inputAt: metric.inputAt,
+        baseline: before,
+        firstChange: changed,
+        finalSample: metric.samples.at(-1),
+        latency_ms: changed ? changed.at - metric.inputAt : null,
+        distinct,
+        visible_change_offsets_ms: changes,
+        observed_change_rate_hz:
+          changes.length / ((metric.end - metric.inputAt) / 1000),
+        samples: metric.samples.length,
+      };
+      await writeFile(
+        info.outputPath("pane-cadence.json"),
+        JSON.stringify(evidence, null, 2),
+      );
+      expect(metric.inputAt).toBeGreaterThan(0);
+      expect(before, "sample a red button before input").toBeDefined();
+      expect(before!.stripe[2], "unscrolled stripe is blue").toBeGreaterThan(
+        before!.stripe[0] * 1.5,
+      );
+      expect(
+        metric.samples.at(-1)!.stripe[0],
+        "scroll produces the yellow stripe in the displayed image",
+      ).toBeGreaterThan(metric.samples.at(-1)!.stripe[2] * 1.5);
+      expect(before!.button[0]).toBeGreaterThan(before!.button[1] * 1.5);
+      expect(
+        changed,
+        "button's green pixels must appear in the displayed image",
+      ).toBeDefined();
+      expect(changed!.at - metric.inputAt).toBeLessThan(3_000);
+      expect(
+        distinct,
+        "animation and wheel must produce at least four distinct displayed pixel samples (liveness only, not a calibrated throughput threshold)",
+      ).toBeGreaterThanOrEqual(4);
+      await picture(page!, info, "A03b-cadence");
+    });
+
     await test.step("closing the view, then another tool call reopens it on the signed-in page", async () => {
+      const priorStreams = net.requests.filter(
+        (request) =>
+          request.route === "frames/subscribe" && request.tab_id === tabA,
+      );
+      if (!baseline) expect(priorStreams.length).toBeGreaterThan(0);
+      const activeStream = priorStreams.at(-1)!;
       await page!
         .getByRole("button", { name: "Close Fixture login", exact: true })
         .click();
       await expect(workspaceTab(page!, "Fixture login")).toHaveCount(0);
       await expect(browserView(page!)).toHaveCount(0);
+      if (!baseline)
+        await expect
+          .poll(() => activeStream.endAt, { timeout: 15_000 })
+          .not.toBeNull();
       await sendMessage(page!, say.plain);
       await expect(
         page!.getByText("Fixture model reply (plain).", { exact: true }),
@@ -818,6 +1263,13 @@ test("standalone worker on 0.0.0.0 via a non-loopback host: chat-driven Browser 
           frame.title === "Signed in as alpha-user",
       );
       expect(reopened).toBe(tabA);
+      if (!baseline)
+        expect(
+          net.requests.filter(
+            (request) =>
+              request.route === "frames/subscribe" && request.tab_id === tabA,
+          ).length,
+        ).toBeGreaterThan(priorStreams.length);
       expect(site.lastVisit("/check", before)?.cookie).toContain(
         "fixture_login=alpha-user",
       );
@@ -991,6 +1443,7 @@ test("standalone worker on 0.0.0.0 via a non-loopback host: chat-driven Browser 
       await expect(items.nth(index)).toContainText("Alpha chat one");
       await picture(page!, info, "A06-new-tab-next-to-chat");
 
+      closedAt.set(created, Date.now());
       await items
         .nth(index)
         .getByRole("button", { name: /^Close tab: / })
@@ -1016,6 +1469,7 @@ test("standalone worker on 0.0.0.0 via a non-loopback host: chat-driven Browser 
       if (!doomed || doomed === created)
         throw new Error("Second new tab view has no fresh tab id");
       closedTabs.add(doomed);
+      closedAt.set(doomed, Date.now());
       await alpha.request(`${browserEndpoint}tab`, {
         op: "close",
         tab_id: doomed,
@@ -1087,9 +1541,29 @@ test("standalone worker on 0.0.0.0 via a non-loopback host: chat-driven Browser 
     });
 
     await test.step("restart the worker: the persisted view shows the closed state, one-click recovery opens a live signed-in tab, and the next tool call stays on it", async () => {
+      for (const request of net.requests)
+        if (
+          request.route === "frames/subscribe" &&
+          request.status === 200 &&
+          (request.tab_id === tabA || request.tab_id === tabB) &&
+          request.runtime_id
+        )
+          restartIdentities.add(`${request.runtime_id}:${request.tab_id}`);
+      restartAt = Date.now();
+      timeline.push({
+        name: "worker-stop-start",
+        at: restartAt,
+        local: logClock(restartAt),
+      });
       await alpha.stopWorker();
       for (const id of [tabA, tabB]) beforeRestart.add(id);
       await alpha.start(alpha.port);
+      restartReady = Date.now();
+      timeline.push({
+        name: "worker-restart-ready",
+        at: restartReady,
+        local: logClock(restartReady),
+      });
       await page!.goto(`${alpha.origin}/?chat=${chatOne}`);
       await expect(composer(page!)).toBeVisible({ timeout: 30_000 });
       const stale = page!.locator(`[data-browser-tab-id="${tabA}"]`);
@@ -1206,6 +1680,36 @@ test("standalone worker on 0.0.0.0 via a non-loopback host: chat-driven Browser 
 
     for (const net of observers) {
       expect(net.denied()).toEqual([]);
+      expect(
+        net.streamErrors.filter(
+          (failure) =>
+            !(
+              (failure.status === 410 && closedTabs.has(failure.tab_id)) ||
+              ([404, 410].includes(failure.status ?? 0) &&
+                beforeRestart.has(failure.tab_id))
+            ),
+        ),
+      ).toEqual([]);
+      if (!baseline)
+        expect(
+          net.requests.filter((request) => request.route === "frame"),
+          "the pane must not poll /frame",
+        ).toEqual([]);
+      if (!baseline)
+        await expect
+          .poll(
+            () =>
+              invalidSubscribeAttempts(net.requests, closedAt, {
+                at: restartAt,
+                ready: restartReady,
+                identities: restartIdentities,
+              }),
+            {
+              message:
+                "every subscription attempt must receive HTTP 200 or have an explicitly expected terminal outcome",
+            },
+          )
+          .toEqual([]);
       await settledFailures(net);
       recordTransientConflicts(info, [net]);
       expect(
@@ -1332,15 +1836,28 @@ for (const authEnabled of [false, true]) {
       const status = await inPagePost(page, `${base}${browserEndpoint}status`);
       expect(status.status).toBe(200);
       expect((JSON.parse(status.body) as BrowserStatus).running).toBe(true);
+      expect(net.streamErrors).toEqual([]);
+      if (!baseline)
+        expect(
+          net.requests.filter((request) => request.route === "frame"),
+          "the pane must not poll /frame",
+        ).toEqual([]);
       const routes = net.browserResponses();
       expect(routes.filter(({ status }) => status === 401)).toEqual([]);
+      if (!baseline)
+        await expect
+          .poll(() => invalidSubscribeAttempts(net.requests), {
+            message:
+              "every subscription attempt must receive HTTP 200 or abort without a response",
+          })
+          .toEqual([]);
       await settledFailures(net);
       recordTransientConflicts(info, [net]);
       expect(
         net.failures.filter((failure) => !isTransientRendererConflict(failure)),
         "only transient renderer 409s on /frame or /resize are allowed",
       ).toEqual([]);
-      for (const route of ["status", "frame"])
+      for (const route of ["status", baseline ? "frame" : "frames/subscribe"])
         expect(
           routes.some(
             ({ path, status }) =>

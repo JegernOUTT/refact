@@ -688,9 +688,12 @@ export async function startSite() {
     res.setHeader(
       "Content-Security-Policy",
       `default-src 'none'; ${
-        path === "/login" && url.searchParams.has("wait")
+        (path === "/login" && url.searchParams.has("wait")) ||
+        path === "/cadence"
           ? "connect-src 'self';"
           : ""
+      } ${
+        path === "/cadence" ? "script-src 'unsafe-inline';" : ""
       } style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'`,
     );
     if (path === "/signin" && user) {
@@ -712,6 +715,13 @@ export async function startSite() {
         "Set-Cookie",
         `fixture_legacy=${legacy}; Max-Age=86400; Path=/; HttpOnly; SameSite=Lax`,
       );
+    }
+    if (path === "/cadence") {
+      res.end(`<!doctype html><html><meta charset="utf-8"><title>Cadence fixture</title>
+        <style>body{margin:0;background:#18304c}button{position:fixed;top:20px;left:20px;width:200px;height:80px;font-size:24px;z-index:2;background:#b02030}#marker{position:fixed;top:120px;left:30px;width:180px;height:120px;background:#d02030}.running button{background:#20d050}.running #marker{animation:move .7s linear infinite alternate}@keyframes move{to{transform:translateX(220px);background:#20e050}}#stripes{height:4000px;background:linear-gradient(to bottom,#193858 0 470px,#e8d048 470px 4000px)}</style>
+        <button onclick="document.body.classList.add('running');this.textContent='Running'">Start animation</button><div id="marker"></div><div id="stripes"></div>
+        <script>let reported=false;addEventListener('scroll',()=>{if(!reported){reported=true;fetch('/cadence-scrolled')}})</script></html>`);
+      return;
     }
     const form =
       path === "/login"
