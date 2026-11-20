@@ -1118,7 +1118,7 @@ async fn get_or_create_session_under_transition(
         let work_project_root =
             crate::coordination::scope::restored_source_root(&app, &loaded.source_path).await;
         let restored_planner_path =
-            crate::tasks::custody::is_legacy_owner_candidate(chat_id, &loaded.thread)
+            crate::tasks::custody::is_saved_legacy_owner_candidate(chat_id, &loaded)
                 .then_some(loaded.source_path);
         let mut session = ChatSession::new_with_trajectory(
             chat_id.to_string(),

@@ -3,6 +3,8 @@ import {
   setContentCard,
 } from "../Workspace/workspaceSlice";
 import React, { useCallback, useState, useEffect, useMemo } from "react";
+import { useStore } from "react-redux";
+import type { AppStore } from "../../app/store";
 import { Flex, Box, Text } from "@radix-ui/themes";
 import {
   Badge,
@@ -42,6 +44,7 @@ import {
   tasksApi,
   taskErrorMessage,
   type TaskBoard,
+  type TrajectoryInfo,
 } from "../../services/refact/tasks";
 import { getEngineEndpointIdentity } from "../../services/refact/apiUrl";
 import { Markdown } from "../../components/Markdown";
@@ -61,6 +64,7 @@ import {
   openTask,
   addPlannerChat,
   removePlannerChat,
+  restorePlannerChat,
   selectOpenTasksFromRoot,
   setTaskActiveChat,
   selectTaskActiveChat,
@@ -125,6 +129,13 @@ type ActiveChat =
   | { type: "planner"; chatId: string }
   | { type: "agent"; cardId: string; chatId: string }
   | null;
+
+const useAppStore = useStore.withTypes<AppStore>();
+
+function isListedLinkedChat(traj: TrajectoryInfo, ownerId?: string): boolean {
+  const role = traj.task_role ?? (traj.id === ownerId ? "planner" : undefined);
+  return isLinkedTaskChat(traj.mode, role);
+}
 
 const LEGACY_WORKTREE_TOOLTIP =
   "This worktree was created before the registry; recreate it via `restart_agent(mode=fresh)` to enable actions.";
@@ -254,7 +265,7 @@ export const PlannerItem: React.FC<PlannerItemProps> = ({
   const statusDot = getStatusFromSessionState(sessionState);
   const mode = planner.mode ?? thread?.mode;
   const isLinked = isLinkedTaskChat(mode, thread?.task_meta?.role);
-  const showModeBadge = isLinked && Boolean(mode);
+  const showModeBadge = Boolean(mode) && (isLinked || isLinkedTaskChat(mode));
   const isWaiting = sessionState === "waiting_user_input";
   const waitingCards = planner.waitingForCardIds ?? [];
   const showWaitingChips = isWaiting && waitingCards.length > 0;
@@ -799,7 +810,7 @@ const NewChatModeButton: React.FC<NewChatModeButtonProps> = ({
           className={styles.headerActionButton}
           disabled={disabled}
           aria-label="New chat"
-          title="New chat"
+          title="Create a linked chat without changing the board owner"
         >
           <Plus size={15} />
           <Text size="1">Chat</Text>
@@ -818,7 +829,7 @@ const NewChatModeButton: React.FC<NewChatModeButtonProps> = ({
           color="gray"
           className={styles.sectionHeaderLabel}
         >
-          New chat
+          New linked chat
         </Text>
         {modes.length === 0 ? (
           <Text size="1" color="gray">
@@ -1231,9 +1242,10 @@ const TaskWorkspaceContent: React.FC<TaskWorkspaceProps> = ({
   const activePane = usePaneSurfaceActive();
   const [goalOpen, setGoalOpen] = useState(false);
   const dispatch = useAppDispatch();
+  const store = useAppStore();
   const config = useAppSelector(selectConfig);
   const {
-    data: task,
+    currentData: task,
     isLoading: taskLoading,
     isError: taskError,
     error: taskQueryError,
@@ -1242,7 +1254,7 @@ const TaskWorkspaceContent: React.FC<TaskWorkspaceProps> = ({
     pollingInterval: 0,
   });
   const {
-    data: board,
+    currentData: board,
     isLoading: boardLoading,
     isFetching: boardFetching,
     isError: boardError,
@@ -1254,11 +1266,12 @@ const TaskWorkspaceContent: React.FC<TaskWorkspaceProps> = ({
   const { data: worktreesData, isLoading: worktreesLoading } =
     useListWorktreesQuery(undefined);
   const [openWorktree] = useOpenWorktreeMutation();
+  const boardOwnerId = board?.owner_chat_id;
   const [deleteWorktree, deleteWorktreeState] = useDeleteWorktreeMutation();
   const copyToClipboard = useCopyToClipboard();
   const { openFolderInNewWindow } = useEventsBusForIDE();
   const {
-    data: savedPlanners,
+    currentData: savedPlanners,
     isLoading: savedPlannersLoading,
     isFetching: plannersFetching,
     error: plannersError,
@@ -1268,7 +1281,7 @@ const TaskWorkspaceContent: React.FC<TaskWorkspaceProps> = ({
     role: "planner",
   });
   const {
-    data: savedAgents,
+    currentData: savedAgents,
     isFetching: agentsFetching,
     error: agentsError,
     refetch: refetchAgents,
@@ -1325,14 +1338,39 @@ const TaskWorkspaceContent: React.FC<TaskWorkspaceProps> = ({
     }
     return result;
   }, [savedAgents, board?.cards]);
-  const activeChat = useAppSelector((state) =>
+  const requestedChat = useAppSelector((state) =>
     selectTaskActiveChat(state, taskId),
   );
-  const activeChatRef = React.useRef(activeChat);
-  activeChatRef.current = activeChat;
+  const pendingPlannerIds = useMemo(
+    () => new Set(currentTaskUI?.pendingPlannerIds),
+    [currentTaskUI?.pendingPlannerIds],
+  );
+  const deletedPlannerIdsRef = React.useRef<Set<string>>(new Set());
+  const activeChat =
+    requestedChat &&
+    (requestedChat.type === "agent"
+      ? board?.cards.some(
+          (card) =>
+            card.id === requestedChat.cardId &&
+            card.agent_chat_id === requestedChat.chatId,
+        )
+      : !deletedPlannerIdsRef.current.has(requestedChat.chatId) &&
+        (pendingPlannerIds.has(requestedChat.chatId) ||
+          savedPlanners?.some(
+            (planner) => planner.id === requestedChat.chatId,
+          )))
+      ? requestedChat
+      : null;
   const hasActiveChatRuntime = useAppSelector((state) =>
     activeChat ? Boolean(selectRuntimeById(state, activeChat.chatId)) : false,
   );
+  const activeRole = useAppSelector((state) =>
+    activeChat
+      ? selectThreadById(state, activeChat.chatId)?.task_meta?.role
+      : undefined,
+  );
+  const activeChatRef = React.useRef(activeChat);
+  activeChatRef.current = activeChat;
   const currentThreadId = useAppSelector(selectCurrentThreadId);
   const selectedCardId = useAppSelector(
     (state) => state.workspace.contentCardByTask?.[taskId] ?? null,
@@ -1399,10 +1437,6 @@ const TaskWorkspaceContent: React.FC<TaskWorkspaceProps> = ({
     dispatch(setContentTaskView({ taskId, view: workspaceTab }));
   }, [dispatch, taskId, routedTab, explicitTab, savedPlanners, workspaceTab]);
   const prevTaskStatusRef = React.useRef<string | undefined>(undefined);
-  // Just-created chats are protected from reconciliation until the saved
-  // trajectory list refetch includes them (prevents bouncing to old planner).
-  const pendingCreatedPlannerIdsRef = React.useRef<Set<string>>(new Set());
-  const deletedPlannerIdsRef = React.useRef<Set<string>>(new Set());
   const worktreeRecords = useMemo(
     () => worktreesData?.worktrees ?? [],
     [worktreesData?.worktrees],
@@ -1435,14 +1469,6 @@ const TaskWorkspaceContent: React.FC<TaskWorkspaceProps> = ({
     }
   }, [dispatch, taskId, task]);
 
-  // Restore saved planner trajectories into Redux once the OpenTask entry
-  // exists. This effect is intentionally idempotent: the per-planner dedup
-  // check below guards against duplicate dispatches, so it can safely re-run
-  // when `savedPlanners` or `currentTaskUI` updates. We must wait for
-  // `currentTaskUI` (created by `openTask` after `task` loads) — without it,
-  // `addPlannerChat`/`setTaskActiveChat` reducers silently no-op and the
-  // restore is permanently lost (race condition: savedPlanners can arrive
-  // before task).
   useEffect(() => {
     if (!savedPlanners || !currentTaskUI) return;
 
@@ -1453,21 +1479,18 @@ const TaskWorkspaceContent: React.FC<TaskWorkspaceProps> = ({
       retainedPlanners.map((planner) => planner.id),
     );
 
-    const pendingCreatedIds = pendingCreatedPlannerIdsRef.current;
-    for (const id of Array.from(pendingCreatedIds)) {
-      if (savedPlannerIds.has(id)) pendingCreatedIds.delete(id);
-    }
-
     for (const planner of currentTaskUI.plannerChats) {
       if (
         !savedPlannerIds.has(planner.id) &&
-        !pendingCreatedIds.has(planner.id)
+        !pendingPlannerIds.has(planner.id)
       ) {
         dispatch(removePlannerChat({ taskId, chatId: planner.id }));
       }
     }
 
     for (const traj of retainedPlanners) {
+      const priorMeta = selectThreadById(store.getState(), traj.id)?.task_meta;
+      const linked = isListedLinkedChat(traj, boardOwnerId);
       dispatch(
         createChatWithId({
           id: traj.id,
@@ -1478,13 +1501,12 @@ const TaskWorkspaceContent: React.FC<TaskWorkspaceProps> = ({
           mode: traj.mode ?? "TASK_PLANNER",
           taskMeta: {
             task_id: taskId,
-            role:
-              traj.mode &&
-              traj.mode !== "task_planner" &&
-              traj.mode !== "TASK_PLANNER"
-                ? "linked"
-                : "planner",
-            planner_chat_id: traj.id,
+            role: linked ? "linked" : "planner",
+            planner_chat_id: linked
+              ? priorMeta?.task_id === taskId && priorMeta.role === "linked"
+                ? priorMeta.planner_chat_id
+                : undefined
+              : traj.id,
           },
         }),
       );
@@ -1519,7 +1541,7 @@ const TaskWorkspaceContent: React.FC<TaskWorkspaceProps> = ({
       }
 
       dispatch(
-        addPlannerChat({
+        restorePlannerChat({
           taskId,
           planner: {
             id: traj.id,
@@ -1533,76 +1555,59 @@ const TaskWorkspaceContent: React.FC<TaskWorkspaceProps> = ({
         }),
       );
     }
-
-    const mostRecentPlanner =
-      retainedPlanners.length > 0
-        ? retainedPlanners.reduce((latest, planner) =>
-            planner.updated_at > latest.updated_at ? planner : latest,
-          )
-        : null;
-    const fallbackActiveChat = mostRecentPlanner
-      ? { type: "planner" as const, chatId: mostRecentPlanner.id }
-      : null;
-
-    if (!activeChat) {
-      if (fallbackActiveChat) {
-        dispatch(setTaskActiveChat({ taskId, activeChat: fallbackActiveChat }));
-      }
-      return;
-    }
-
-    if (
-      activeChat.type === "planner" &&
-      !savedPlannerIds.has(activeChat.chatId) &&
-      !pendingCreatedIds.has(activeChat.chatId)
-    ) {
-      dispatch(setTaskActiveChat({ taskId, activeChat: fallbackActiveChat }));
-    }
-  }, [dispatch, taskId, savedPlanners, currentTaskUI, activeChat]);
+  }, [
+    dispatch,
+    store,
+    taskId,
+    savedPlanners,
+    currentTaskUI,
+    pendingPlannerIds,
+    boardOwnerId,
+  ]);
 
   useEffect(() => {
-    const fallbackPlannerId = plannerChats[0]?.id;
-    if (!activeChat && fallbackPlannerId) {
-      dispatch(
-        setTaskActiveChat({
-          taskId,
-          activeChat: { type: "planner", chatId: fallbackPlannerId },
-        }),
-      );
-      return;
-    }
-
     if (
-      activeChat?.type === "planner" &&
-      !plannerChats.some((p) => p.id === activeChat.chatId)
-    ) {
+      activeChat !== null ||
+      !currentTaskUI ||
+      !board ||
+      !savedPlanners ||
+      boardError ||
+      plannersError
+    )
+      return;
+    const planners = savedPlanners.filter(
+      (p) =>
+        !deletedPlannerIdsRef.current.has(p.id) &&
+        !isListedLinkedChat(p, board.owner_chat_id),
+    );
+    const fallback = board.owner_chat_id
+      ? planners.find((p) => p.id === board.owner_chat_id)
+      : planners.reduce<TrajectoryInfo | undefined>(
+          (latest, p) =>
+            !latest || p.updated_at > latest.updated_at ? p : latest,
+          undefined,
+        );
+    if (fallback !== undefined || requestedChat !== null) {
       dispatch(
         setTaskActiveChat({
           taskId,
-          activeChat: fallbackPlannerId
-            ? { type: "planner", chatId: fallbackPlannerId }
+          activeChat: fallback
+            ? { type: "planner", chatId: fallback.id }
             : null,
         }),
       );
     }
-  }, [activeChat, plannerChats, dispatch, taskId]);
-
-  useEffect(() => {
-    if (activeChat?.type === "agent" && board) {
-      const card = board.cards.find((c) => c.id === activeChat.cardId);
-      if (!card || card.agent_chat_id !== activeChat.chatId) {
-        const fallbackPlannerId = plannerChats[0]?.id;
-        dispatch(
-          setTaskActiveChat({
-            taskId,
-            activeChat: fallbackPlannerId
-              ? { type: "planner", chatId: fallbackPlannerId }
-              : null,
-          }),
-        );
-      }
-    }
-  }, [activeChat, board, dispatch, taskId, plannerChats]);
+  }, [
+    activeChat,
+    requestedChat,
+    currentTaskUI,
+    board,
+    savedPlanners,
+    boardError,
+    plannersError,
+    dispatch,
+    taskId,
+  ]);
 
   useEffect(() => {
     if (activeChat?.type !== "agent" || !board || hasActiveChatRuntime) return;
@@ -1738,7 +1743,7 @@ const TaskWorkspaceContent: React.FC<TaskWorkspaceProps> = ({
             task,
             board,
             plannerChats,
-            pendingPlannerIds: pendingCreatedPlannerIdsRef.current,
+            pendingPlannerIds,
             deletedPlannerIds: deletedPlannerIdsRef.current,
           }
         : undefined,
@@ -1768,8 +1773,8 @@ const TaskWorkspaceContent: React.FC<TaskWorkspaceProps> = ({
           if (!mounted.current) return;
           const newChatId = result.chat_id;
           const resolvedMode = result.mode ?? mode;
+          const linked = isLinkedTaskChat(resolvedMode, result.task_role);
           const now = new Date().toISOString();
-          pendingCreatedPlannerIdsRef.current.add(newChatId);
           dispatch(
             createChatWithId({
               id: newChatId,
@@ -1780,8 +1785,9 @@ const TaskWorkspaceContent: React.FC<TaskWorkspaceProps> = ({
               mode: resolvedMode,
               taskMeta: {
                 task_id: taskId,
-                role: "planner",
-                planner_chat_id: newChatId,
+                role: linked ? "linked" : "planner",
+                planner_chat_id:
+                  result.planner_chat_id ?? (linked ? undefined : newChatId),
               },
             }),
           );
@@ -1848,7 +1854,6 @@ const TaskWorkspaceContent: React.FC<TaskWorkspaceProps> = ({
       if (!result.deleted)
         throw new Error("The server did not confirm deletion.");
       deletedPlannerIdsRef.current.add(chatId);
-      pendingCreatedPlannerIdsRef.current.delete(chatId);
       dispatch(removePlannerChat({ taskId, chatId }));
       if (
         activeChatRef.current?.type === "planner" &&
@@ -2203,6 +2208,7 @@ const TaskWorkspaceContent: React.FC<TaskWorkspaceProps> = ({
     : activeChat.type === "planner"
       ? taskChatKindLabel(
           plannerChats.find((p) => p.id === activeChat.chatId)?.mode,
+          activeRole,
         )
       : formatAgentChatTitle(
           activeChat.cardId,
@@ -2325,7 +2331,7 @@ const TaskWorkspaceContent: React.FC<TaskWorkspaceProps> = ({
               onClick={handleNewPlanner}
               disabled={isCreatingPlanner}
               aria-label="New task planner"
-              title="New task planner"
+              title="Create a planner chat without changing the board owner"
             >
               <Plus size={15} />
               <Text size="1">Planner</Text>
@@ -2400,7 +2406,9 @@ const TaskWorkspaceContent: React.FC<TaskWorkspaceProps> = ({
                   justify="center"
                   className={styles.fullHeightEmptyState}
                 >
-                  <Text color="gray">Create a planner chat to get started</Text>
+                  <Text color="gray">
+                    No chat selected. Choose a task chat or create one.
+                  </Text>
                 </Flex>
               )}
             </Box>

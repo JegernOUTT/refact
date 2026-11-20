@@ -1193,6 +1193,8 @@ pub struct ReadyCardsResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrajectoryInfo {
     pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_role: Option<String>,
     pub title: String,
     pub created_at: String,
     pub updated_at: String,

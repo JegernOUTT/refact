@@ -890,7 +890,8 @@ pub async fn handle_create_planner_chat(
         .map(|m| m.trim().to_string())
         .filter(|m| !m.is_empty())
         .unwrap_or_else(|| "task_planner".to_string());
-    if mode.eq_ignore_ascii_case("task_agent") {
+    let canonical_mode = crate::yaml_configs::customization_registry::map_legacy_mode_to_id(&mode);
+    if canonical_mode == "task_agent" {
         return Err((
             StatusCode::BAD_REQUEST,
             "task_agent chats cannot be created here".to_string(),
@@ -900,54 +901,25 @@ pub async fn handle_create_planner_chat(
         .await
         .map_err(|e| (StatusCode::NOT_FOUND, e))?;
 
-    let expected_owner = storage::load_board(gcx.clone(), &task_id)
+    let mode = if canonical_mode == "task_planner" {
+        canonical_mode
+    } else {
+        &mode
+    };
+    let (chat_id, meta) = storage::create_task_chat(gcx, &task_id, mode)
         .await
-        .map_err(|error| (StatusCode::CONFLICT, error))?
-        .owner_chat_id;
-    crate::tasks::goal::resolve_task_goal(gcx.clone(), &task_id)
-        .await
-        .map_err(|error| (StatusCode::CONFLICT, error))?;
-    let chat_id = storage::next_planner_chat_id(gcx.clone(), &task_id)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    crate::chat::trajectories::save_initial_task_chat_trajectory(
-        gcx.clone(),
-        &task_id,
-        &chat_id,
-        &mode,
-    )
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-
-    storage::update_board_atomic(gcx.clone(), &task_id, |board| {
-        if board.owner_chat_id != expected_owner {
-            return Err(
-                "Task planner owner changed during transfer; refresh before continuing".into(),
-            );
-        }
-        board
-            .try_transfer_owner(
-                &chat_id,
-                chrono::Utc::now().timestamp_millis().max(0) as u64,
-            )
-            .map_err(|error| error.to_string())?;
-        Ok(())
-    })
-    .await
-    .map_err(|error| (StatusCode::CONFLICT, error))?;
-    let rebind_gcx = gcx.clone();
-    let rebind_task = task_id.clone();
-    tokio::spawn(async move {
-        if let Err(error) =
-            crate::tasks::custody::rebind_task_agents(rebind_gcx, &rebind_task).await
-        {
-            tracing::warn!(%error, "planner custody reconciliation deferred");
-        }
-    });
-    crate::tasks::goal::attach_planner_goal(gcx, &task_id, &chat_id, Vec::new(), Vec::new())
-        .await
-        .map_err(|error| (StatusCode::CONFLICT, error))?;
-    Ok(Json(json!({"chat_id": chat_id, "mode": mode})))
+        .map_err(|error| match error {
+            storage::TaskChatCreateError::Board(error) => (StatusCode::CONFLICT, error),
+            storage::TaskChatCreateError::Trajectory(error) => {
+                (StatusCode::INTERNAL_SERVER_ERROR, error)
+            }
+        })?;
+    Ok(Json(json!({
+        "chat_id": chat_id,
+        "mode": mode,
+        "task_role": meta.role,
+        "planner_chat_id": meta.planner_chat_id,
+    })))
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -1591,6 +1563,332 @@ mod tests {
 
     fn app(gcx: Arc<GlobalContext>) -> AppState {
         gcx.app_state(gcx.clone())
+    }
+
+    async fn create_chat(app: &AppState, task: &str, body: &'static [u8]) -> Value {
+        handle_create_planner_chat(
+            State(app.clone()),
+            Path(task.into()),
+            hyper::body::Bytes::from_static(body),
+        )
+        .await
+        .unwrap()
+        .0
+    }
+
+    #[tokio::test]
+    async fn linked_creation_and_extra_planner_leave_board_goal_and_agent_binding_unchanged() {
+        let temp = tempfile::tempdir().unwrap();
+        let task = "task-chat-custody";
+        let gcx = setup_task(temp.path(), task).await;
+        let app = app(gcx.clone());
+        let dir = storage::find_task_dir(gcx.clone(), task).await.unwrap();
+        let board_path = dir.join("board.yaml");
+        let goal_path = dir.join("goal.json");
+        let virgin_board = tokio::fs::read(&board_path).await.unwrap();
+
+        let linked = create_chat(&app, task, br#"{"mode":"agent"}"#).await;
+        let linked_id = linked["chat_id"].as_str().unwrap();
+        assert_eq!(linked["task_role"], "linked");
+        assert_eq!(linked["planner_chat_id"], Value::Null);
+        assert_eq!(tokio::fs::read(&board_path).await.unwrap(), virgin_board);
+        assert!(!goal_path.exists());
+
+        let first = create_chat(&app, task, b"").await;
+        let owner = first["chat_id"].as_str().unwrap();
+        assert_eq!(first["task_role"], "planner");
+        assert_eq!(first["planner_chat_id"], owner);
+        let board = storage::load_board(gcx.clone(), task).await.unwrap();
+        assert_eq!(board.owner_chat_id.as_deref(), Some(owner));
+        assert_eq!(board.owner_epoch, 1);
+        assert_eq!(board.rev, 1);
+        assert_eq!(board.owner_custody.len(), 1);
+        assert_eq!(board.owner_custody[0].from, None);
+        assert_eq!(board.owner_custody[0].to, owner);
+        assert!(!goal_path.exists());
+
+        handle_patch_board(
+            State(app.clone()),
+            Path(task.into()),
+            Json(create_card_request(board.rev, "T-1")),
+        )
+        .await
+        .unwrap();
+        storage::update_board_atomic(gcx.clone(), task, |board| {
+            let card = board.get_card_mut("T-1").unwrap();
+            card.column = "doing".into();
+            card.assignee = Some("agent-1".into());
+            card.agent_chat_id = Some("bound-agent".into());
+            Ok(())
+        })
+        .await
+        .unwrap();
+        save_trajectory_snapshot(
+            gcx.clone(),
+            snapshot(
+                "bound-agent",
+                task,
+                "agents",
+                Some("agent-1"),
+                Some("T-1"),
+                Some(owner),
+            ),
+        )
+        .await
+        .unwrap();
+        crate::tasks::goal::commit_task_goal(
+            gcx.clone(),
+            task,
+            owner,
+            0,
+            vec![crate::chat::internal_roles::goal(
+                "task_planner",
+                1,
+                "Release without lost custody",
+                None,
+                false,
+                Default::default(),
+            )],
+            vec![],
+        )
+        .await
+        .unwrap();
+        let board_before = tokio::fs::read(&board_path).await.unwrap();
+        let goal_before = tokio::fs::read(&goal_path).await.unwrap();
+        let agent_path = dir.join("trajectories/agents/agent-1/bound-agent.json");
+        let agent_before = tokio::fs::read(&agent_path).await.unwrap();
+
+        let linked_after = create_chat(&app, task, br#"{"mode":"agent"}"#).await;
+        let extra = create_chat(&app, task, br#"{"mode":"task_planner"}"#).await;
+        let extra_id = extra["chat_id"].as_str().unwrap();
+        let linked_after_id = linked_after["chat_id"].as_str().unwrap();
+        assert_eq!(linked_after["planner_chat_id"], owner);
+        assert_eq!(extra["planner_chat_id"], extra_id);
+        assert_ne!(extra_id, owner);
+        let rows = handle_list_task_trajectories(
+            State(app.clone()),
+            Path((task.into(), "planner".into())),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(rows.len(), 4);
+        for (id, role, planner_id) in [
+            (linked_id, "linked", None),
+            (linked_after_id, "linked", Some(owner)),
+            (extra_id, "planner", Some(extra_id)),
+        ] {
+            let row = rows.iter().find(|row| row.id == id).unwrap();
+            assert_eq!(row.task_role.as_deref(), Some(role));
+            let restored = crate::chat::trajectories::load_trajectory_for_chat(gcx.clone(), id)
+                .await
+                .unwrap();
+            assert_eq!(
+                restored.source_path.parent().unwrap().file_name().unwrap(),
+                role
+            );
+            let meta = restored.thread.task_meta.unwrap();
+            assert_eq!(meta.role, role);
+            assert_eq!(meta.planner_chat_id.as_deref(), planner_id);
+            assert!(restored.goal.is_none());
+        }
+        assert_eq!(tokio::fs::read(&board_path).await.unwrap(), board_before);
+        assert_eq!(tokio::fs::read(&goal_path).await.unwrap(), goal_before);
+        assert_eq!(tokio::fs::read(&agent_path).await.unwrap(), agent_before);
+    }
+
+    #[tokio::test]
+    async fn chat_creation_preserves_legacy_ownerless_planner_and_defers_goal_import() {
+        let temp = tempfile::tempdir().unwrap();
+        let task = "task-with-legacy-planner";
+        let gcx = setup_task(temp.path(), task).await;
+        let app = app(gcx.clone());
+        let dir = storage::find_task_dir(gcx.clone(), task).await.unwrap();
+        let board_path = dir.join("board.yaml");
+        let planner_path = dir.join("trajectories/planner/legacy-planner.json");
+        let mut legacy = snapshot("legacy-planner", task, "planner", None, None, None);
+        legacy.messages.push(crate::chat::internal_roles::goal(
+            "task_planner",
+            1,
+            "Retain legacy planning history",
+            None,
+            false,
+            Default::default(),
+        ));
+        save_trajectory_snapshot(gcx.clone(), legacy).await.unwrap();
+        let mut old_format: Value =
+            serde_json::from_slice(&tokio::fs::read(&planner_path).await.unwrap()).unwrap();
+        old_format.as_object_mut().unwrap().remove("mode");
+        tokio::fs::write(&planner_path, serde_json::to_vec(&old_format).unwrap())
+            .await
+            .unwrap();
+        let board_before = tokio::fs::read(&board_path).await.unwrap();
+        let legacy_before = tokio::fs::read(&planner_path).await.unwrap();
+
+        let linked = create_chat(&app, task, br#"{"mode":"agent"}"#).await;
+        let extra = create_chat(&app, task, b"").await;
+        for created in [linked, extra] {
+            let id = created["chat_id"].as_str().unwrap();
+            let restored = crate::chat::trajectories::load_trajectory_for_chat(gcx.clone(), id)
+                .await
+                .unwrap();
+            assert!(!crate::tasks::custody::is_saved_legacy_owner_candidate(
+                id, &restored
+            ));
+            assert!(restored.thread.link_type.is_none());
+            assert!(restored.goal.is_none());
+        }
+        let legacy = crate::chat::trajectories::load_trajectory_for_chat(gcx, "legacy-planner")
+            .await
+            .unwrap();
+        assert_eq!(legacy.thread.mode, "agent");
+        assert!(crate::tasks::custody::is_saved_legacy_owner_candidate(
+            "legacy-planner",
+            &legacy
+        ));
+        assert_eq!(tokio::fs::read(&board_path).await.unwrap(), board_before);
+        assert_eq!(tokio::fs::read(&planner_path).await.unwrap(), legacy_before);
+        assert!(!dir.join("goal.json").exists());
+    }
+
+    #[tokio::test]
+    async fn planner_listing_matches_restored_roles_of_legacy_owner_reviewer_and_copy() {
+        let temp = tempfile::tempdir().unwrap();
+        let task = "task-legacy-planner-roles";
+        let gcx = setup_task(temp.path(), task).await;
+        storage::update_board_atomic(gcx.clone(), task, |board| {
+            board.owner_chat_id = Some("legacy-owner".into());
+            board.reviewer_chat_ids.push("legacy-reviewer".into());
+            Ok(())
+        })
+        .await
+        .unwrap();
+        for id in ["legacy-owner", "legacy-reviewer", "legacy-copy"] {
+            let mut old = snapshot(id, task, "planner", None, None, None);
+            old.mode = "agent".into();
+            old.link_type = Some("handoff".into());
+            save_trajectory_snapshot(gcx.clone(), old).await.unwrap();
+        }
+        let rows = handle_list_task_trajectories(
+            State(app(gcx.clone())),
+            Path((task.into(), "planner".into())),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(rows.len(), 3);
+        for (id, role) in [
+            ("legacy-owner", "planner"),
+            ("legacy-reviewer", "planner"),
+            ("legacy-copy", "linked"),
+        ] {
+            let row = rows.iter().find(|row| row.id == id).unwrap();
+            assert_eq!(row.task_role.as_deref(), Some(role));
+            let restored = crate::chat::trajectories::load_trajectory_for_chat(gcx.clone(), id)
+                .await
+                .unwrap();
+            assert_eq!(restored.thread.task_meta.unwrap().role, role);
+        }
+    }
+
+    #[tokio::test]
+    async fn simultaneous_first_planner_creates_publish_exactly_one_bootstrap() {
+        let temp = tempfile::tempdir().unwrap();
+        let task = "task-bootstrap-race";
+        let gcx = setup_task(temp.path(), task).await;
+        let app = app(gcx.clone());
+        let (dir, gate) = storage::locked_task_dir(gcx.clone(), task).await.unwrap();
+        let a_waiting = Arc::new(tokio::sync::Notify::new());
+        let b_waiting = Arc::new(tokio::sync::Notify::new());
+        use crate::tasks::board_lock::BOARD_LOCK_CONTENDED;
+        let mut a =
+            Box::pin(BOARD_LOCK_CONTENDED.scope(a_waiting.clone(), create_chat(&app, task, b"")));
+        let mut b =
+            Box::pin(BOARD_LOCK_CONTENDED.scope(b_waiting.clone(), create_chat(&app, task, b"")));
+        let wait = async {
+            tokio::join!(a_waiting.notified(), b_waiting.notified());
+        };
+        tokio::select! {
+            result = &mut a => panic!("first create completed before board unlock: {result}"),
+            result = &mut b => panic!("second create completed before board unlock: {result}"),
+            result = tokio::time::timeout(std::time::Duration::from_secs(5), wait) => result.unwrap(),
+        }
+        assert_eq!(
+            storage::load_board(gcx.clone(), task)
+                .await
+                .unwrap()
+                .owner_chat_id,
+            None
+        );
+        drop(gate);
+        let (a, b) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::join!(a, b)
+        })
+        .await
+        .unwrap();
+        assert_ne!(a["chat_id"], b["chat_id"]);
+        let board = storage::load_board(gcx, task).await.unwrap();
+        let owner = board.owner_chat_id.as_deref().unwrap();
+        assert!(a["chat_id"] == owner || b["chat_id"] == owner);
+        assert_eq!(board.rev, 1);
+        assert_eq!(board.owner_epoch, 1);
+        assert_eq!(board.owner_custody.len(), 1);
+        assert_eq!(board.owner_custody[0].from, None);
+        assert_eq!(board.owner_custody[0].to, owner);
+        for receipt in [a, b] {
+            let id = receipt["chat_id"].as_str().unwrap();
+            assert!(dir
+                .join("trajectories/planner")
+                .join(format!("{id}.json"))
+                .is_file());
+        }
+    }
+
+    #[tokio::test]
+    async fn interrupted_first_planner_creation_does_not_block_bootstrap_retry() {
+        let temp = tempfile::tempdir().unwrap();
+        let task = "task-bootstrap-retry";
+        let gcx = setup_task(temp.path(), task).await;
+        let app = app(gcx.clone());
+        let dir = storage::find_task_dir(gcx.clone(), task).await.unwrap();
+        let original_board = tokio::fs::read(dir.join("board.yaml")).await.unwrap();
+        let saved = Arc::new(tokio::sync::Notify::new());
+        let mut first = Box::pin(
+            storage::BEFORE_PLANNER_BOOTSTRAP_PUBLISH
+                .scope(saved.clone(), create_chat(&app, task, b"")),
+        );
+        tokio::select! {
+            result = &mut first => panic!("create must wait after saving its trajectory: {result}"),
+            result = tokio::time::timeout(std::time::Duration::from_secs(5), saved.notified()) => result.unwrap(),
+        }
+        let staged_id = format!("planner-{task}-1");
+        assert!(dir
+            .join("trajectories/planner")
+            .join(format!("{staged_id}.json"))
+            .is_file());
+        drop(first);
+        assert_eq!(
+            tokio::fs::read(dir.join("board.yaml")).await.unwrap(),
+            original_board
+        );
+        let staged = crate::chat::trajectories::load_trajectory_for_chat(gcx.clone(), &staged_id)
+            .await
+            .unwrap();
+        assert!(!crate::tasks::custody::is_saved_legacy_owner_candidate(
+            &staged_id, &staged
+        ));
+        assert!(!dir.join("goal.json").exists());
+
+        let retry = create_chat(&app, task, b"").await;
+        let owner = retry["chat_id"].as_str().unwrap();
+        assert_ne!(owner, staged_id);
+        let board = storage::load_board(gcx, task).await.unwrap();
+        assert_eq!(board.owner_chat_id.as_deref(), Some(owner));
+        assert_eq!(board.rev, 1);
+        assert_eq!(board.owner_epoch, 1);
+        assert_eq!(board.owner_custody.len(), 1);
+        assert_eq!(board.owner_custody[0].from, None);
+        assert_eq!(board.owner_custody[0].to, owner);
     }
 
     #[tokio::test]

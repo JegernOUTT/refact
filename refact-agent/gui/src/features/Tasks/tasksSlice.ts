@@ -1,5 +1,6 @@
 import { createAction, createSlice, PayloadAction } from "@reduxjs/toolkit";
 import { RootState } from "../../app/store";
+import { tasksApi } from "../../services/refact/tasks";
 import type { TaskEvent } from "../../services/refact/sidebarSubscription";
 import {
   loadPersistedTasksUIState,
@@ -27,6 +28,7 @@ export interface OpenTask {
   name: string;
   plannerChats: PlannerInfo[];
   activeChat: ActiveChat;
+  pendingPlannerIds?: string[];
 }
 
 export interface TasksUIState {
@@ -117,6 +119,10 @@ export const tasksSlice = createSlice({
       } else {
         task.plannerChats.push(action.payload.planner);
       }
+      task.pendingPlannerIds ??= [];
+      if (!task.pendingPlannerIds.includes(action.payload.planner.id)) {
+        task.pendingPlannerIds.push(action.payload.planner.id);
+      }
       if (!task.activeChat) {
         task.activeChat = {
           type: "planner",
@@ -155,6 +161,9 @@ export const tasksSlice = createSlice({
         task.plannerChats = task.plannerChats.filter(
           (p) => p.id !== action.payload.chatId,
         );
+        task.pendingPlannerIds = task.pendingPlannerIds?.filter(
+          (id) => id !== action.payload.chatId,
+        );
         persistTasksUIState(state);
       }
     },
@@ -187,6 +196,23 @@ export const tasksSlice = createSlice({
     builder.addCase(hydratePersistedChatTabs, (state) => {
       state.openTasks = loadPersistedTasksUIState().openTasks;
     });
+    builder.addCase(tasksApi.util.resetApiState, (state) => {
+      for (const task of state.openTasks) delete task.pendingPlannerIds;
+    });
+    builder.addMatcher(
+      tasksApi.endpoints.listTaskTrajectories.matchFulfilled,
+      (state, { meta, payload }) => {
+        const { taskId, role } = meta.arg.originalArgs;
+        if (role !== "planner") return;
+        const task = state.openTasks.find((t) => t.id === taskId);
+        if (task?.pendingPlannerIds?.length) {
+          const listed = new Set(payload.map((p) => p.id));
+          task.pendingPlannerIds = task.pendingPlannerIds.filter(
+            (id) => !listed.has(id),
+          );
+        }
+      },
+    );
   },
   selectors: {
     selectOpenTasks: (state) => state.openTasks,

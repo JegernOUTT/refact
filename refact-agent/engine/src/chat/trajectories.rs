@@ -840,6 +840,7 @@ pub(crate) fn trajectory_metadata_is_displayable_chat(
 pub struct LoadedTrajectory {
     pub recovery: Option<refact_core::recovery::RecoveryRecord>,
     pub source_path: PathBuf,
+    pub(crate) initial_planner_creation: bool,
     pub messages: Vec<ChatMessage>,
     pub thread: ThreadParams,
     pub goal: Option<GoalSnapshot>,
@@ -3455,6 +3456,27 @@ pub(crate) fn trajectory_path_stem_matches_id(path: &Path, id: &str) -> bool {
     false
 }
 
+pub(crate) fn could_be_legacy_planner_copy(mode: &str, link_type: Option<&str>) -> bool {
+    matches!(link_type, Some("mode_transition" | "handoff"))
+        && !mode.trim().is_empty()
+        && crate::yaml_configs::customization_registry::map_legacy_mode_to_id(mode)
+            != "task_planner"
+}
+
+pub(crate) fn is_legacy_planner_copy(
+    board: &crate::tasks::types::TaskBoard,
+    chat_id: &str,
+) -> bool {
+    board
+        .owner_chat_id
+        .as_deref()
+        .is_some_and(|owner| !owner.is_empty() && owner != chat_id)
+        && !board
+            .reviewer_chat_ids
+            .iter()
+            .any(|reviewer| reviewer == chat_id)
+}
+
 pub(crate) async fn normalize_legacy_planner_copy(
     gcx: Arc<GlobalContext>,
     chat_id: &str,
@@ -3465,25 +3487,13 @@ pub(crate) async fn normalize_legacy_planner_copy(
     let Some(meta) = task_meta.as_mut().filter(|meta| meta.role == "planner") else {
         return;
     };
-    if !matches!(link_type, Some("mode_transition" | "handoff"))
-        || mode.trim().is_empty()
-        || crate::yaml_configs::customization_registry::map_legacy_mode_to_id(mode)
-            == "task_planner"
-    {
+    if !could_be_legacy_planner_copy(mode, link_type) {
         return;
     }
     let Ok(board) = crate::tasks::storage::load_board_unlocked(gcx, &meta.task_id).await else {
         return;
     };
-    if board
-        .owner_chat_id
-        .as_deref()
-        .is_some_and(|owner| !owner.is_empty() && owner != chat_id)
-        && !board
-            .reviewer_chat_ids
-            .iter()
-            .any(|reviewer| reviewer == chat_id)
-    {
+    if is_legacy_planner_copy(&board, chat_id) {
         meta.role = "linked".into();
     }
 }
@@ -3922,6 +3932,10 @@ async fn load_trajectory_candidate_with_delivery_view(
         native_decision_receipts,
         pending_browser_decision,
         source_path: traj_path,
+        initial_planner_creation: matches!(
+            t[INITIAL_PLANNER_CREATION_KEY].as_str(),
+            Some(NON_OWNING_PLANNER_CREATION | PLANNER_BOOTSTRAP_CREATION)
+        ),
         messages,
         thread,
         goal,
@@ -4246,11 +4260,38 @@ async fn load_generic_trajectory_for_chat_matching_source(
     None
 }
 
-pub async fn save_initial_task_chat_trajectory(
+pub(crate) const INITIAL_PLANNER_CREATION_KEY: &str = "initial_planner_creation";
+pub(crate) const NON_OWNING_PLANNER_CREATION: &str = "additional";
+pub(crate) const PLANNER_BOOTSTRAP_CREATION: &str = "bootstrap";
+
+#[cfg(test)]
+pub(crate) async fn save_initial_task_chat_trajectory(
     gcx: Arc<GlobalContext>,
     task_id: &str,
     chat_id: &str,
     mode: &str,
+) -> Result<(), String> {
+    save_initial_task_chat(
+        gcx,
+        chat_id,
+        mode,
+        TaskMeta {
+            task_id: task_id.to_string(),
+            role: "planner".to_string(),
+            planner_chat_id: Some(chat_id.to_string()),
+            ..Default::default()
+        },
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn save_initial_task_chat(
+    gcx: Arc<GlobalContext>,
+    chat_id: &str,
+    mode: &str,
+    task_meta: TaskMeta,
+    creation: Option<&str>,
 ) -> Result<(), String> {
     let greeting = "## 🎯 Task Planner
 
@@ -4282,14 +4323,6 @@ I'm your **Task Planner**. I handle the complete task lifecycle - from investiga
         content: ChatContent::SimpleText(greeting.to_string()),
         finish_reason: Some("stop".to_string()),
         ..Default::default()
-    };
-
-    let task_meta = super::types::TaskMeta {
-        task_id: task_id.to_string(),
-        role: "planner".to_string(),
-        agent_id: None,
-        card_id: None,
-        planner_chat_id: Some(chat_id.to_string()),
     };
 
     let snapshot = TrajectorySnapshot {
@@ -4349,7 +4382,10 @@ I'm your **Task Planner**. I handle the complete task lifecycle - from investiga
         app_workspace: None,
     };
 
-    save_trajectory_snapshot(gcx, snapshot).await
+    match persist_trajectory_snapshot(gcx, snapshot, None, false, None, creation).await? {
+        Some(publication) => publication.publish().await,
+        None => Ok(()),
+    }
 }
 
 pub async fn save_trajectory_as(
@@ -6112,7 +6148,7 @@ pub(crate) async fn save_snapshot_if_unchanged(
     snapshot: TrajectorySnapshot,
     pin: &TrajectoryDiskPin,
 ) -> Result<SnapshotPublication, String> {
-    persist_trajectory_snapshot(gcx, snapshot, None, false, Some(pin))
+    persist_trajectory_snapshot(gcx, snapshot, None, false, Some(pin), None)
         .await?
         .ok_or_else(|| "there was nothing to save".to_string())
 }
@@ -6180,6 +6216,7 @@ async fn save_trajectory_snapshot_inner_options(
         write_cache,
         allow_background_generation,
         None,
+        None,
     )
     .await?
     {
@@ -6196,6 +6233,7 @@ async fn persist_trajectory_snapshot(
     write_cache: Option<Arc<AMutex<DetachedTrajectoryWriteCache>>>,
     allow_background_generation: bool,
     expected: Option<&TrajectoryDiskPin>,
+    initial_planner_creation: Option<&str>,
 ) -> Result<Option<SnapshotPublication>, String> {
     validate_trajectory_id(&snapshot.chat_id).map_err(|e| e.message)?;
     let chat_id = snapshot.chat_id.clone();
@@ -6252,7 +6290,10 @@ async fn persist_trajectory_snapshot(
             snapshot.version,
         )
         .await?;
-    let trajectory = trajectory_value_from_snapshot(&snapshot, messages_json)?;
+    let mut trajectory = trajectory_value_from_snapshot(&snapshot, messages_json)?;
+    if let Some(creation) = initial_planner_creation {
+        trajectory[INITIAL_PLANNER_CREATION_KEY] = json!(creation);
+    }
     let source = if let Some(task_meta) = snapshot.task_meta.as_ref() {
         TrajectorySourceIdentity::from_task_meta(task_meta)
     } else if snapshot.buddy_meta.is_some() {

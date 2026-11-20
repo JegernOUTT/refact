@@ -11,6 +11,7 @@ import {
   within,
 } from "../../utils/test-utils";
 import { PlannerItem, TaskWorkspace } from "./TaskWorkspace";
+import { TaskPlannerDialog } from "../../components/ChatForm/TaskPlannerDialog";
 import { taskChatKindLabel } from "./linkedChat";
 import {
   isActionableWorktree,
@@ -608,6 +609,16 @@ describe("TaskWorkspace owner workflow requests", () => {
       mutations,
       preloadedState: {
         ...preloaded,
+        tasksUI: {
+          openTasks: [
+            {
+              id: TASK_ID,
+              name: "Task",
+              plannerChats: [makePlanner()],
+              activeChat: { type: "planner" as const, chatId: PLANNER_ID },
+            },
+          ],
+        },
         chat: {
           ...preloaded.chat,
           threads: {
@@ -3081,6 +3092,75 @@ describe("TaskWorkspace planner CRUD", () => {
     };
   }
 
+  it("keeps the planner selected by the composer dialog while the list refetch lags", async () => {
+    let releaseList: () => void = () => undefined;
+    const heldList = new Promise<void>((resolve) => {
+      releaseList = resolve;
+    });
+    let created = false;
+    const newId = "dialog-planner";
+    const card = makeCard();
+    server.use(...taskWorkspaceHandlers(card, []));
+    server.use(
+      http.get("*/v1/tasks/task-1/board", () =>
+        HttpResponse.json({ ...makeBoard(card), owner_chat_id: PLANNER_ID }),
+      ),
+      http.get("*/v1/tasks/task-1/trajectories/planner", async () => {
+        if (created) await heldList;
+        return HttpResponse.json([makePlannerTrajectory()]);
+      }),
+      http.post("*/v1/tasks/task-1/planner-chats", () => {
+        created = true;
+        return HttpResponse.json({
+          chat_id: newId,
+          mode: "task_planner",
+          task_role: "planner",
+          planner_chat_id: newId,
+        });
+      }),
+    );
+    const { store, user } = render(
+      <>
+        <TaskWorkspace taskId={TASK_ID} />
+        <TaskPlannerDialog
+          sourceChatId={PLANNER_ID}
+          taskId={TASK_ID}
+          open
+          onOpenChange={() => undefined}
+        />
+      </>,
+      { preloadedState: workspacePreloadedState(PLANNER_ID) },
+    );
+    try {
+      await waitFor(() =>
+        expect(store.getState().tasksUI.openTasks[0]?.activeChat?.chatId).toBe(
+          PLANNER_ID,
+        ),
+      );
+      await user.click(screen.getByRole("button", { name: "Create Planner" }));
+      await waitFor(() =>
+        expect(store.getState().chat.threads[newId]).toBeDefined(),
+      );
+      expect(store.getState().tasksUI.openTasks[0]?.activeChat?.chatId).toBe(
+        newId,
+      );
+    } finally {
+      act(() => releaseList());
+    }
+    await waitFor(() =>
+      expect(
+        tasksApi.endpoints.listTaskTrajectories.select({
+          taskId: TASK_ID,
+          role: "planner",
+        })(store.getState()).isSuccess,
+      ).toBe(true),
+    );
+    expect(store.getState().chat.current_thread_id).toBe(newId);
+    expect(store.getState().tasksUI.openTasks[0]?.activeChat?.chatId).toBe(
+      newId,
+    );
+  });
+
   it("delete_planner_cancel_sends_no_request", async () => {
     const deleteCalls: string[] = [];
     server.use(...taskWorkspaceHandlers(makeCard(), []));
@@ -3385,6 +3465,191 @@ describe("TaskWorkspace planner CRUD", () => {
 });
 
 describe("TaskWorkspace planner restore race", () => {
+  const owner = {
+    id: PLANNER_ID,
+    title: "Original planner",
+    mode: "TASK_PLANNER",
+    created_at: "2026-01-01T00:00:00Z",
+    updated_at: "2026-01-01T00:00:00Z",
+  };
+  const linked = {
+    ...owner,
+    id: "linked-chat",
+    title: "Newer linked chat",
+    mode: "agent",
+    updated_at: "2026-02-01T00:00:00Z",
+  };
+  const newerPlanner = {
+    ...linked,
+    id: "another-planner",
+    title: "Newer planner",
+    mode: "task_planner",
+    task_role: "planner",
+  };
+
+  it("waits for the board before restoring the owner instead of the newest linked chat", async () => {
+    clearWorkspaceStorage();
+    const card = makeCard();
+    let releaseBoard: () => void = () => undefined;
+    const heldBoard = new Promise<void>((resolve) => {
+      releaseBoard = resolve;
+    });
+    server.use(...taskWorkspaceHandlers(card, []));
+    server.use(
+      http.get("*/v1/tasks/task-1/board", async () => {
+        await heldBoard;
+        return HttpResponse.json({
+          ...makeBoard(card),
+          owner_chat_id: owner.id,
+        });
+      }),
+      http.get("*/v1/tasks/task-1/trajectories/planner", () =>
+        HttpResponse.json([linked, newerPlanner, owner]),
+      ),
+    );
+    const { store, user } = render(<TaskWorkspace taskId={TASK_ID} />, {
+      preloadedState: workspacePreloadedState("unrelated-chat"),
+    });
+    try {
+      await waitFor(() =>
+        expect(
+          store.getState().tasksUI.openTasks[0]?.plannerChats,
+        ).toHaveLength(3),
+      );
+      expect(store.getState().tasksUI.openTasks[0].activeChat).toBeNull();
+      expect(store.getState().chat.current_thread_id).toBe("unrelated-chat");
+    } finally {
+      act(() => releaseBoard());
+    }
+    await waitFor(() =>
+      expect(store.getState().chat.current_thread_id).toBe(owner.id),
+    );
+    await user.click(
+      await screen.findByRole("button", { name: "Switch chat" }),
+    );
+    await user.click(
+      screen.getByRole("button", { name: `Open chat ${linked.title}` }),
+    );
+    await waitFor(() =>
+      expect(store.getState().chat.current_thread_id).toBe(linked.id),
+    );
+    expect(store.getState().tasksUI.openTasks[0].activeChat?.chatId).toBe(
+      linked.id,
+    );
+  });
+
+  it.each([
+    { hint: linked.id, expected: linked.id },
+    { hint: "stale-hint", expected: owner.id },
+  ])(
+    "validates the saved selection $hint against the current task list",
+    async ({ hint, expected }) => {
+      clearWorkspaceStorage();
+      const card = makeCard();
+      let releaseList: () => void = () => undefined;
+      const heldList = new Promise<void>((resolve) => {
+        releaseList = resolve;
+      });
+      server.use(...taskWorkspaceHandlers(card, []));
+      server.use(
+        http.get("*/v1/tasks/task-1/board", () =>
+          HttpResponse.json({ ...makeBoard(card), owner_chat_id: owner.id }),
+        ),
+        http.get("*/v1/tasks/task-1/trajectories/planner", async () => {
+          await heldList;
+          return HttpResponse.json([linked, owner]);
+        }),
+      );
+      const { store } = render(<TaskWorkspace taskId={TASK_ID} />, {
+        preloadedState: {
+          ...workspacePreloadedState("unrelated-chat"),
+          tasksUI: {
+            openTasks: [
+              {
+                id: TASK_ID,
+                name: "Task",
+                plannerChats: [makePlanner()],
+                activeChat: { type: "planner", chatId: hint },
+              },
+            ],
+          },
+        },
+      });
+      try {
+        await waitFor(() =>
+          expect(
+            tasksApi.endpoints.getBoard.select(TASK_ID)(store.getState()).data
+              ?.owner_chat_id,
+          ).toBe(owner.id),
+        );
+        expect(store.getState().tasksUI.openTasks[0].activeChat?.chatId).toBe(
+          hint,
+        );
+        expect(store.getState().chat.current_thread_id).toBe("unrelated-chat");
+      } finally {
+        act(() => releaseList());
+      }
+      await waitFor(() =>
+        expect(store.getState().chat.current_thread_id).toBe(expected),
+      );
+    },
+  );
+
+  it.each([
+    { boardOwner: "absent", expected: null },
+    { boardOwner: linked.id, expected: null },
+    { boardOwner: "legacy-ask", expected: "legacy-ask" },
+    { boardOwner: undefined, expected: owner.id },
+  ])(
+    "does not substitute a linked chat when the recorded owner is $boardOwner",
+    async ({ boardOwner, expected }) => {
+      clearWorkspaceStorage();
+      const card = makeCard();
+      const createChat = vi.fn();
+      server.use(...taskWorkspaceHandlers(card, []));
+      server.use(
+        http.get("*/v1/tasks/task-1/board", () =>
+          HttpResponse.json({ ...makeBoard(card), owner_chat_id: boardOwner }),
+        ),
+        http.get("*/v1/tasks/task-1/trajectories/planner", () =>
+          HttpResponse.json([
+            { ...linked, task_role: "linked", mode: "task_planner" },
+            { ...owner, task_role: "planner", mode: "ask" },
+            { ...linked, id: "legacy-ask", mode: "ask" },
+          ]),
+        ),
+        http.post("*/v1/tasks/task-1/planner-chats", () => {
+          createChat();
+          return HttpResponse.json({ chat_id: "unexpected" });
+        }),
+      );
+      const { store } = render(<TaskWorkspace taskId={TASK_ID} />, {
+        preloadedState: workspacePreloadedState("unrelated-chat"),
+      });
+      await screen.findByRole("button", { name: "Switch chat" });
+      await waitFor(() =>
+        expect(
+          store.getState().tasksUI.openTasks[0]?.plannerChats,
+        ).toHaveLength(3),
+      );
+      expect(
+        store.getState().tasksUI.openTasks[0].activeChat?.chatId ?? null,
+      ).toBe(expected);
+      expect(store.getState().chat.current_thread_id).toBe(
+        expected ?? "unrelated-chat",
+      );
+      if (expected) {
+        expect(
+          store.getState().chat.threads[expected]?.thread.task_meta,
+        ).toMatchObject({ role: "planner", planner_chat_id: expected });
+        expect(
+          screen.getByRole("button", { name: "Switch chat" }),
+        ).toHaveTextContent("Planner");
+      }
+      expect(createChat).not.toHaveBeenCalled();
+    },
+  );
+
   it("prunes_stale_persisted_planner_without_switching_to_missing_runtime", async () => {
     const warnSpy = vi
       .spyOn(console, "warn")
@@ -3785,6 +4050,12 @@ describe("TaskWorkspace new-chat mode picker", () => {
     server.use(
       // The saved-planner list lags behind and never returns the new chat,
       // emulating the window before the trajectory index catches up.
+      http.get("*/v1/tasks/task-1/board", () =>
+        HttpResponse.json({
+          ...makeBoard(makeCard()),
+          owner_chat_id: "planner-existing",
+        }),
+      ),
       http.get("*/v1/tasks/task-1/trajectories/planner", () =>
         HttpResponse.json([
           {
@@ -3801,6 +4072,8 @@ describe("TaskWorkspace new-chat mode picker", () => {
         return HttpResponse.json({
           chat_id: "planner-new",
           mode: body.mode ?? "agent",
+          task_role: "linked",
+          planner_chat_id: "planner-existing",
         });
       }),
     );
@@ -3859,6 +4132,17 @@ describe("TaskWorkspace new-chat mode picker", () => {
     );
 
     // The new chat must remain in the list (not removed by reconciliation).
+    expect(
+      store.getState().chat.threads["planner-new"]?.thread.task_meta,
+    ).toMatchObject({
+      task_id: TASK_ID,
+      role: "linked",
+      planner_chat_id: "planner-existing",
+    });
+    expect(
+      tasksApi.endpoints.getBoard.select(TASK_ID)(store.getState()).data
+        ?.owner_chat_id,
+    ).toBe("planner-existing");
     expect(
       store
         .getState()

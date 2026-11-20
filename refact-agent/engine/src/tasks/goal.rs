@@ -555,7 +555,7 @@ async fn hydrate_session_task_goal_authorized(
                             Ok(false)
                         };
                     }
-                    return Err(format!("Task goal hold/pending write could not be persisted: {error}. Local state retained; retry, or create a new task planner chat to adopt canonical state."));
+                    return Err(format!("Task goal hold/pending write could not be persisted: {error}. Local state retained; retry, or explicitly transfer ownership to adopt canonical state in another planner chat."));
                 }
                 repairs += 1;
             }
@@ -725,7 +725,7 @@ async fn hydrate_session_task_goal_once(
                 || !canonical_content.starts_with(&baseline_content)
                 || !local_content_matches
             {
-                return Err("Task goal hold conflicts with local goal content. Local hold retained; create a new task planner chat to transfer ownership and adopt canonical state.".into());
+                return Err("Task goal hold conflicts with local goal content. Local hold retained; explicitly transfer ownership to adopt canonical state in another planner chat.".into());
             }
             projected = snapshot
                 .clone()
@@ -1687,30 +1687,6 @@ pub async fn initialize_transition_goal(
     Ok(())
 }
 
-pub async fn attach_planner_goal(
-    gcx: Arc<GlobalContext>,
-    task_id: &str,
-    chat_id: &str,
-    messages: Vec<ChatMessage>,
-    ledger: Vec<GoalLedgerEntry>,
-) -> Result<Option<TaskGoalRecord>, String> {
-    let canonical = resolve_task_goal(gcx.clone(), task_id).await?;
-    super::storage::update_board_atomic(gcx.clone(), task_id, |board| {
-        board.authorize_owner(chat_id)
-    })
-    .await?;
-    if canonical.is_some() {
-        return Ok(canonical);
-    }
-    let messages = refact_chat_api::goal_role::import_legacy_plan(&messages);
-    if crate::chat::goal_snapshot_from_messages(&messages, None).is_none() {
-        return Ok(None);
-    }
-    commit_task_goal(gcx, task_id, chat_id, 0, messages, ledger)
-        .await
-        .map(Some)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2199,7 +2175,7 @@ mod tests {
         let error = hydrate_session_task_goal(app.gcx.clone(), &session)
             .await
             .unwrap_err();
-        assert_eq!(error, "Task goal hold conflicts with local goal content. Local hold retained; create a new task planner chat to transfer ownership and adopt canonical state.");
+        assert_eq!(error, "Task goal hold conflicts with local goal content. Local hold retained; explicitly transfer ownership to adopt canonical state in another planner chat.");
         assert_eq!(
             TaskGoalSessionEpoch::state(&*session.lock().await).unwrap(),
             before

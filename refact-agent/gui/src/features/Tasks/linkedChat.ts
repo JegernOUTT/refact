@@ -2,7 +2,7 @@ export function isLinkedTaskChat(
   mode: string | null | undefined,
   role?: string | null,
 ): boolean {
-  if (role === "linked") return true;
+  if (role) return role !== "planner";
   return Boolean(mode) && mode?.toLowerCase() !== "task_planner";
 }
 

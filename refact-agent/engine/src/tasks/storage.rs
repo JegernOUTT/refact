@@ -532,6 +532,7 @@ tokio::task_local! {
 #[cfg(test)]
 tokio::task_local! {
     pub(super) static TASK_BOARD_LOCK_WAIT: Arc<tokio::sync::Notify>;
+    pub(crate) static BEFORE_PLANNER_BOOTSTRAP_PUBLISH: Arc<tokio::sync::Notify>;
 }
 
 impl TaskDirectoryBinding {
@@ -2764,14 +2765,105 @@ pub fn get_task_trajectory_dir(task_dir: &PathBuf, role: &str, agent_id: Option<
     }
 }
 
-fn should_list_task_trajectory(role: &str, data: &serde_json::Value) -> bool {
-    if role != "planner" {
-        return true;
+pub(crate) enum TaskChatCreateError {
+    Board(String),
+    Trajectory(String),
+}
+
+pub(crate) async fn create_task_chat(
+    gcx: Arc<GlobalContext>,
+    task_id: &str,
+    mode: &str,
+) -> Result<(String, crate::chat::types::TaskMeta), TaskChatCreateError> {
+    use crate::chat::trajectories::{
+        save_initial_task_chat, NON_OWNING_PLANNER_CREATION, PLANNER_BOOTSTRAP_CREATION,
+    };
+    use TaskChatCreateError::{Board, Trajectory};
+
+    let planner = mode == "task_planner";
+    let chat_id = if planner {
+        next_planner_chat_id(gcx.clone(), task_id)
+            .await
+            .map_err(Trajectory)?
+    } else {
+        Uuid::new_v4().to_string()
+    };
+    let (dir, guard) = locked_task_dir(gcx.clone(), task_id).await.map_err(Board)?;
+    let (mut board, provenance) = read_board_with_provenance(&gcx, &dir)
+        .await
+        .map_err(Board)?;
+    let bootstrap = planner
+        && board.owner_chat_id.is_none()
+        && board.owner_epoch == 0
+        && board.owner_custody.is_empty()
+        && !super::custody::has_saved_planner_history(&dir.join("trajectories/planner"), task_id)
+            .await
+            .map_err(Board)?;
+    let meta = crate::chat::types::TaskMeta {
+        task_id: task_id.into(),
+        role: if planner { "planner" } else { "linked" }.into(),
+        planner_chat_id: if planner {
+            Some(chat_id.clone())
+        } else {
+            super::custody::current_planner_chat_id(&board)
+        },
+        ..Default::default()
+    };
+    if bootstrap {
+        board
+            .try_transfer_owner(&chat_id, 0)
+            .map_err(|e| Board(e.to_string()))?;
+        board.rev = board
+            .rev
+            .checked_add(1)
+            .ok_or_else(|| Board("Board revision exhausted".into()))?;
+        validate_board(&board, &board_coordination_at(&dir).await.map_err(Board)?)
+            .map_err(Board)?;
     }
-    match data.get("link_type").and_then(|v| v.as_str()) {
-        Some("handoff" | "mode_transition" | "branch") | None => true,
-        Some(_) => false,
+    let creation = if bootstrap {
+        Some(PLANNER_BOOTSTRAP_CREATION)
+    } else {
+        planner.then_some(NON_OWNING_PLANNER_CREATION)
+    };
+    save_initial_task_chat(gcx.clone(), &chat_id, mode, meta.clone(), creation)
+        .await
+        .map_err(Trajectory)?;
+    if bootstrap {
+        #[cfg(test)]
+        if let Ok(saved) = BEFORE_PLANNER_BOOTSTRAP_PUBLISH.try_with(Clone::clone) {
+            saved.notify_one();
+            std::future::pending::<()>().await;
+        }
+        let task_id = task_id.to_owned();
+        tokio::spawn(async move {
+            write_board_locked(&gcx, &guard, &dir, &board, &provenance).await?;
+            emit_task_event(
+                gcx,
+                TaskEvent::BoardChanged {
+                    task_id,
+                    rev: board.rev,
+                    board,
+                },
+            )
+            .await;
+            drop(guard);
+            Ok::<_, String>(())
+        })
+        .await
+        .map_err(|error| Board(error.to_string()))?
+        .map_err(Board)?;
+    } else {
+        drop(guard);
     }
+    Ok((chat_id, meta))
+}
+
+fn should_list_task_trajectory(role: &str, link_type: Option<&str>) -> bool {
+    role != "planner"
+        || matches!(
+            link_type,
+            Some("handoff" | "mode_transition" | "branch") | None
+        )
 }
 
 async fn read_planner_id_counter(task_dir: &Path) -> u32 {
@@ -2822,7 +2914,10 @@ pub async fn next_planner_chat_id(
         })
         .max()
         .unwrap_or(0);
-    let reserved = max_listed.max(read_planner_id_counter(&task_dir).await) + 1;
+    let reserved = max_listed
+        .max(read_planner_id_counter(&task_dir).await)
+        .checked_add(1)
+        .ok_or("Task planner ID counter exhausted")?;
     write_planner_id_counter(&task_dir, reserved).await?;
     drop(guard);
 
@@ -2852,13 +2947,15 @@ pub async fn list_task_trajectories_for(
     agent_id: Option<&str>,
     caller: crate::chat::trajectory_index::TrajectoryIndexListingCaller,
 ) -> Result<Vec<TrajectoryInfo>, String> {
+    use crate::chat::trajectories::{could_be_legacy_planner_copy, is_legacy_planner_copy};
+    use crate::chat::trajectory_index::TrajectoryIndexListingCaller::TaskTrajectoryApi;
+
     let task_dir = find_task_dir(gcx.clone(), task_id).await?;
-    let mut trajectory_dirs = vec![get_task_trajectory_dir(&task_dir, role, agent_id)];
-    if role == "planner"
-        && agent_id.is_none()
-        && caller == crate::chat::trajectory_index::TrajectoryIndexListingCaller::TaskTrajectoryApi
-    {
-        trajectory_dirs.push(get_task_trajectory_dir(&task_dir, "linked", None));
+    let mut trajectory_dirs = vec![role];
+    let planner_api_listing =
+        role == "planner" && agent_id.is_none() && caller == TaskTrajectoryApi;
+    if planner_api_listing {
+        trajectory_dirs.push("linked");
     }
 
     let coordinator = AppState::from_gcx(gcx.clone())
@@ -2866,7 +2963,8 @@ pub async fn list_task_trajectories_for(
         .chat
         .trajectory_index_coordinator;
     let mut entries = Vec::new();
-    for traj_dir in trajectory_dirs {
+    for stored_role in trajectory_dirs {
+        let traj_dir = get_task_trajectory_dir(&task_dir, stored_role, agent_id);
         if !traj_dir.exists() {
             continue;
         }
@@ -2879,19 +2977,38 @@ pub async fn list_task_trajectories_for(
             )
             .await?
             .iter()
-            .cloned(),
+            .cloned()
+            .map(|entry| (stored_role, entry)),
         );
     }
+    let legacy_board = if planner_api_listing
+        && entries.iter().any(|(role, entry)| {
+            *role == "planner"
+                && could_be_legacy_planner_copy(&entry.mode, entry.link_type.as_deref())
+        }) {
+        load_board_unlocked(gcx.clone(), task_id).await.ok()
+    } else {
+        None
+    };
     let mut trajectories: Vec<TrajectoryInfo> = entries
         .iter()
-        .filter(|entry| {
-            should_list_task_trajectory(
-                role,
-                &serde_json::json!({ "link_type": entry.link_type.as_deref() }),
-            )
+        .filter(|(stored_role, entry)| {
+            should_list_task_trajectory(stored_role, entry.link_type.as_deref())
         })
-        .map(|entry| TrajectoryInfo {
+        .map(|(stored_role, entry)| TrajectoryInfo {
             id: entry.id.clone(),
+            task_role: match *stored_role {
+                "linked" => Some("linked".into()),
+                "planner" => {
+                    let linked =
+                        could_be_legacy_planner_copy(&entry.mode, entry.link_type.as_deref())
+                            && legacy_board
+                                .as_ref()
+                                .is_some_and(|board| is_legacy_planner_copy(board, &entry.id));
+                    Some(if linked { "linked" } else { "planner" }.into())
+                }
+                _ => None,
+            },
             title: entry.title.clone(),
             created_at: entry.created_at.clone(),
             updated_at: entry.updated_at.clone(),

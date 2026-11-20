@@ -2421,15 +2421,33 @@ mod tests {
         })
     }
 
-    async fn create_concurrent_planner(app: AppState, task_id: String) -> String {
+    async fn transfer_to_concurrent_planner(app: AppState, task_id: String) -> String {
         let created = crate::http::routers::v1::tasks::handle_create_planner_chat(
-            State(app),
-            Path(task_id),
+            State(app.clone()),
+            Path(task_id.clone()),
             hyper::body::Bytes::new(),
         )
         .await
         .unwrap();
-        created.0["chat_id"].as_str().unwrap().to_string()
+        let target = created.0["chat_id"].as_str().unwrap().to_string();
+        let before = crate::tasks::storage::load_board(app.gcx.clone(), &task_id)
+            .await
+            .unwrap();
+        assert_eq!(before.owner_chat_id.as_deref(), Some("restart-source"));
+        crate::tasks::goal::move_planner_controller(
+            app.gcx.clone(),
+            &task_id,
+            "restart-source",
+            &target,
+        )
+        .await
+        .unwrap();
+        let after = crate::tasks::storage::load_board(app.gcx, &task_id)
+            .await
+            .unwrap();
+        assert_eq!(after.owner_chat_id.as_deref(), Some(target.as_str()));
+        assert_eq!(after.owner_epoch, before.owner_epoch + 1);
+        target
     }
 
     async fn restart_planner(app: AppState, task_id: String) -> ScratchError {
@@ -2466,7 +2484,7 @@ mod tests {
         let (race_app, race_task) = (app.clone(), task.clone());
         let reconstruction: futures::future::BoxFuture<'static, _> = Box::pin(async move {
             owner_tx
-                .send(create_concurrent_planner(race_app, race_task).await)
+                .send(transfer_to_concurrent_planner(race_app, race_task).await)
                 .unwrap();
             reconstructed_planner_context().await
         });
@@ -2519,7 +2537,7 @@ mod tests {
         let (race_app, race_task) = (app.clone(), task.clone());
         let staged_race: futures::future::BoxFuture<'static, ()> = Box::pin(async move {
             owner_tx
-                .send(create_concurrent_planner(race_app, race_task).await)
+                .send(transfer_to_concurrent_planner(race_app, race_task).await)
                 .unwrap();
         });
         let error = crate::tools::tool_handoff_to_mode::AFTER_PLANNER_STAGED

@@ -520,8 +520,16 @@ export interface TrajectoryInfo {
   updated_at: string;
   session_state?: string;
   mode?: string;
+  task_role?: string;
   parent_id?: string;
   waiting_for_card_ids?: string[];
+}
+
+interface CreatePlannerChatResult {
+  chat_id: string;
+  mode?: string;
+  task_role?: string;
+  planner_chat_id?: string | null;
 }
 
 export const tasksApi = createApi({
@@ -775,7 +783,7 @@ export const tasksApi = createApi({
     }),
 
     createPlannerChat: builder.mutation<
-      { chat_id: string; mode?: string },
+      CreatePlannerChatResult,
       { taskId: string; mode?: string }
     >({
       queryFn: async ({ taskId, mode }, api, _opts, baseQuery) => {
@@ -789,7 +797,7 @@ export const tasksApi = createApi({
           body: mode ? { mode } : {},
         });
         if (result.error) return { error: result.error };
-        return { data: result.data as { chat_id: string; mode?: string } };
+        return { data: result.data as CreatePlannerChatResult };
       },
       invalidatesTags: (_result, _error, { taskId }) => [
         { type: "TaskTrajectories", id: `${taskId}/planner` },

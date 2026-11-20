@@ -18,11 +18,7 @@ pub(crate) fn current_planner_chat_id(board: &TaskBoard) -> Option<String> {
         .filter(|owner| !owner.trim().is_empty())
 }
 
-pub(crate) fn is_legacy_owner_candidate(id: &str, thread: &ThreadParams) -> bool {
-    let Some(meta) = thread.task_meta.as_ref() else {
-        return false;
-    };
-    let mode = crate::yaml_configs::customization_registry::map_legacy_mode_to_id(&thread.mode);
+fn is_standalone_planner(id: &str, meta: &crate::chat::types::TaskMeta) -> bool {
     meta.role == "planner"
         && meta.agent_id.is_none()
         && meta.card_id.is_none()
@@ -30,13 +26,83 @@ pub(crate) fn is_legacy_owner_candidate(id: &str, thread: &ThreadParams) -> bool
             .planner_chat_id
             .as_deref()
             .is_none_or(|planner| planner == id)
-        && thread.buddy_meta.is_none()
-        && !matches!(mode, "" | "task_agent")
-        && match thread.link_type.as_deref() {
-            None => thread.parent_id.is_none(),
+}
+
+fn is_legacy_planner_origin(mode: &str, link: Option<&str>, has_parent: bool) -> bool {
+    let mode = crate::yaml_configs::customization_registry::map_legacy_mode_to_id(mode);
+    !matches!(mode, "" | "task_agent")
+        && match link {
+            None => !has_parent,
             Some("handoff" | "mode_transition" | "branch") => mode == "task_planner",
             _ => false,
         }
+}
+
+pub(crate) fn is_legacy_owner_candidate(id: &str, thread: &ThreadParams) -> bool {
+    thread
+        .task_meta
+        .as_ref()
+        .is_some_and(|meta| is_standalone_planner(id, meta))
+        && thread.buddy_meta.is_none()
+        && is_legacy_planner_origin(
+            &thread.mode,
+            thread.link_type.as_deref(),
+            thread.parent_id.is_some(),
+        )
+}
+
+pub(crate) fn is_saved_legacy_owner_candidate(
+    id: &str,
+    saved: &crate::chat::trajectories::LoadedTrajectory,
+) -> bool {
+    !saved.initial_planner_creation && is_legacy_owner_candidate(id, &saved.thread)
+}
+
+pub(super) async fn has_saved_planner_history(
+    planner_dir: &std::path::Path,
+    task_id: &str,
+) -> Result<bool, String> {
+    use crate::chat::trajectories::{INITIAL_PLANNER_CREATION_KEY, PLANNER_BOOTSTRAP_CREATION};
+    match tokio::fs::symlink_metadata(planner_dir).await {
+        Ok(meta) if meta.is_dir() => {}
+        Ok(_) => return Err("Unsafe task planner directory".into()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.to_string()),
+    }
+    let mut entries = tokio::fs::read_dir(planner_dir)
+        .await
+        .map_err(|error| error.to_string())?;
+    while let Some(entry) = entries.next_entry().await.map_err(|e| e.to_string())? {
+        let path = entry.path();
+        if entry.file_name() == "index.json"
+            || path.extension().is_none_or(|ext| ext != "json")
+            || !entry
+                .file_type()
+                .await
+                .map_err(|e| e.to_string())?
+                .is_file()
+        {
+            continue;
+        }
+        let body = tokio::fs::read(&path).await.map_err(|e| e.to_string())?;
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(&body) else {
+            return Ok(true);
+        };
+        let id = value["id"].as_str().unwrap_or_default();
+        let mode = value["mode"].as_str().unwrap_or("agent");
+        let link = value["link_type"].as_str();
+        let creation = value[INITIAL_PLANNER_CREATION_KEY].as_str();
+        if path.file_stem().and_then(|stem| stem.to_str()) == Some(id)
+            && value["buddy_meta"].is_null()
+            && serde_json::from_value::<crate::chat::types::TaskMeta>(value["task_meta"].clone())
+                .is_ok_and(|meta| meta.task_id == task_id && is_standalone_planner(id, &meta))
+            && creation != Some(PLANNER_BOOTSTRAP_CREATION)
+            && is_legacy_planner_origin(mode, link, !value["parent_id"].is_null())
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 pub(crate) async fn repair_owner_on_planner_use(
@@ -118,7 +184,7 @@ pub(crate) async fn repair_owner_on_planner_use(
                 continue;
             };
             if saved.source_path != candidate_path
-                || !is_legacy_owner_candidate(id, &saved.thread)
+                || !is_saved_legacy_owner_candidate(id, &saved)
                 || !saved
                     .thread
                     .task_meta
